@@ -32,7 +32,7 @@ const ffprobePath = resolveExecutablePath("ffprobe");
 
 async function getVideoDuration(inputPath: string): Promise<number> {
   try {
-    const { stdout } = await execFileAsync(ffprobePath, [
+    const { stdout, stderr } = await execFileAsync(ffprobePath, [
       "-v",
       "error",
       "-show_entries",
@@ -42,7 +42,12 @@ async function getVideoDuration(inputPath: string): Promise<number> {
       inputPath,
     ]);
 
-    const parsed = JSON.parse(stdout ?? "{}") as { format?: { duration?: string | number } };
+    const jsonText =
+      stdout?.trim()?.length ? stdout :
+      stderr?.trim()?.length ? stderr : "{}";
+    const parsed = JSON.parse(jsonText) as {
+      format?: { duration?: string | number };
+    };
     const durationValue = parsed.format?.duration;
     const duration = typeof durationValue === "string" ? Number(durationValue) : durationValue;
     return Number.isFinite(duration) && duration !== undefined ? duration : 0;
@@ -54,6 +59,7 @@ async function getVideoDuration(inputPath: string): Promise<number> {
 async function extractFrameAt(inputPath: string, outputPath: string, timeSec: number): Promise<void> {
   const safeTime = Math.max(0, timeSec);
   await execFileAsync(ffmpegPath, [
+    "-y",
     "-ss",
     safeTime.toString(),
     "-i",
