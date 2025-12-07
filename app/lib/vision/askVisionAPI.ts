@@ -16,23 +16,27 @@ export interface AskVisionAPIParams {
   prompt: string;
 }
 
-type OpenAIMessageContent =
-  | string
-  | Array<
-      | { type: "text"; text?: string }
-      | { type: "output_text"; text?: string }
-      | { type: "output_json"; json?: unknown }
-    >;
+// New OpenAI Vision Chat Completions message content type for requests
+type OpenAIRequestMessageContent =
+  | { type: "text"; text: string }
+  | { type: "image_url"; image_url: { url: string } };
+
+type OpenAIResponseMessageContent = string | object;
 
 export async function askVisionAPI({ frames, prompt }: AskVisionAPIParams): Promise<unknown> {
   const apiKey = assertEnv(OPENAI_API_KEY, "OPENAI_API_KEY");
   const model = OPENAI_MODEL === "gpt-4o" || OPENAI_MODEL === "gpt-4o-mini" ? OPENAI_MODEL : "gpt-4o";
 
-  const content = [
-    { type: "input_text" as const, text: prompt },
+  const content: OpenAIRequestMessageContent[] = [
+    {
+      type: "text",
+      text: prompt,
+    },
     ...frames.map((frame) => ({
-      type: "input_image" as const,
-      image_url: { url: `data:${frame.mimeType};base64,${frame.base64Image}` },
+      type: "image_url",
+      image_url: {
+        url: `data:${frame.mimeType};base64,${frame.base64Image}`,
+      },
     })),
   ];
 
@@ -64,21 +68,24 @@ export async function askVisionAPI({ frames, prompt }: AskVisionAPIParams): Prom
   }
 
   const data = (await response.json()) as {
-    choices?: Array<{ message?: { content?: OpenAIMessageContent } }>;
+    choices?: Array<{ message?: { content?: OpenAIResponseMessageContent } }>;
     error?: unknown;
   };
   const output = data.choices?.[0]?.message?.content;
 
-  if (Array.isArray(output)) {
-    const jsonPart = output.find((part) => part && typeof part === "object" && "type" in part && part.type === "output_json");
-    if (jsonPart && typeof jsonPart === "object" && "json" in jsonPart) {
-      return (jsonPart as { json?: unknown }).json;
+  // If content is already a parsed JSON object
+  if (output && typeof output === "object") {
+    return output;
+  }
+
+  // If model returned JSON as a string
+  if (typeof output === "string") {
+    try {
+      return JSON.parse(output);
+    } catch {
+      throw new Error("Response content was string but not valid JSON");
     }
   }
 
-  if (typeof output === "string") {
-    return JSON.parse(output);
-  }
-
-  throw new Error("OpenAI response did not include JSON text output");
+  throw new Error("OpenAI response did not include valid JSON");
 }
