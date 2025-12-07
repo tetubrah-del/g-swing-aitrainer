@@ -9,7 +9,8 @@ import {
   GolfAnalysisResult,
   saveAnalysisResult,
 } from "@/app/golf/types";
-import { createVisionJsonResponse } from "@/app/lib/openai";
+import { askVisionAPI } from "@/app/lib/vision/askVisionAPI";
+import { parseVisionResponse } from "@/app/lib/vision/parseVisionResponse";
 
 // Node.js ランタイムで動かしたい場合は明示（必須ではないが念のため）
 export const runtime = "nodejs";
@@ -55,50 +56,41 @@ export async function POST(req: NextRequest) {
     const mimeType = file.type || "application/octet-stream";
 
     const prompt = [
-      "You are a professional Japanese golf swing coach. Analyze the provided swing image or video frame and respond ONLY with JSON that matches the following TypeScript type (no prose or commentary):",
-      JSON.stringify(
-        {
-          score: 85,
-          estimatedOnCourseScore: "90〜100",
-          estimatedLevel: "中級寄りの初級",
-          goodPoints: ["..."],
-          badPoints: ["..."],
-          priorityFix: ["..."],
-          drills: ["..."],
-          improvement: {
-            hasPrevious: Boolean(meta.previousAnalysisId),
-            direction: "改善している/悪化している/変わらない などの短文",
-            changeSummary: "前回との変化（ない場合は簡潔に理由を記載）",
-            nextFocus: "次に意識するポイント",
-          },
-          summary: "総評の短文",
-        },
-        null,
-        2
-      ),
-      "Requirements:",
-      "- score should be an integer between 0 and 100.",
-      "- Keep bullet items concise in Japanese (<= 60 characters when possible).",
-      `- If information is uncertain, make a best-effort estimate based on the visual cues and the following meta data: handedness=${meta.handedness}, clubType=${meta.clubType}, level=${meta.level}.`,
+      "You are a professional Japanese golf swing coach.",
+      "Analyze the provided swing image or video frame and return ONLY strict JSON matching the schema without any explanation or code fences.",
+      "Fields must be concise and based solely on the visual cues.",
+      `Player info: handedness=${meta.handedness}, clubType=${meta.clubType}, level=${meta.level}.`,
     ].join("\n");
 
-    const visionResponse = await createVisionJsonResponse({
+    const visionText = await askVisionAPI({
       prompt,
       base64Image,
       mimeType,
     });
 
-    let parsed: GolfAnalysisResult;
-    try {
-      parsed = JSON.parse(visionResponse.outputText) as GolfAnalysisResult;
-    } catch (parseError) {
-      console.error(
-        "[golf/analyze] failed to parse JSON:",
-        parseError,
-        visionResponse.outputText
-      );
-      throw new Error("Failed to parse JSON from Vision API response");
-    }
+    const visionResult = parseVisionResponse(visionText);
+
+    const score = Math.max(
+      0,
+      Math.min(
+        100,
+        100 - Math.abs(visionResult.club_path) * 2 - Math.abs(visionResult.impact_face_angle) * 3
+      )
+    );
+
+    const parsed = {
+      metrics: {
+        impact_face_angle: visionResult.impact_face_angle,
+        club_path: visionResult.club_path,
+        body_open_angle: visionResult.body_open_angle,
+        hand_height: visionResult.hand_height,
+        tempo_ratio: visionResult.tempo_ratio,
+      },
+      score,
+      issues: visionResult.issues,
+      advice: visionResult.advice,
+      createdAt: new Date().toISOString(),
+    } as unknown as GolfAnalysisResult;
 
     const analysisId: AnalysisId =
       typeof crypto !== "undefined" && "randomUUID" in crypto
@@ -116,9 +108,6 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({
       analysisId,
-      result: parsed,
-      meta,
-      createdAt: record.createdAt,
     });
   } catch (error) {
     console.error("[golf/analyze] error:", error);
