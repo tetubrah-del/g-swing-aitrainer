@@ -2,20 +2,14 @@
 
 import { useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
-import type { GolfAnalysisResult } from '@/app/golf/types';
-
-type ApiResponse = {
-  analysisId: string;
-  result: GolfAnalysisResult;
-  note?: string;
-};
+import type { GolfAnalysisResponse } from '@/app/golf/types';
 
 const GolfResultPage = () => {
   const params = useParams();
   const router = useRouter();
   const id = (params?.id ?? '') as string;
 
-  const [data, setData] = useState<ApiResponse | null>(null);
+  const [data, setData] = useState<GolfAnalysisResponse | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -37,11 +31,12 @@ const GolfResultPage = () => {
           throw new Error(body.error || '診断結果の取得に失敗しました。');
         }
 
-        const json = (await res.json()) as ApiResponse;
+        const json = (await res.json()) as GolfAnalysisResponse;
         setData(json);
-      } catch (err: any) {
+      } catch (err: unknown) {
         console.error(err);
-        setError(err.message || '予期せぬエラーが発生しました。');
+        const message = err instanceof Error ? err.message : '予期せぬエラーが発生しました。';
+        setError(message);
       } finally {
         setIsLoading(false);
       }
@@ -76,7 +71,8 @@ const GolfResultPage = () => {
     );
   }
 
-  const { result, note } = data;
+  const { result, note, meta, createdAt } = data;
+  const analyzedAt = createdAt ? new Date(createdAt).toLocaleString('ja-JP') : null;
 
   return (
     <main className="min-h-screen bg-slate-950 text-slate-50 flex justify-center">
@@ -85,6 +81,16 @@ const GolfResultPage = () => {
           <div>
             <h1 className="text-2xl font-semibold">AIゴルフスイング診断 – 結果</h1>
             <p className="text-xs text-slate-400 mt-1">Analysis ID: {data.analysisId}</p>
+            {(meta || analyzedAt) && (
+              <div className="mt-1 space-y-0.5 text-xs text-slate-400">
+                {analyzedAt && <p>解析日時: {analyzedAt}</p>}
+                {meta && (
+                  <p>
+                    入力情報: {meta.handedness === 'right' ? '右打ち' : '左打ち'} / {meta.clubType} / {meta.level}
+                  </p>
+                )}
+              </div>
+            )}
           </div>
           <button
             onClick={handleRetry}

@@ -29,6 +29,21 @@ export interface GolfAnalyzeMeta {
   previousAnalysisId?: AnalysisId | null;
 }
 
+export interface GolfAnalysisRecord {
+  id: AnalysisId;
+  result: GolfAnalysisResult;
+  meta: GolfAnalyzeMeta;
+  createdAt: number;
+}
+
+export interface GolfAnalysisResponse {
+  analysisId: AnalysisId;
+  result: GolfAnalysisResult;
+  note?: string;
+  meta?: GolfAnalyzeMeta;
+  createdAt?: number;
+}
+
 // MVP ダミー用のサンプル結果
 export const MOCK_GOLF_ANALYSIS_RESULT: GolfAnalysisResult = {
   score: 78,
@@ -60,12 +75,12 @@ export const MOCK_GOLF_ANALYSIS_RESULT: GolfAnalysisResult = {
 
 // 超シンプルなインメモリストア（MVPダミー用）
 // 本番では DB や外部ストレージに置き換える前提
-const analysisStore = new Map<AnalysisId, GolfAnalysisResult>();
+const analysisStore = new Map<AnalysisId, GolfAnalysisRecord>();
 
-export function saveAnalysisResult(id: AnalysisId, result: GolfAnalysisResult) {
-  analysisStore.set(id, result);
+export function saveAnalysisResult(record: GolfAnalysisRecord) {
+  analysisStore.set(record.id, record);
 }
 
-export function getAnalysisResult(id: AnalysisId): GolfAnalysisResult | undefined {
+export function getAnalysisResult(id: AnalysisId): GolfAnalysisRecord | undefined {
   return analysisStore.get(id);
 }

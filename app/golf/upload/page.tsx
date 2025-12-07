@@ -53,12 +53,13 @@ const GolfUploadPage = () => {
 
       // 結果画面へ遷移
       router.push(`/golf/result/${data.analysisId}`);
-    } catch (err: any) {
-      console.error(err);
-      setError(err.message || '予期せぬエラーが発生しました。');
-    } finally {
-      setIsSubmitting(false);
-    }
+      } catch (err: unknown) {
+        console.error(err);
+        const message = err instanceof Error ? err.message : '予期せぬエラーが発生しました。';
+        setError(message);
+      } finally {
+        setIsSubmitting(false);
+      }
   };
 
   return (
@@ -117,7 +118,7 @@ const GolfUploadPage = () => {
             <label className="block text-sm font-medium">クラブ種別</label>
             <select
               value={clubType}
-              onChange={(e) => setClubType(e.target.value as any)}
+              onChange={(e) => setClubType(e.target.value as typeof clubType)}
               className="w-full rounded-md border border-slate-600 bg-slate-900 px-3 py-2 text-sm"
             >
               <option value="driver">ドライバー</option>
@@ -131,7 +132,7 @@ const GolfUploadPage = () => {
             <label className="block text-sm font-medium">現在のレベル感</label>
             <select
               value={level}
-              onChange={(e) => setLevel(e.target.value as any)}
+              onChange={(e) => setLevel(e.target.value as typeof level)}
               className="w-full rounded-md border border-slate-600 bg-slate-900 px-3 py-2 text-sm"
             >
               <option value="beginner">初心者</option>
