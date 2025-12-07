@@ -2,10 +2,11 @@ import "server-only";
 
 import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
+import { access } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import ffmpegStaticPath from "ffmpeg-static";
+// macOS development prefers brew-installed ffmpeg & ffprobe
 
 const execFileAsync = promisify(execFile);
 
@@ -14,25 +15,51 @@ export type PhaseKey = "address" | "top" | "downswing" | "impact" | "finish";
 export type PhaseFrames = Record<PhaseKey, { base64Image: string; mimeType: string }>;
 export type PhaseFrame = PhaseFrames[PhaseKey];
 
-function resolveExecutablePath(binary: "ffmpeg" | "ffprobe"): string {
+async function resolveExecutablePath(binary: "ffmpeg" | "ffprobe") {
   const envPath = process.env[binary.toUpperCase() + "_PATH"];
   if (envPath && envPath.trim().length > 0) {
     return envPath;
   }
 
-  if (binary === "ffmpeg" && typeof ffmpegStaticPath === "string" && ffmpegStaticPath.length > 0) {
-    return ffmpegStaticPath;
-  }
+  // 1. Homebrew default on Apple Silicon
+  const brewPath = binary === "ffmpeg"
+    ? "/opt/homebrew/bin/ffmpeg"
+    : "/opt/homebrew/bin/ffprobe";
+
+  try {
+    await access(brewPath);
+    return brewPath;
+  } catch {}
+
+  // 2. Intel mac
+  const brewPathIntel = binary === "ffmpeg"
+    ? "/usr/local/bin/ffmpeg"
+    : "/usr/local/bin/ffprobe";
+  try {
+    await access(brewPathIntel);
+    return brewPathIntel;
+  } catch {}
 
   return binary;
 }
 
-const ffmpegPath = resolveExecutablePath("ffmpeg");
-const ffprobePath = resolveExecutablePath("ffprobe");
+let cachedFfmpegPath: string | null = null;
+let cachedFfprobePath: string | null = null;
+
+async function getFfmpegPath() {
+  if (!cachedFfmpegPath) cachedFfmpegPath = await resolveExecutablePath("ffmpeg");
+  return cachedFfmpegPath;
+}
+
+async function getFfprobePath() {
+  if (!cachedFfprobePath) cachedFfprobePath = await resolveExecutablePath("ffprobe");
+  return cachedFfprobePath;
+}
 
 async function getVideoDuration(inputPath: string): Promise<number> {
   try {
-    const { stdout, stderr } = await execFileAsync(ffprobePath, [
+    const ffprobe = await getFfprobePath();
+    const { stdout, stderr } = await execFileAsync(ffprobe, [
       "-v",
       "error",
       "-show_entries",
@@ -58,7 +85,8 @@ async function getVideoDuration(inputPath: string): Promise<number> {
 
 async function extractFrameAt(inputPath: string, outputPath: string, timeSec: number): Promise<void> {
   const safeTime = Math.max(0, timeSec);
-  await execFileAsync(ffmpegPath, [
+  const ffmpeg = await getFfmpegPath();
+  await execFileAsync(ffmpeg, [
     "-y",
     "-ss",
     safeTime.toString(),
