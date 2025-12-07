@@ -1,4 +1,4 @@
-export type VisionAnalysisResponse = {
+export type RawSwingMetrics = {
   impact_face_angle: number;
   club_path: number;
   body_open_angle: number;
@@ -43,7 +43,7 @@ function ensureStringArray(value: unknown, field: string): string[] {
   return strings;
 }
 
-export function parseVisionResponse(rawText: string): VisionAnalysisResponse {
+export function parseVisionResponse(rawText: string): RawSwingMetrics {
   let parsed: unknown;
   try {
     parsed = JSON.parse(rawText);

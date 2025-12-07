@@ -1,4 +1,5 @@
-import { visionResponseSchema } from "./parseVisionResponse";
+import { GolfAnalyzeMeta } from "@/app/golf/types";
+import { SwingFrame } from "./extractFrames";
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_API_BASE = process.env.OPENAI_API_BASE ?? "https://api.openai.com/v1";
@@ -12,43 +13,45 @@ function assertEnv(value: string | undefined, name: string): string {
 }
 
 export interface AskVisionAPIParams {
-  prompt: string;
-  base64Image: string;
-  mimeType: string;
+  frames: SwingFrame[];
+  meta?: GolfAnalyzeMeta;
 }
 
-export async function askVisionAPI({ prompt, base64Image, mimeType }: AskVisionAPIParams): Promise<string> {
+export async function askVisionAPI({ frames, meta }: AskVisionAPIParams): Promise<string> {
   const apiKey = assertEnv(OPENAI_API_KEY, "OPENAI_API_KEY");
   const model = OPENAI_MODEL === "gpt-4o" || OPENAI_MODEL === "gpt-4o-mini" ? OPENAI_MODEL : "gpt-4o";
+
+  const prompt = [
+    "You are a professional Japanese golf swing coach.",
+    "The following images are ordered keyframes from a single swing (takeaway → top → impact → follow-through).",
+    "Analyze all frames holistically and return ONLY one JSON object with this exact schema:",
+    '{"impact_face_angle": number, "club_path": number, "body_open_angle": number, "hand_height": number, "tempo_ratio": number, "issues": string[], "advice": string[]}',
+    "Do not include any explanations or code fences. Values should reflect the overall swing across the frames.",
+    meta
+      ? `Player info: handedness=${meta.handedness}, clubType=${meta.clubType}, level=${meta.level}.`
+      : undefined,
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  const content = [
+    { type: "input_text" as const, text: prompt },
+    ...frames.map((frame) => ({
+      type: "input_image" as const,
+      image_url: { url: `data:${frame.mimeType};base64,${frame.base64Image}` },
+    })),
+  ];
 
   const payload = {
     model,
     messages: [
       {
         role: "user" as const,
-        content: [
-          { type: "text" as const, text: prompt },
-          {
-            type: "image_url" as const,
-            image_url: {
-              url: `data:${mimeType};base64,${base64Image}`,
-            },
-          },
-        ],
+        content,
       },
     ],
     response_format: {
-      type: "json_schema",
-      json_schema: {
-        name: "golf_swing_analysis",
-        strict: true,
-        schema: {
-          type: "object",
-          properties: visionResponseSchema.properties,
-          required: Object.keys(visionResponseSchema.properties ?? {}),
-          additionalProperties: false,
-        },
-      },
+      type: "json_object",
     },
   };
 
