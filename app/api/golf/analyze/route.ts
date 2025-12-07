@@ -10,10 +10,89 @@ import {
   saveAnalysisResult,
 } from "@/app/golf/types";
 import { askVisionAPI } from "@/app/lib/vision/askVisionAPI";
-import { parseVisionResponse } from "@/app/lib/vision/parseVisionResponse";
+import { extractFrames } from "@/app/lib/vision/extractFrames";
+import { parseVisionResponse, RawSwingMetrics } from "@/app/lib/vision/parseVisionResponse";
 
 // Node.js ランタイムで動かしたい場合は明示（必須ではないが念のため）
 export const runtime = "nodejs";
+
+function calculateScore(metrics: RawSwingMetrics): number {
+  let score = 100 - Math.abs(metrics.club_path) * 2 - Math.abs(metrics.impact_face_angle) * 3;
+  score = Math.max(0, Math.min(100, Math.round(score)));
+  return score;
+}
+
+function estimateOnCourseScore(score: number): string {
+  if (score >= 90) return "70〜80";
+  if (score >= 80) return "80〜90";
+  if (score >= 65) return "90〜100";
+  return "100以上";
+}
+
+function estimateLevel(score: number): string {
+  if (score >= 90) return "上級に近い中級";
+  if (score >= 80) return "中級";
+  if (score >= 65) return "初級〜中級";
+  return "初級";
+}
+
+function buildGoodPoints(metrics: RawSwingMetrics): string[] {
+  const points: string[] = [];
+
+  if (Math.abs(metrics.club_path) <= 3) {
+    points.push("クラブパスがニュートラルに近く、方向性が安定しています。");
+  }
+
+  if (Math.abs(metrics.impact_face_angle) <= 2) {
+    points.push("インパクト時のフェース角が安定しており、ミスの幅が小さいです。");
+  }
+
+  if (metrics.tempo_ratio >= 2 && metrics.tempo_ratio <= 3.2) {
+    points.push("テークバックとダウンスイングのリズムバランスが自然です。");
+  }
+
+  if (!points.length) {
+    points.push("全体的なフォームに一定の再現性があります。");
+  }
+
+  return points;
+}
+
+function buildAnalysisResult(metrics: RawSwingMetrics, score: number, meta: GolfAnalyzeMeta): GolfAnalysisResult {
+  const badPoints = metrics.issues.length
+    ? metrics.issues
+    : ["大きな欠点は少ないですが、フェース管理と体の回転を継続して確認しましょう。"]; 
+  const priorityFix = badPoints.length ? badPoints.slice(0, 2) : ["スイングの再現性を高めるための基礎練習を継続しましょう。"]; 
+  const drills = metrics.advice.length
+    ? metrics.advice
+    : ["素振りでリズムと体の回転を確認するドリルを毎日行ってください。"]; 
+
+  const summary = `総合スコア${score}点。クラブパス${metrics.club_path.toFixed(1)}°、フェース角${metrics.impact_face_angle.toFixed(
+    1
+  )}°、テンポ比${metrics.tempo_ratio.toFixed(2)}。主な改善点: ${badPoints[0]}`;
+
+  return {
+    score,
+    estimatedOnCourseScore: estimateOnCourseScore(score),
+    estimatedLevel: estimateLevel(score),
+    goodPoints: buildGoodPoints(metrics),
+    badPoints,
+    priorityFix,
+    drills,
+    improvement: {
+      hasPrevious: Boolean(meta.previousAnalysisId),
+      direction: meta.previousAnalysisId ? "前回比較データは未保存" : "初回診断のため比較なし",
+      changeSummary: meta.previousAnalysisId
+        ? "前回データがないため比較できませんでした。"
+        : "初回診断のため比較データはありません。",
+      nextFocus: drills[0] ?? "スイングのリズムとフェース管理を継続して確認しましょう。",
+    },
+    summary,
+    metrics,
+    issues: metrics.issues,
+    advice: metrics.advice,
+  };
+}
 
 export async function POST(req: NextRequest) {
   try {
@@ -26,80 +105,38 @@ export async function POST(req: NextRequest) {
     const previousAnalysisId = formData.get("previousAnalysisId");
 
     if (!(file instanceof File)) {
-      return NextResponse.json(
-        { error: "file is required" },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: "file is required" }, { status: 400 });
     }
 
-    if (
-      typeof handedness !== "string" ||
-      typeof clubType !== "string" ||
-      typeof level !== "string"
-    ) {
-      return NextResponse.json(
-        { error: "handedness, clubType, level are required" },
-        { status: 400 }
-      );
+    if (typeof handedness !== "string" || typeof clubType !== "string" || typeof level !== "string") {
+      return NextResponse.json({ error: "handedness, clubType, level are required" }, { status: 400 });
     }
 
     const meta: GolfAnalyzeMeta = {
       handedness: handedness as GolfAnalyzeMeta["handedness"],
       clubType: clubType as GolfAnalyzeMeta["clubType"],
       level: level as GolfAnalyzeMeta["level"],
-      previousAnalysisId:
-        typeof previousAnalysisId === "string" ? (previousAnalysisId as AnalysisId) : null,
+      previousAnalysisId: typeof previousAnalysisId === "string" ? (previousAnalysisId as AnalysisId) : null,
     };
 
     const buffer = Buffer.from(await file.arrayBuffer());
-    const base64Image = buffer.toString("base64");
     const mimeType = file.type || "application/octet-stream";
 
-    const prompt = [
-      "You are a professional Japanese golf swing coach.",
-      "Analyze the provided swing image or video frame and return ONLY strict JSON matching the schema without any explanation or code fences.",
-      "Fields must be concise and based solely on the visual cues.",
-      `Player info: handedness=${meta.handedness}, clubType=${meta.clubType}, level=${meta.level}.`,
-    ].join("\n");
+    const frames = await extractFrames({ buffer, mimeType, maxFrames: 6 });
+    if (!frames.length) {
+      throw new Error("No frames extracted from input");
+    }
 
-    const visionText = await askVisionAPI({
-      prompt,
-      base64Image,
-      mimeType,
-    });
-
-    const visionResult = parseVisionResponse(visionText);
-
-    const score = Math.max(
-      0,
-      Math.min(
-        100,
-        100 - Math.abs(visionResult.club_path) * 2 - Math.abs(visionResult.impact_face_angle) * 3
-      )
-    );
-
-    const parsed = {
-      metrics: {
-        impact_face_angle: visionResult.impact_face_angle,
-        club_path: visionResult.club_path,
-        body_open_angle: visionResult.body_open_angle,
-        hand_height: visionResult.hand_height,
-        tempo_ratio: visionResult.tempo_ratio,
-      },
-      score,
-      issues: visionResult.issues,
-      advice: visionResult.advice,
-      createdAt: new Date().toISOString(),
-    } as unknown as GolfAnalysisResult;
+    const jsonText = await askVisionAPI({ frames, meta });
+    const metrics = parseVisionResponse(jsonText);
+    const score = calculateScore(metrics);
 
     const analysisId: AnalysisId =
-      typeof crypto !== "undefined" && "randomUUID" in crypto
-        ? crypto.randomUUID()
-        : `golf-${Date.now()}`;
+      typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `golf-${Date.now()}`;
 
     const record: GolfAnalysisRecord = {
       id: analysisId,
-      result: parsed,
+      result: buildAnalysisResult(metrics, score, meta),
       meta,
       createdAt: Date.now(),
     };
@@ -111,10 +148,6 @@ export async function POST(req: NextRequest) {
     });
   } catch (error) {
     console.error("[golf/analyze] error:", error);
-    const message = error instanceof Error ? error.message : "internal server error";
-    return NextResponse.json(
-      { error: message },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: "internal server error" }, { status: 500 });
   }
 }

@@ -1,5 +1,7 @@
 // app/golf/types.ts
 
+import { RawSwingMetrics } from "@/app/lib/vision/parseVisionResponse";
+
 // 診断結果を識別するID
 export type AnalysisId = string;
 
@@ -19,6 +21,9 @@ export interface GolfAnalysisResult {
     nextFocus: string; // 次に意識すべきポイント
   };
   summary: string; // まとめの短文
+  metrics?: RawSwingMetrics;
+  issues?: string[];
+  advice?: string[];
 }
 
 // POST /api/golf/analyze に渡ってくるメタ情報
