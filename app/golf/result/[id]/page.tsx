@@ -57,6 +57,32 @@ const GolfResultPage = () => {
     router.push('/golf/upload');
   };
 
+  // ❗ Hooks は必ずトップレベルで呼ぶ必要がある
+  const analyzedAt = useMemo(() => {
+    if (!data?.createdAt) return null;
+    return new Date(data.createdAt).toLocaleString('ja-JP');
+  }, [data?.createdAt]);
+
+  const phaseList = useMemo(() => {
+    if (!data?.result?.phases) return [];
+
+    return phaseOrder.map((key) => ({
+      key,
+      label:
+        key === 'address'
+          ? 'アドレス'
+          : key === 'top'
+            ? 'トップ'
+            : key === 'downswing'
+              ? 'ダウンスイング'
+              : key === 'impact'
+                ? 'インパクト'
+                : 'フィニッシュ',
+      data: data.result.phases[key],
+    }));
+  }, [data?.result?.phases]);
+
+  // ▼ early return は Hooks の後に置く
   if (isLoading) {
     return (
       <main className="min-h-screen flex items-center justify-center bg-slate-950 text-slate-50">
@@ -79,27 +105,7 @@ const GolfResultPage = () => {
     );
   }
 
-  const { result, note, meta, createdAt } = data;
-  const analyzedAt = createdAt ? new Date(createdAt).toLocaleString('ja-JP') : null;
-
-  const phaseList = useMemo(
-    () =>
-      phaseOrder.map((key) => ({
-        key,
-        label:
-          key === 'address'
-            ? 'アドレス'
-            : key === 'top'
-              ? 'トップ'
-              : key === 'downswing'
-                ? 'ダウンスイング'
-                : key === 'impact'
-                  ? 'インパクト'
-                  : 'フィニッシュ',
-        data: result?.phases?.[key],
-      })),
-    [result]
-  );
+  const { result, note, meta } = data;
 
   return (
     <main className="min-h-screen bg-slate-950 text-slate-50 flex justify-center">
