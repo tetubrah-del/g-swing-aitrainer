@@ -10,6 +10,8 @@ declare module "fluent-ffmpeg" {
   }
 
   interface FfmpegCommand {
+    inputOptions(options: string[]): FfmpegCommand;
+    frames(count: number): FfmpegCommand;
     outputOptions(options: string[]): FfmpegCommand;
     output(path: string): FfmpegCommand;
     on(event: "end" | "error", handler: Callback): FfmpegCommand;
@@ -19,6 +21,7 @@ declare module "fluent-ffmpeg" {
   interface FfmpegStatic {
     (input: string): FfmpegCommand;
     ffprobe(input: string, cb: (err: Error | null, data: FfprobeData) => void): void;
+    setFfmpegPath(path: string | null | undefined): void;
   }
 
   const ffmpeg: FfmpegStatic;

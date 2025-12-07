@@ -1,5 +1,4 @@
-import { GolfAnalyzeMeta } from "@/app/golf/types";
-import { SwingFrame } from "./extractFrames";
+import { PhaseFrame } from "./extractPhaseFrames";
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_API_BASE = process.env.OPENAI_API_BASE ?? "https://api.openai.com/v1";
@@ -13,26 +12,21 @@ function assertEnv(value: string | undefined, name: string): string {
 }
 
 export interface AskVisionAPIParams {
-  frames: SwingFrame[];
-  meta?: GolfAnalyzeMeta;
+  frames: PhaseFrame[];
+  prompt: string;
 }
 
-export async function askVisionAPI({ frames, meta }: AskVisionAPIParams): Promise<string> {
+type OpenAIMessageContent =
+  | string
+  | Array<
+      | { type: "text"; text?: string }
+      | { type: "output_text"; text?: string }
+      | { type: "output_json"; json?: unknown }
+    >;
+
+export async function askVisionAPI({ frames, prompt }: AskVisionAPIParams): Promise<unknown> {
   const apiKey = assertEnv(OPENAI_API_KEY, "OPENAI_API_KEY");
   const model = OPENAI_MODEL === "gpt-4o" || OPENAI_MODEL === "gpt-4o-mini" ? OPENAI_MODEL : "gpt-4o";
-
-  const prompt = [
-    "You are a professional Japanese golf swing coach.",
-    "The following images are ordered keyframes from a single swing (takeaway → top → impact → follow-through).",
-    "Analyze all frames holistically and return ONLY one JSON object with this exact schema:",
-    '{"impact_face_angle": number, "club_path": number, "body_open_angle": number, "hand_height": number, "tempo_ratio": number, "issues": string[], "advice": string[]}',
-    "Do not include any explanations or code fences. Values should reflect the overall swing across the frames.",
-    meta
-      ? `Player info: handedness=${meta.handedness}, clubType=${meta.clubType}, level=${meta.level}.`
-      : undefined,
-  ]
-    .filter(Boolean)
-    .join("\n");
 
   const content = [
     { type: "input_text" as const, text: prompt },
@@ -69,12 +63,22 @@ export async function askVisionAPI({ frames, meta }: AskVisionAPIParams): Promis
     throw new Error(`OpenAI API request failed: ${response.status} ${response.statusText} ${errorBody}`);
   }
 
-  const data = (await response.json()) as { choices?: Array<{ message?: { content?: string } }>; error?: unknown };
+  const data = (await response.json()) as {
+    choices?: Array<{ message?: { content?: OpenAIMessageContent } }>;
+    error?: unknown;
+  };
   const output = data.choices?.[0]?.message?.content;
 
-  if (!output || typeof output !== "string") {
-    throw new Error("OpenAI response did not include JSON text output");
+  if (Array.isArray(output)) {
+    const jsonPart = output.find((part) => part && typeof part === "object" && "type" in part && part.type === "output_json");
+    if (jsonPart && typeof jsonPart === "object" && "json" in jsonPart) {
+      return (jsonPart as { json?: unknown }).json;
+    }
   }
 
-  return output.trim();
+  if (typeof output === "string") {
+    return JSON.parse(output);
+  }
+
+  throw new Error("OpenAI response did not include JSON text output");
 }
