@@ -18,7 +18,7 @@ export async function GET(
   const { id } = await context.params;
   const analysisId = id as AnalysisId;
 
-  const stored: GolfAnalysisResult | undefined = getAnalysisResult(analysisId);
+  const stored = getAnalysisResult(analysisId);
 
   if (!stored) {
     return NextResponse.json(
@@ -34,7 +34,9 @@ export async function GET(
   return NextResponse.json(
     {
       analysisId,
-      result: stored,
+      result: stored.result as GolfAnalysisResult,
+      meta: stored.meta,
+      createdAt: stored.createdAt,
     },
     { status: 200 }
   );
