@@ -1,29 +1,28 @@
 // app/golf/types.ts
 
-import { RawSwingMetrics } from "@/app/lib/vision/parseVisionResponse";
-
 // 診断結果を識別するID
 export type AnalysisId = string;
 
-// ゴルフ診断結果の型
-export interface GolfAnalysisResult {
-  score: number; // スイングスコア（100点満点）
-  estimatedOnCourseScore: string; // 例: "90〜100"
-  estimatedLevel: string; // 例: "中級寄りの初級"
-  goodPoints: string[];
-  badPoints: string[];
-  priorityFix: string[]; // 最優先で直すポイント
-  drills: string[]; // ドリル（回数/セットなど含めてもOK）
-  improvement: {
-    hasPrevious: boolean;
-    direction: string; // "改善している" / "悪化している" / "変わらない" など
-    changeSummary: string; // 前回からどう変わったか
-    nextFocus: string; // 次に意識すべきポイント
+export interface SwingPhase {
+  score: number; // 0-20
+  good: string[];
+  issues: string[];
+  advice: string[];
+}
+
+export interface SwingAnalysis {
+  analysisId: string;
+  createdAt: string;
+  totalScore: number; // 0-100
+  phases: {
+    address: SwingPhase;
+    top: SwingPhase;
+    downswing: SwingPhase;
+    impact: SwingPhase;
+    finish: SwingPhase;
   };
-  summary: string; // まとめの短文
-  metrics?: RawSwingMetrics;
-  issues?: string[];
-  advice?: string[];
+  summary: string;
+  recommendedDrills?: string[];
 }
 
 // POST /api/golf/analyze に渡ってくるメタ情報
@@ -36,56 +35,39 @@ export interface GolfAnalyzeMeta {
 
 export interface GolfAnalysisRecord {
   id: AnalysisId;
-  result: GolfAnalysisResult;
+  result: SwingAnalysis;
   meta: GolfAnalyzeMeta;
   createdAt: number;
 }
 
 export interface GolfAnalysisResponse {
   analysisId: AnalysisId;
-  result: GolfAnalysisResult;
+  result: SwingAnalysis;
   note?: string;
   meta?: GolfAnalyzeMeta;
   createdAt?: number;
 }
 
 // MVP ダミー用のサンプル結果
-export const MOCK_GOLF_ANALYSIS_RESULT: GolfAnalysisResult = {
-  score: 78,
-  estimatedOnCourseScore: "90〜100",
-  estimatedLevel: "中級寄りの初級",
-  goodPoints: [
-    "アドレスのバランスがよく、下半身が安定している",
-    "トップでクラブフェースが大きく開きすぎず、スクエア寄りで収まっている",
-  ],
-  badPoints: [
-    "ダウンスイングで下半身のリードが弱く、上体から動き出している",
-    "インパクトゾーンで右肩が前に出て、フェースのコントロールが不安定",
-  ],
-  priorityFix: [
-    "ダウンスイングで『左腰→おへそ→胸』の順に回す感覚を身につける",
-  ],
-  drills: [
-    "素振りドリル：右足を後ろに引いてかかと立ちにした状態で、腰リードを意識して素振りを20回 × 3セット",
-    "ハーフスイングドリル：9時〜3時のハーフスイングで、フィニッシュまで振り切るショットを30球。すべて同じリズムで打つことを意識",
-  ],
-  improvement: {
-    hasPrevious: false,
-    direction: "初回診断のため比較なし",
-    changeSummary: "",
-    nextFocus: "まずは腰リードの感覚を身につけて、フェースコントロールの安定を優先しましょう。",
+export const MOCK_GOLF_ANALYSIS_RESULT: SwingAnalysis = {
+  analysisId: "sample-id",
+  createdAt: new Date().toISOString(),
+  totalScore: 72,
+  phases: {
+    address: { score: 15, good: ["安定した前傾角"], issues: ["グリップが弱い"], advice: ["前傾を保ちつつグリッププレッシャーを均等に。"] },
+    top: { score: 14, good: ["コンパクトなトップ"], issues: ["リストが硬い"], advice: ["トップでリストを柔らかく使い、捻転差を感じましょう。"] },
+    downswing: {
+      score: 13,
+      good: ["下半身リードの意識"],
+      issues: ["体の開きが早い"],
+      advice: ["切り返し後も胸を閉じておき、下半身主導でインパクトへ。"],
+    },
+    impact: { score: 15, good: ["ハンドファースト気味"], issues: ["フェース管理が不安定"], advice: ["右手を我慢し、フェースローテーションを抑えて打ち抜きましょう。"] },
+    finish: { score: 15, good: ["バランスの良いフィニッシュ"], issues: ["重心が右に残る"], advice: ["左足にしっかり体重を乗せて胸をターゲットへ向ける。"] },
   },
-  summary: "全体としては中級レベルに近いポテンシャルがありますが、下半身リードとフェース管理が安定するとスコア90切りが見えてきます。",
+  summary: "全体として良いリズムですが、フェース管理と体重移動が伸びしろです。",
+  recommendedDrills: [
+    "ハーフスイングでフェース向きを一定に保つ練習を20球×3セット",
+    "左足一本素振りでフィニッシュまでバランスを取る練習を15回×2セット",
+  ],
 };
-
-// 超シンプルなインメモリストア（MVPダミー用）
-// 本番では DB や外部ストレージに置き換える前提
-const analysisStore = new Map<AnalysisId, GolfAnalysisRecord>();
-
-export function saveAnalysisResult(record: GolfAnalysisRecord) {
-  analysisStore.set(record.id, record);
-}
-
-export function getAnalysisResult(id: AnalysisId): GolfAnalysisRecord | undefined {
-  return analysisStore.get(id);
-}

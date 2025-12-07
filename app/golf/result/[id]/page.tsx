@@ -1,8 +1,16 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import type { GolfAnalysisResponse } from '@/app/golf/types';
+
+const phaseOrder: Array<keyof GolfAnalysisResponse['result']['phases']> = [
+  'address',
+  'top',
+  'downswing',
+  'impact',
+  'finish',
+];
 
 const GolfResultPage = () => {
   const params = useParams();
@@ -74,6 +82,25 @@ const GolfResultPage = () => {
   const { result, note, meta, createdAt } = data;
   const analyzedAt = createdAt ? new Date(createdAt).toLocaleString('ja-JP') : null;
 
+  const phaseList = useMemo(
+    () =>
+      phaseOrder.map((key) => ({
+        key,
+        label:
+          key === 'address'
+            ? 'アドレス'
+            : key === 'top'
+              ? 'トップ'
+              : key === 'downswing'
+                ? 'ダウンスイング'
+                : key === 'impact'
+                  ? 'インパクト'
+                  : 'フィニッシュ',
+        data: result?.phases?.[key],
+      })),
+    [result]
+  );
+
   return (
     <main className="min-h-screen bg-slate-950 text-slate-50 flex justify-center">
       <div className="w-full max-w-3xl px-4 py-8 space-y-6">
@@ -106,22 +133,24 @@ const GolfResultPage = () => {
           </p>
         )}
 
-        {/* スコア・レベル */}
+        {/* スコア */}
         <section className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-          <div className="rounded-xl bg-slate-900/70 border border-slate-700 p-4">
-            <p className="text-xs text-slate-400">スイングスコア</p>
-            <p className="text-3xl font-bold mt-1">{result.score}</p>
+          <div className="rounded-xl bg-slate-900/70 border border-slate-700 p-4 sm:col-span-1">
+            <p className="text-xs text-slate-400">総合スイングスコア</p>
+            <p className="text-3xl font-bold mt-1">{result.totalScore}</p>
             <p className="text-xs text-slate-400 mt-1">（100点満点）</p>
           </div>
-          <div className="rounded-xl bg-slate-900/70 border border-slate-700 p-4">
-            <p className="text-xs text-slate-400">推定ラウンドスコア</p>
-            <p className="text-xl font-semibold mt-1">{result.estimatedOnCourseScore}</p>
-          </div>
-          <div className="rounded-xl bg-slate-900/70 border border-slate-700 p-4">
-            <p className="text-xs text-slate-400">レベル診断</p>
-            <p className="text-sm font-semibold mt-1">
-              {result.estimatedLevel}
-            </p>
+          <div className="rounded-xl bg-slate-900/70 border border-slate-700 p-4 sm:col-span-2">
+            <p className="text-xs text-slate-400">推奨ドリル</p>
+            {result.recommendedDrills && result.recommendedDrills.length > 0 ? (
+              <ul className="list-disc pl-5 space-y-1 text-sm mt-2">
+                {result.recommendedDrills.map((drill, i) => (
+                  <li key={i}>{drill}</li>
+                ))}
+              </ul>
+            ) : (
+              <p className="text-sm text-slate-300 mt-2">ドリル情報がありません。</p>
+            )}
           </div>
         </section>
 
@@ -133,62 +162,56 @@ const GolfResultPage = () => {
           </p>
         </section>
 
-        {/* 良い点 / 改善点 */}
-        <section className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div className="rounded-xl bg-slate-900/70 border border-slate-700 p-4">
-            <h2 className="text-sm font-semibold mb-2">良い点</h2>
-            <ul className="list-disc pl-5 space-y-1 text-sm">
-              {result.goodPoints.map((g, i) => (
-                <li key={i}>{g}</li>
-              ))}
-            </ul>
+        {/* フェーズごとの評価 */}
+        <section className="rounded-xl bg-slate-900/70 border border-slate-700 p-4 space-y-4">
+          <h2 className="text-sm font-semibold">フェーズ別評価</h2>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            {phaseList.map(({ key, label, data }) => {
+              if (!data) {
+                return (
+                  <div key={key} className="rounded-lg border border-slate-800 bg-slate-950/60 p-3 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <p className="text-sm font-semibold">{label}</p>
+                    </div>
+                    <div className="text-sm text-amber-300">解析データが不足しています（{key}）。</div>
+                  </div>
+                );
+              }
+
+              return (
+                <div key={key} className="rounded-lg border border-slate-800 bg-slate-950/60 p-3 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <p className="text-sm font-semibold">{label}</p>
+                    <span className="text-xs text-slate-300">スコア: {data.score}/20</span>
+                  </div>
+                  <div>
+                    <p className="text-xs text-slate-400">良い点</p>
+                    <ul className="list-disc pl-4 text-sm space-y-1">
+                      {data.good.map((g, i) => (
+                        <li key={i}>{g}</li>
+                      ))}
+                    </ul>
+                  </div>
+                  <div>
+                    <p className="text-xs text-slate-400">改善点</p>
+                    <ul className="list-disc pl-4 text-sm space-y-1">
+                      {data.issues.map((b, i) => (
+                        <li key={i}>{b}</li>
+                      ))}
+                    </ul>
+                  </div>
+                  <div>
+                    <p className="text-xs text-slate-400">アドバイス</p>
+                    <ul className="list-disc pl-4 text-sm space-y-1">
+                      {data.advice.map((adv, i) => (
+                        <li key={i}>{adv}</li>
+                      ))}
+                    </ul>
+                  </div>
+                </div>
+              );
+            })}
           </div>
-          <div className="rounded-xl bg-slate-900/70 border border-slate-700 p-4">
-            <h2 className="text-sm font-semibold mb-2">改善したい点</h2>
-            <ul className="list-disc pl-5 space-y-1 text-sm">
-              {result.badPoints.map((b, i) => (
-                <li key={i}>{b}</li>
-              ))}
-            </ul>
-          </div>
-        </section>
-
-        {/* 優先改善ポイント */}
-        <section className="rounded-xl bg-slate-900/70 border border-emerald-500/60 p-4">
-          <h2 className="text-sm font-semibold mb-2 text-emerald-300">
-            最優先で直すポイント
-          </h2>
-          <ul className="list-disc pl-5 space-y-1 text-sm">
-            {result.priorityFix.map((p, i) => (
-              <li key={i}>{p}</li>
-            ))}
-          </ul>
-        </section>
-
-        {/* ドリル */}
-        <section className="rounded-xl bg-slate-900/70 border border-slate-700 p-4">
-          <h2 className="text-sm font-semibold mb-2">おすすめドリル</h2>
-          <ul className="list-disc pl-5 space-y-1 text-sm">
-            {result.drills.map((d, i) => (
-              <li key={i}>{d}</li>
-            ))}
-          </ul>
-        </section>
-
-        {/* 前回比較 */}
-        <section className="rounded-xl bg-slate-900/70 border border-slate-700 p-4">
-          <h2 className="text-sm font-semibold mb-2">前回との比較</h2>
-          {result.improvement.hasPrevious ? (
-            <div className="space-y-1 text-sm">
-              <p>方向性：{result.improvement.direction}</p>
-              <p>変化の概要：{result.improvement.changeSummary}</p>
-              <p>次に意識したいこと：{result.improvement.nextFocus}</p>
-            </div>
-          ) : (
-            <p className="text-sm text-slate-400">
-              初回診断のため、比較データはありません。
-            </p>
-          )}
         </section>
       </div>
     </main>

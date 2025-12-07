@@ -1,24 +1,20 @@
 // app/api/golf/result/[id]/route.ts
 
 import { NextRequest, NextResponse } from "next/server";
-import {
-  AnalysisId,
-  GolfAnalysisResult,
-  MOCK_GOLF_ANALYSIS_RESULT,
-  getAnalysisResult,
-} from "@/app/golf/types";
+import { AnalysisId, GolfAnalysisResponse, MOCK_GOLF_ANALYSIS_RESULT } from "@/app/golf/types";
+import { getAnalysis } from "@/app/lib/store";
 
 export const runtime = "nodejs";
 
 export async function GET(
   _req: NextRequest,
   context: { params: Promise<{ id: string }> }
-) {
+): Promise<NextResponse<GolfAnalysisResponse>> {
   // Next.js 16: params は Promise のため await 必須
   const { id } = await context.params;
   const analysisId = id as AnalysisId;
 
-  const stored = getAnalysisResult(analysisId);
+  const stored = getAnalysis(analysisId);
 
   if (!stored) {
     return NextResponse.json(
@@ -34,7 +30,7 @@ export async function GET(
   return NextResponse.json(
     {
       analysisId,
-      result: stored.result as GolfAnalysisResult,
+      result: stored.result,
       meta: stored.meta,
       createdAt: stored.createdAt,
     },
