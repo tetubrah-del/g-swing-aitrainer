@@ -1,10 +1,28 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import ffmpeg from "fluent-ffmpeg";
+import * as ffmpeg from "fluent-ffmpeg";
 import ffmpegPath from "ffmpeg-static";
 
-ffmpeg.setFfmpegPath(ffmpegPath);
+// fluent-ffmpeg is CJS, so call via cast
+(ffmpeg as any).setFfmpegPath(ffmpegPath as string);
+
+type FfprobeData = {
+  format?: {
+    duration?: number;
+  };
+};
+
+type FfmpegCommand = {
+  inputOptions(options: string[]): FfmpegCommand;
+  frames(count: number): FfmpegCommand;
+  outputOptions(options: string[]): FfmpegCommand;
+  output(path: string): FfmpegCommand;
+  on(event: "end" | "error", handler: (...args: unknown[]) => void): FfmpegCommand;
+  run(): FfmpegCommand;
+};
+
+const createFfmpegCommand = ffmpeg as unknown as (input: string) => FfmpegCommand;
 
 export type PhaseKey = "address" | "top" | "downswing" | "impact" | "finish";
 
@@ -13,7 +31,7 @@ export type PhaseFrame = PhaseFrames[PhaseKey];
 
 async function getVideoDuration(inputPath: string): Promise<number> {
   return new Promise<number>((resolve, reject) => {
-    ffmpeg.ffprobe(inputPath, (err, data) => {
+    ffmpeg.ffprobe(inputPath, (err: Error | null, data: FfprobeData) => {
       if (err) {
         reject(err);
         return;
@@ -27,7 +45,7 @@ async function getVideoDuration(inputPath: string): Promise<number> {
 
 async function extractFrameAt(inputPath: string, outputPath: string, timeSec: number): Promise<void> {
   return new Promise<void>((resolve, reject) => {
-    ffmpeg(inputPath)
+    createFfmpegCommand(inputPath)
       .inputOptions(["-ss", Math.max(0, timeSec).toString()])
       .frames(1)
       .outputOptions(["-q:v", "2"])

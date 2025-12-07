@@ -1,7 +1,28 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import ffmpeg from "fluent-ffmpeg";
+import * as ffmpeg from "fluent-ffmpeg";
+import ffmpegPath from "ffmpeg-static";
+
+// fluent-ffmpeg is CJS, so call via cast
+(ffmpeg as any).setFfmpegPath(ffmpegPath as string);
+
+type FfprobeData = {
+  format?: {
+    duration?: number;
+  };
+};
+
+type FfmpegCommand = {
+  inputOptions(options: string[]): FfmpegCommand;
+  frames(count: number): FfmpegCommand;
+  outputOptions(options: string[]): FfmpegCommand;
+  output(path: string): FfmpegCommand;
+  on(event: "end" | "error", handler: (...args: unknown[]) => void): FfmpegCommand;
+  run(): FfmpegCommand;
+};
+
+const createFfmpegCommand = ffmpeg as unknown as (input: string) => FfmpegCommand;
 
 export type SwingFrame = {
   base64Image: string;
@@ -10,7 +31,7 @@ export type SwingFrame = {
 
 async function getVideoDuration(inputPath: string): Promise<number> {
   return new Promise<number>((resolve, reject) => {
-    ffmpeg.ffprobe(inputPath, (err, data) => {
+    ffmpeg.ffprobe(inputPath, (err: Error | null, data: FfprobeData) => {
       if (err) {
         reject(err);
         return;
@@ -27,7 +48,7 @@ async function extractVideoFrames(inputPath: string, outputDir: string, frameCou
   const fps = duration > 0 ? frameCount / duration : frameCount;
 
   await new Promise<void>((resolve, reject) => {
-    ffmpeg(inputPath)
+    createFfmpegCommand(inputPath)
       .outputOptions(["-vf", `fps=${fps}`])
       .output(path.join(outputDir, "frame-%02d.jpg"))
       .on("error", reject)
