@@ -1,65 +1,72 @@
+import "server-only";
+
+import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import * as ffmpeg from "fluent-ffmpeg";
-import ffmpegPath from "ffmpeg-static";
+import { promisify } from "node:util";
+import ffmpegStaticPath from "ffmpeg-static";
 
-// fluent-ffmpeg is CJS, so call via cast
-(ffmpeg as any).setFfmpegPath(ffmpegPath as string);
-
-// Use the callable export even when transpiled ESM provides a namespace object
-const ffmpegModule = (ffmpeg as any).default ?? ffmpeg;
-
-type FfprobeData = {
-  format?: {
-    duration?: number;
-  };
-};
-
-type FfmpegCommand = {
-  inputOptions(options: string[]): FfmpegCommand;
-  frames(count: number): FfmpegCommand;
-  outputOptions(options: string[]): FfmpegCommand;
-  output(path: string): FfmpegCommand;
-  on(event: "end" | "error", handler: (...args: unknown[]) => void): FfmpegCommand;
-  run(): FfmpegCommand;
-};
-
-const createFfmpegCommand = ffmpegModule as unknown as (input: string) => FfmpegCommand;
+const execFileAsync = promisify(execFile);
 
 export type PhaseKey = "address" | "top" | "downswing" | "impact" | "finish";
 
 export type PhaseFrames = Record<PhaseKey, { base64Image: string; mimeType: string }>;
 export type PhaseFrame = PhaseFrames[PhaseKey];
 
-async function getVideoDuration(inputPath: string): Promise<number> {
-  return new Promise<number>((resolve, reject) => {
-    ffmpegModule.ffprobe(inputPath, (err: Error | null, data: FfprobeData) => {
-      if (err) {
-        reject(err);
-        return;
-      }
+function resolveExecutablePath(binary: "ffmpeg" | "ffprobe"): string {
+  const envPath = process.env[binary.toUpperCase() + "_PATH"];
+  if (envPath && envPath.trim().length > 0) {
+    return envPath;
+  }
 
-      const duration = data.format?.duration;
-      resolve(Number.isFinite(duration) ? Number(duration) : 0);
-    });
-  });
+  if (binary === "ffmpeg" && typeof ffmpegStaticPath === "string" && ffmpegStaticPath.length > 0) {
+    return ffmpegStaticPath;
+  }
+
+  return binary;
+}
+
+const ffmpegPath = resolveExecutablePath("ffmpeg");
+const ffprobePath = resolveExecutablePath("ffprobe");
+
+async function getVideoDuration(inputPath: string): Promise<number> {
+  try {
+    const { stdout } = await execFileAsync(ffprobePath, [
+      "-v",
+      "error",
+      "-show_entries",
+      "format=duration",
+      "-of",
+      "json",
+      inputPath,
+    ]);
+
+    const parsed = JSON.parse(stdout ?? "{}") as { format?: { duration?: string | number } };
+    const durationValue = parsed.format?.duration;
+    const duration = typeof durationValue === "string" ? Number(durationValue) : durationValue;
+    return Number.isFinite(duration) && duration !== undefined ? duration : 0;
+  } catch (error) {
+    throw new Error(`Failed to probe video duration: ${String(error)}`);
+  }
 }
 
 async function extractFrameAt(inputPath: string, outputPath: string, timeSec: number): Promise<void> {
-  return new Promise<void>((resolve, reject) => {
-    createFfmpegCommand(inputPath)
-      .inputOptions(["-ss", Math.max(0, timeSec).toString()])
-      .frames(1)
-      .outputOptions(["-q:v", "2"])
-      .output(outputPath)
-      .on("end", () => resolve())
-      .on("error", (error: unknown) => reject(error))
-      .run();
-  });
+  const safeTime = Math.max(0, timeSec);
+  await execFileAsync(ffmpegPath, [
+    "-ss",
+    safeTime.toString(),
+    "-i",
+    inputPath,
+    "-frames:v",
+    "1",
+    "-q:v",
+    "2",
+    outputPath,
+  ]);
 }
 
-async function extractVideoPhaseFrames(inputPath: string, mimeType: string): Promise<PhaseFrames> {
+async function extractVideoPhaseFrames(inputPath: string, _mimeType: string): Promise<PhaseFrames> {
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "golf-phase-frames-"));
   try {
     const duration = await getVideoDuration(inputPath);
