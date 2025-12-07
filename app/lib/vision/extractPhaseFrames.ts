@@ -7,6 +7,9 @@ import ffmpegPath from "ffmpeg-static";
 // fluent-ffmpeg is CJS, so call via cast
 (ffmpeg as any).setFfmpegPath(ffmpegPath as string);
 
+// Use the callable export even when transpiled ESM provides a namespace object
+const ffmpegModule = (ffmpeg as any).default ?? ffmpeg;
+
 type FfprobeData = {
   format?: {
     duration?: number;
@@ -22,7 +25,7 @@ type FfmpegCommand = {
   run(): FfmpegCommand;
 };
 
-const createFfmpegCommand = ffmpeg as unknown as (input: string) => FfmpegCommand;
+const createFfmpegCommand = ffmpegModule as unknown as (input: string) => FfmpegCommand;
 
 export type PhaseKey = "address" | "top" | "downswing" | "impact" | "finish";
 
@@ -31,7 +34,7 @@ export type PhaseFrame = PhaseFrames[PhaseKey];
 
 async function getVideoDuration(inputPath: string): Promise<number> {
   return new Promise<number>((resolve, reject) => {
-    ffmpeg.ffprobe(inputPath, (err: Error | null, data: FfprobeData) => {
+    ffmpegModule.ffprobe(inputPath, (err: Error | null, data: FfprobeData) => {
       if (err) {
         reject(err);
         return;
