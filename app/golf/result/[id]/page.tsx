@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import type { GolfAnalysisResponse } from '@/app/golf/types';
+import { saveReport } from '@/app/golf/utils/reportStorage';
 
 const phaseOrder: Array<keyof GolfAnalysisResponse['result']['phases']> = [
   'address',
@@ -52,6 +53,16 @@ const GolfResultPage = () => {
 
     fetchResult();
   }, [id]);
+
+  useEffect(() => {
+    if (!data) return;
+    // 完了結果を localStorage に保存（最大20件）
+    const record: GolfAnalysisResponse = {
+      ...data,
+      createdAt: data.createdAt ?? Date.now(),
+    };
+    saveReport(record);
+  }, [data]);
 
   const handleRetry = () => {
     router.push('/golf/upload');
@@ -106,6 +117,7 @@ const GolfResultPage = () => {
   }
 
   const { result, note, meta } = data;
+  const comparison = result.comparison;
 
   return (
     <main className="min-h-screen bg-slate-950 text-slate-50 flex justify-center">
@@ -167,6 +179,45 @@ const GolfResultPage = () => {
             {result.summary}
           </p>
         </section>
+
+        {comparison && (comparison.improved.length > 0 || comparison.regressed.length > 0) && (
+          <section className="rounded-xl bg-slate-900/70 border border-slate-700 p-4 space-y-3">
+            <h2 className="text-sm font-semibold">前回比 改善ポイント / 悪化ポイント</h2>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <div className="rounded-lg border border-emerald-700/50 bg-emerald-900/20 p-3 space-y-2">
+                <div className="flex items-center justify-between">
+                  <p className="text-sm font-semibold text-emerald-300">改善ポイント</p>
+                  <span className="text-xs text-emerald-200">{comparison.improved.length} 件</span>
+                </div>
+                {comparison.improved.length > 0 ? (
+                  <ul className="list-disc pl-4 text-sm space-y-1 text-emerald-50">
+                    {comparison.improved.map((item, idx) => (
+                      <li key={idx}>{item}</li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="text-xs text-emerald-100">改善点は報告されていません。</p>
+                )}
+              </div>
+
+              <div className="rounded-lg border border-rose-700/50 bg-rose-900/20 p-3 space-y-2">
+                <div className="flex items-center justify-between">
+                  <p className="text-sm font-semibold text-rose-200">悪化ポイント</p>
+                  <span className="text-xs text-rose-100">{comparison.regressed.length} 件</span>
+                </div>
+                {comparison.regressed.length > 0 ? (
+                  <ul className="list-disc pl-4 text-sm space-y-1 text-rose-50">
+                    {comparison.regressed.map((item, idx) => (
+                      <li key={idx}>{item}</li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="text-xs text-rose-100">悪化ポイントは報告されていません。</p>
+                )}
+              </div>
+            </div>
+          </section>
+        )}
 
         {/* フェーズごとの評価 */}
         <section className="rounded-xl bg-slate-900/70 border border-slate-700 p-4 space-y-4">

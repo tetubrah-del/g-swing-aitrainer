@@ -1,4 +1,4 @@
-import { GolfAnalyzeMeta } from "@/app/golf/types";
+import { GolfAnalyzeMeta, SwingAnalysis } from "@/app/golf/types";
 
 function toJapaneseHandedness(handedness: GolfAnalyzeMeta["handedness"]): string {
   return handedness === "left" ? "左打ち" : "右打ち";
@@ -34,7 +34,7 @@ function toJapaneseLevel(level: GolfAnalyzeMeta["level"]): string {
   }
 }
 
-export function genPrompt(meta?: GolfAnalyzeMeta): string {
+export function genPrompt(meta?: GolfAnalyzeMeta, previousReport?: SwingAnalysis | null): string {
   const systemPrompt = [
     "あなたはプロのゴルフスイングコーチです。",
     "ユーザーがアップロードしたスイング画像・動画をもとに、5つのフェーズごとに日本語でスイング分析を行ってください。",
@@ -56,7 +56,29 @@ export function genPrompt(meta?: GolfAnalyzeMeta): string {
     '    "impact": {...},',
     '    "finish": {...}',
     "  },",
-    '  "drills": ["推奨ドリル1", "推奨ドリル2（なければ空配列）"]',
+    '  "drills": ["推奨ドリル1", "推奨ドリル2（なければ空配列）"],',
+    '  "comparison": {',
+    '    "improved": ["改善した点1"],',
+    '    "regressed": ["悪化した点1"]',
+    "  }",
+    "}",
+    "",
+    "summary:",
+    "- 日本語で 5〜8 文",
+    "- フェーズ全体を俯瞰した技術的考察",
+    "- 長所／改善点の総合整理",
+    "- 上達のための方向性",
+    "- 次回チェックすべきポイント",
+    "をわかりやすく、読みやすく記述すること",
+    "",
+    "previousReport:",
+    "- 前回の JSON（summary, scores, phases）を渡された場合は、",
+    "  「前回と比べて改善した点／悪化した点」を 3〜5 個の bullet で返すこと。",
+    "- comparison セクションは任意だが JSON 内に以下形式で追加する：",
+    '',
+    '"comparison": {',
+    '  "improved": ["改善した点1", ...],',
+    '  "regressed": ["悪化した点1", ...]',
     "}",
     "",
     "【重要ルール】",
@@ -81,7 +103,12 @@ export function genPrompt(meta?: GolfAnalyzeMeta): string {
     ...metaLines,
     "",
     "これらを参考に、先ほど示した JSON 構造に沿って日本語で分析してください。",
-  ].join("\n");
+    "詳細な総評を必ず含めること。",
+  ];
 
-  return `${systemPrompt}\n\n${userPrompt}`;
+  if (previousReport) {
+    userPrompt.push("", "【前回の診断結果（比較用）】", JSON.stringify(previousReport, null, 2));
+  }
+
+  return `${systemPrompt}\n\n${userPrompt.join("\n")}`;
 }

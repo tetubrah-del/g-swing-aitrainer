@@ -23,6 +23,10 @@ export interface SwingAnalysis {
   };
   summary: string;
   recommendedDrills?: string[];
+  comparison?: {
+    improved: string[];
+    regressed: string[];
+  };
 }
 
 // POST /api/golf/analyze に渡ってくるメタ情報
