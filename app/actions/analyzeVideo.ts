@@ -57,7 +57,7 @@ async function createPhaseFramesFromVideo(file: File, buffer: Buffer): Promise<P
   form.append("file", nodeBlob, safeName);
   form.append("model", VIDEO_EMBED_MODEL);
 
-  const response = await fetch(`${OPENAI_API_BASE}/embeddings-video`, {
+  const response = await fetch(`${OPENAI_API_BASE}/embeddings`, {
     method: "POST",
     headers: { Authorization: `Bearer ${apiKey}` },
     body: form,
