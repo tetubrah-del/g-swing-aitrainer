@@ -27,18 +27,24 @@ export async function askVisionAPI({ frames, prompt }: AskVisionAPIParams): Prom
   const apiKey = assertEnv(OPENAI_API_KEY, "OPENAI_API_KEY");
   const model = OPENAI_MODEL === "gpt-4o" || OPENAI_MODEL === "gpt-4o-mini" ? OPENAI_MODEL : "gpt-4o";
 
-  const content: OpenAIRequestMessageContent[] = [
-    {
-      type: "text",
-      text: prompt,
-    },
-    ...frames.map((frame) => ({
+  // 🔥 OpenAI Vision 正しい content 構造
+  const content: OpenAIRequestMessageContent[] = [];
+
+  content.push({
+    type: "text",
+    text: prompt,
+  });
+
+  // フレームをすべて画像として追加
+  for (const frame of frames) {
+    if (!frame?.base64Image || !frame?.mimeType) continue;
+    content.push({
       type: "image_url",
       image_url: {
         url: `data:${frame.mimeType};base64,${frame.base64Image}`,
       },
-    })),
-  ];
+    });
+  }
 
   const payload = {
     model,
