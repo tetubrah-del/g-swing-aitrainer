@@ -12,8 +12,14 @@ const execFileAsync = promisify(execFile);
 
 export type PhaseKey = "address" | "top" | "downswing" | "impact" | "finish";
 
-export type PhaseFrames = Record<PhaseKey, { base64Image: string; mimeType: string }>;
-export type PhaseFrame = PhaseFrames[PhaseKey];
+export interface PhaseFrame {
+  id?: string;
+  base64Image: string;
+  mimeType: string;
+  timestampSec?: number;
+}
+
+export type PhaseFrames = Record<PhaseKey, PhaseFrame>;
 
 async function resolveExecutablePath(binary: "ffmpeg" | "ffprobe") {
   const envPath = process.env[binary.toUpperCase() + "_PATH"];
