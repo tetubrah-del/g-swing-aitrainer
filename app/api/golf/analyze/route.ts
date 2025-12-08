@@ -7,7 +7,7 @@ import { askVisionAPI } from "@/app/lib/vision/askVisionAPI";
 import { extractPhaseFrames, PhaseKey } from "@/app/lib/vision/extractPhaseFrames";
 import { genPrompt } from "@/app/lib/vision/genPrompt";
 import { parseMultiPhaseResponse } from "@/app/lib/vision/parseMultiPhaseResponse";
-import { saveAnalysis } from "@/app/lib/store";
+import { getAnalysis, saveAnalysis } from "@/app/lib/store";
 
 // Node.js ランタイムで動かしたい場合は明示（必須ではないが念のため）
 export const runtime = "nodejs";
@@ -23,6 +23,7 @@ export async function POST(req: NextRequest) {
     const clubType = formData.get("clubType");
     const level = formData.get("level");
     const previousAnalysisId = formData.get("previousAnalysisId");
+    const previousReportJson = formData.get("previousReportJson");
 
     if (!(file instanceof File)) {
       return NextResponse.json({ error: "file is required" }, { status: 400 });
@@ -43,7 +44,24 @@ export async function POST(req: NextRequest) {
     const mimeType = file.type || "application/octet-stream";
 
     const frames = await extractPhaseFrames({ buffer, mimeType });
-    const prompt = genPrompt(meta);
+
+    let previousReport: SwingAnalysis | null = null;
+    if (typeof previousAnalysisId === "string") {
+      previousReport = getAnalysis(previousAnalysisId)?.result ?? null;
+    }
+
+    if (!previousReport && typeof previousReportJson === "string") {
+      try {
+        const parsed = JSON.parse(previousReportJson) as SwingAnalysis;
+        if (parsed && typeof parsed === "object") {
+          previousReport = parsed;
+        }
+      } catch (error) {
+        console.warn("[golf/analyze] failed to parse previousReportJson", error);
+      }
+    }
+
+    const prompt = genPrompt(meta, previousReport);
 
     const orderedFrames = phaseOrder.map((phase) => frames[phase]);
     const jsonText = await askVisionAPI({ frames: orderedFrames, prompt });
@@ -64,6 +82,7 @@ export async function POST(req: NextRequest) {
       phases: parsed.phases,
       summary: parsed.summary,
       recommendedDrills: parsed.recommendedDrills ?? [],
+      comparison: parsed.comparison,
     };
 
     const record: GolfAnalysisRecord = {

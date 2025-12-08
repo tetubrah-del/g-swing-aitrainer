@@ -10,6 +10,7 @@ type RawResponse = Partial<Record<PhaseKey, unknown>> & {
   summary?: unknown;
   recommendedDrills?: unknown;
   drills?: unknown;
+  comparison?: unknown;
 };
 
 function ensureString(value: unknown, field: string): string {
@@ -59,6 +60,7 @@ export function parseMultiPhaseResponse(input: unknown): {
   totalScore: number;
   summary: string;
   recommendedDrills?: string[];
+  comparison?: { improved: string[]; regressed: string[] };
   phases: Record<PhaseKey, SwingPhase>;
 } {
   let parsed: RawResponse;
@@ -97,6 +99,13 @@ export function parseMultiPhaseResponse(input: unknown): {
       ? ensureStringArray(parsed.recommendedDrills, "recommendedDrills")
       : parsed.drills
         ? ensureStringArray(parsed.drills, "drills")
+        : undefined,
+    comparison:
+      parsed.comparison && typeof parsed.comparison === "object"
+        ? {
+            improved: ensureStringArray((parsed.comparison as Record<string, unknown>).improved ?? [], "comparison.improved"),
+            regressed: ensureStringArray((parsed.comparison as Record<string, unknown>).regressed ?? [], "comparison.regressed"),
+          }
         : undefined,
     phases,
   };

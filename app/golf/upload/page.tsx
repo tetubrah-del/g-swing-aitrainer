@@ -1,7 +1,9 @@
 'use client';
 
-import { FormEvent, useState } from 'react';
+import { FormEvent, useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
+import { GolfAnalysisResponse } from '@/app/golf/types';
+import { getLatestReport } from '@/app/golf/utils/reportStorage';
 
 const GolfUploadPage = () => {
   const router = useRouter();
@@ -13,8 +15,18 @@ const GolfUploadPage = () => {
     'beginner' | 'beginner_plus' | 'intermediate' | 'upper_intermediate' | 'advanced'
   >('intermediate');
 
+  const [previousReport, setPreviousReport] = useState<GolfAnalysisResponse | null>(null);
+
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    // 前回の診断結果を自動で紐付ける
+    const latest = getLatestReport();
+    if (latest) {
+      setPreviousReport(latest);
+    }
+  }, []);
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
@@ -33,8 +45,10 @@ const GolfUploadPage = () => {
       formData.append('handedness', handedness);
       formData.append('clubType', clubType);
       formData.append('level', level);
-      // 既存データとの比較をするときに previousAnalysisId を追加する想定
-      // formData.append('previousAnalysisId', '...');
+      if (previousReport) {
+        formData.append('previousAnalysisId', previousReport.analysisId);
+        formData.append('previousReportJson', JSON.stringify(previousReport.result));
+      }
 
       const res = await fetch('/api/golf/analyze', {
         method: 'POST',
