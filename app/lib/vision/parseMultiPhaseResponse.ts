@@ -4,9 +4,12 @@ import { PhaseKey } from "./extractPhaseFrames";
 const phaseKeys: PhaseKey[] = ["address", "top", "downswing", "impact", "finish"];
 
 type RawResponse = Partial<Record<PhaseKey, unknown>> & {
+  phases?: Partial<Record<PhaseKey, unknown>>;
+  score?: unknown;
   totalScore?: unknown;
   summary?: unknown;
   recommendedDrills?: unknown;
+  drills?: unknown;
 };
 
 function ensureString(value: unknown, field: string): string {
@@ -71,8 +74,10 @@ export function parseMultiPhaseResponse(input: unknown): {
     throw new Error("Failed to parse Vision API JSON: invalid input type");
   }
 
+  const phaseSource = parsed.phases && typeof parsed.phases === "object" ? parsed.phases : parsed;
+
   const phases = phaseKeys.reduce((acc, key) => {
-    const rawPhase = (parsed as RawResponse)[key];
+    const rawPhase = (phaseSource as RawResponse)[key];
     if (!rawPhase) {
       throw new Error(`Missing phase: ${key}`);
     }
@@ -80,7 +85,7 @@ export function parseMultiPhaseResponse(input: unknown): {
     return acc;
   }, {} as Record<PhaseKey, SwingPhase>);
 
-  const explicitTotal = parsed.totalScore;
+  const explicitTotal = parsed.totalScore ?? parsed.score;
   const totalScore = typeof explicitTotal === "number" && Number.isFinite(explicitTotal)
     ? explicitTotal
     : phaseKeys.reduce((sum, key) => sum + phases[key].score, 0);
@@ -88,7 +93,11 @@ export function parseMultiPhaseResponse(input: unknown): {
   return {
     totalScore: Math.max(0, Math.min(100, Math.round(totalScore))),
     summary: ensureString(parsed.summary ?? "", "summary"),
-    recommendedDrills: parsed.recommendedDrills ? ensureStringArray(parsed.recommendedDrills, "recommendedDrills") : undefined,
+    recommendedDrills: parsed.recommendedDrills
+      ? ensureStringArray(parsed.recommendedDrills, "recommendedDrills")
+      : parsed.drills
+        ? ensureStringArray(parsed.drills, "drills")
+        : undefined,
     phases,
   };
 }
