@@ -113,7 +113,7 @@ const GolfResultPage = () => {
         <header className="flex items-baseline justify-between gap-4">
           <div>
             <h1 className="text-2xl font-semibold">AIゴルフスイング診断 – 結果</h1>
-            <p className="text-xs text-slate-400 mt-1">Analysis ID: {data.analysisId}</p>
+            <p className="text-xs text-slate-400 mt-1">解析ID：{data.analysisId}</p>
             {(meta || analyzedAt) && (
               <div className="mt-1 space-y-0.5 text-xs text-slate-400">
                 {analyzedAt && <p>解析日時: {analyzedAt}</p>}
@@ -188,7 +188,7 @@ const GolfResultPage = () => {
                 <div key={key} className="rounded-lg border border-slate-800 bg-slate-950/60 p-3 space-y-2">
                   <div className="flex items-center justify-between">
                     <p className="text-sm font-semibold">{label}</p>
-                    <span className="text-xs text-slate-300">スコア: {data.score}/20</span>
+                    <span className="text-xs text-slate-300">スコア：{data.score}/20</span>
                   </div>
                   <div>
                     <p className="text-xs text-slate-400">良い点</p>
