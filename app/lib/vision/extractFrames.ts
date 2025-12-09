@@ -38,6 +38,18 @@ export type SwingFrame = {
   mimeType: string;
 };
 
+export interface PhaseFrame {
+  id: string;
+  base64Image: string;
+  mimeType: string;
+  timestampSec?: number;
+}
+
+export type PhaseFrames = Record<
+  "address" | "top" | "downswing" | "impact" | "finish",
+  PhaseFrame
+>;
+
 async function getVideoDuration(inputPath: string): Promise<number> {
   return new Promise<number>((resolve, reject) => {
     ffmpegModule.ffprobe(inputPath, (err: Error | null, data: FfprobeData) => {

@@ -1,41 +1,15 @@
-// app/lib/vision/safeSeek.ts
-export async function safeSeek(
-  video: HTMLVideoElement,
-  time: number,
-  timeoutMs = 1200
-): Promise<void> {
-  return new Promise((resolve, reject) => {
-    let done = false;
+/**
+ * Safari/iOS 対応の video.seek 安定版
+ */
 
-    const onSeeked = (): void => {
-      if (done) return;
-      done = true;
-      cleanup();
+export async function safeSeek(video: HTMLVideoElement, t: number): Promise<void> {
+  return new Promise((resolve) => {
+    const handler = () => {
+      video.removeEventListener("seeked", handler);
       resolve();
     };
-
-    const onError = (): void => {
-      if (done) return;
-      done = true;
-      cleanup();
-      reject(new Error("seek failed"));
-    };
-
-    const cleanup = (): void => {
-      video.removeEventListener("seeked", onSeeked);
-      video.removeEventListener("error", onError);
-    };
-
-    video.addEventListener("seeked", onSeeked);
-    video.addEventListener("error", onError);
-    video.currentTime = Math.min(Math.max(time, 0), video.duration);
-
-    setTimeout(() => {
-      if (!done) {
-        done = true;
-        cleanup();
-        resolve(); // timeout fallback
-      }
-    }, timeoutMs);
+    video.addEventListener("seeked", handler);
+    video.currentTime = t;
   });
 }
+

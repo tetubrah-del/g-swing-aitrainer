@@ -1,19 +1,45 @@
-// app/lib/vision/computeMotionEnergy.ts
+/**
+ * 連続フレームの差分量（Motion Energy）で動きの強度を測定する
+ */
 
-// 差分ベースの motion energy（前フレームとの絶対差分）
-export function computeMotionEnergy(prev: ImageData | null, curr: ImageData): number {
-  if (!prev) return 0;
+import type { PhaseFrame } from "./extractFrames";
 
-  const a = prev.data;
-  const b = curr.data;
-  let sum = 0;
+export async function computeMotionEnergy(frames: PhaseFrame[]): Promise<number[]> {
+  const energies: number[] = [];
+  const canvas = document.createElement("canvas");
+  const ctx = canvas.getContext("2d")!;
 
-  for (let i = 0; i < a.length; i += 4) {
-    const dr = Math.abs(a[i] - b[i]);
-    const dg = Math.abs(a[i + 1] - b[i + 1]);
-    const db = Math.abs(a[i + 2] - b[i + 2]);
-    sum += dr + dg + db;
+  let prevImg: ImageData | null = null;
+
+  for (const frame of frames) {
+    const imgEl = new Image();
+    imgEl.src = `data:${frame.mimeType};base64,${frame.base64Image}`;
+
+    await new Promise((resolve) => (imgEl.onload = resolve));
+
+    canvas.width = imgEl.width;
+    canvas.height = imgEl.height;
+    ctx.drawImage(imgEl, 0, 0);
+
+    const cur = ctx.getImageData(0, 0, canvas.width, canvas.height);
+
+    if (prevImg) {
+      let diff = 0;
+      for (let i = 0; i < cur.data.length; i += 4) {
+        const d =
+          Math.abs(cur.data[i] - prevImg.data[i]) +
+          Math.abs(cur.data[i + 1] - prevImg.data[i + 1]) +
+          Math.abs(cur.data[i + 2] - prevImg.data[i + 2]);
+        diff += d;
+      }
+      energies.push(diff);
+    } else {
+      energies.push(0);
+    }
+
+    prevImg = cur;
   }
 
-  return sum / (curr.width * curr.height);
+  return energies;
 }
+
