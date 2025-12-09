@@ -10,7 +10,8 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 
-export type PhaseKey = "address" | "top" | "downswing" | "impact" | "finish";
+export type PhaseKey =
+  "address" | "backswing" | "top" | "downswing" | "impact" | "finish";
 
 export interface PhaseFrame {
   id?: string;
