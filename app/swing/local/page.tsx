@@ -1,6 +1,7 @@
 "use client";
 
-import { useCallback, useMemo, useState } from "react";
+import React, { useState } from "react";
+import { useCallback, useMemo } from "react";
 import type { ChangeEvent } from "react";
 import {
   ClientPhaseFrames,
