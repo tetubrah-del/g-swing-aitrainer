@@ -4,8 +4,17 @@ import path from "node:path";
 import * as ffmpeg from "fluent-ffmpeg";
 import ffmpegPath from "ffmpeg-static";
 
+type FfmpegModule = {
+  setFfmpegPath: (path: string) => void;
+  ffprobe: (
+    input: string,
+    callback: (err: Error | null, data: FfprobeData) => void
+  ) => void;
+};
+
 // fluent-ffmpeg is CJS, so call via cast
-(ffmpeg as any).setFfmpegPath(ffmpegPath as string);
+const ffmpegModule = ffmpeg as unknown as FfmpegModule;
+ffmpegModule.setFfmpegPath(ffmpegPath as string);
 
 type FfprobeData = {
   format?: {
@@ -29,9 +38,21 @@ export type SwingFrame = {
   mimeType: string;
 };
 
+export interface PhaseFrame {
+  id: string;
+  base64Image: string;
+  mimeType: string;
+  timestampSec?: number;
+}
+
+export type PhaseFrames = Record<
+  "address" | "top" | "downswing" | "impact" | "finish",
+  PhaseFrame
+>;
+
 async function getVideoDuration(inputPath: string): Promise<number> {
   return new Promise<number>((resolve, reject) => {
-    ffmpeg.ffprobe(inputPath, (err: Error | null, data: FfprobeData) => {
+    ffmpegModule.ffprobe(inputPath, (err: Error | null, data: FfprobeData) => {
       if (err) {
         reject(err);
         return;
