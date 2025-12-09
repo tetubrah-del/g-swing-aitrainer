@@ -1,5 +1,8 @@
 "use server";
 
+import {
+  attachPoseKeypoints, defaultDetectKeypoints, determineSwingPhases
+} from "../lib/pose/determineSwingPhases";
 import { askVisionAPI } from "../lib/vision/askVisionAPI";
 import { PhaseFrame } from "../lib/vision/extractPhaseFrames";
 
@@ -57,7 +60,7 @@ async function createPhaseFramesFromVideo(file: File, buffer: Buffer): Promise<P
   form.append("file", nodeBlob, safeName);
   form.append("model", VIDEO_EMBED_MODEL);
 
-  const response = await fetch(`${OPENAI_API_BASE}/embeddings`, {
+  const response = await fetch(`${OPENAI_API_BASE}/embeddings-video`, {
     method: "POST",
     headers: { Authorization: `Bearer ${apiKey}` },
     body: form,
@@ -73,9 +76,7 @@ async function createPhaseFramesFromVideo(file: File, buffer: Buffer): Promise<P
 
   if (!frames.length) throw new Error("Embedding response did not include frames");
 
-  const sortedLimited = [...frames]
-    .sort((a, b) => a.timestamp - b.timestamp)
-    .slice(0, 5);
+  const sortedLimited = [...frames].sort((a, b) => a.timestamp - b.timestamp).slice(0, 120);
 
   return sortedLimited.map((f) => ({
     id: `ts-${f.timestamp.toFixed(2)}`,
@@ -95,10 +96,17 @@ export async function analyzeVideo(formData: FormData): Promise<AnalyzeVideoResu
   const arrayBuffer = await videoFile.arrayBuffer();
   const buffer = Buffer.from(arrayBuffer);
 
-  const phaseFrames = await createPhaseFramesFromVideo(videoFile, buffer);
+  // raw frames (120フレーム)
+  const rawFrames = await createPhaseFramesFromVideo(videoFile, buffer);
+
+  // ★ フェーズ抽出用 fake pose を付与
+  const poseFrames = await attachPoseKeypoints(rawFrames, defaultDetectKeypoints);
+
+  // ★ 6つのフェーズ抽出（address / backswing / top / downswing / impact / finish）
+  const sixPhaseFrames = determineSwingPhases(poseFrames);
 
   const vision = await askVisionAPI({
-    frames: phaseFrames,
+    frames: sixPhaseFrames, // Vision は代表6フェーズのみを解析
     prompt: SWING_ANALYSIS_PROMPT,
   });
 
@@ -111,6 +119,6 @@ export async function analyzeVideo(formData: FormData): Promise<AnalyzeVideoResu
     }
   }
 
-  return { frames: phaseFrames, vision: parsed };
+  return { frames: sixPhaseFrames, rawFrames, vision: parsed };
 }
 
