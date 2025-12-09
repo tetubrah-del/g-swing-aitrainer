@@ -1,63 +1,12 @@
 // Safari 完全対応版 動画フェーズ抽出ユーティリティ
+import { computeMotionEnergy } from "../vision/computeMotionEnergy";
+import { safeSeek } from "../vision/safeSeek";
 
 export interface ExtractedFrame {
   id: string;
   base64: string;
   mimeType: string;
   timestamp: number;
-}
-
-// -----------------------------
-// Safari 用 seek 対応ユーティリティ
-// -----------------------------
-async function waitForEvent(target: EventTarget, event: string): Promise<void> {
-  return new Promise((resolve) => {
-    const handler = () => {
-      target.removeEventListener(event, handler);
-      resolve();
-    };
-    target.addEventListener(event, handler);
-  });
-}
-
-// Safari の seeked 不発バグを回避する safeSeek
-async function safeSeek(video: HTMLVideoElement, t: number): Promise<void> {
-  video.currentTime = t;
-
-  // iOS Safari 対策：再生 → 即停止で seek の内部状態を進めさせる
-  try {
-    const p = video.play();
-    if (p !== undefined) {
-      await p.catch(() => {});
-    }
-    video.pause();
-  } catch {}
-
-  // seeked を待つ（最大 800ms）
-  await Promise.race([
-    waitForEvent(video, "seeked"),
-    new Promise((_, reject) =>
-      setTimeout(() => reject(new Error("seek timeout(safari)")), 800)
-    ),
-  ]);
-}
-
-// -----------------------------
-// Motion Energy 計算
-// -----------------------------
-function computeMotionEnergy(
-  ctx: CanvasRenderingContext2D,
-  w: number,
-  h: number
-): number {
-  const img = ctx.getImageData(0, 0, w, h);
-  const data = img.data;
-
-  let sum = 0;
-  for (let i = 0; i < data.length; i += 4 * 8) {
-    sum += data[i] + data[i + 1] + data[i + 2];
-  }
-  return sum / (w * h);
 }
 
 // -----------------------------
@@ -74,7 +23,22 @@ export async function extractKeyFramesFromVideo(
   video.muted = true;
   video.playsInline = true;
 
-  await waitForEvent(video, "loadedmetadata");
+  await new Promise<void>((resolve, reject) => {
+    const onLoadedMetadata = (): void => {
+      cleanup();
+      resolve();
+    };
+    const onError = (): void => {
+      cleanup();
+      reject(new Error("failed to load metadata"));
+    };
+    const cleanup = (): void => {
+      video.removeEventListener("loadedmetadata", onLoadedMetadata);
+      video.removeEventListener("error", onError);
+    };
+    video.addEventListener("loadedmetadata", onLoadedMetadata);
+    video.addEventListener("error", onError);
+  });
 
   const duration = video.duration;
   if (!isFinite(duration) || duration <= 0) {
@@ -101,11 +65,14 @@ export async function extractKeyFramesFromVideo(
   );
 
   const energies: number[] = [];
+  let prev: ImageData | null = null;
 
   for (const t of times) {
     await safeSeek(video, t);
     sampleCtx.drawImage(video, 0, 0, sampleW, sampleH);
-    energies.push(computeMotionEnergy(sampleCtx, sampleW, sampleH));
+    const img = sampleCtx.getImageData(0, 0, sampleW, sampleH);
+    energies.push(computeMotionEnergy(prev, img));
+    prev = img;
   }
 
   const minEnergy = Math.min(...energies);

@@ -1,3 +1,6 @@
+import { computeMotionEnergy } from "../vision/computeMotionEnergy";
+import { detectPhases } from "../vision/detectPhases";
+import { safeSeek } from "../vision/safeSeek";
 import { ClientPhaseFrame, SwingPhaseKey } from "./swingPhases";
 
 export interface ExtractClientPhaseFramesOptions {
@@ -24,130 +27,8 @@ const phaseOrder: SwingPhaseKey[] = [
   "finish",
 ];
 
-function waitForEvent(target: HTMLMediaElement, event: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const onResolve = (): void => {
-      cleanup();
-      resolve();
-    };
-    const onReject = (): void => {
-      cleanup();
-      reject(new Error(`Failed while waiting for ${event}`));
-    };
-
-    const cleanup = (): void => {
-      target.removeEventListener(event, onResolve);
-      target.removeEventListener("error", onReject);
-    };
-
-    target.addEventListener(event, onResolve, { once: true });
-    target.addEventListener("error", onReject, { once: true });
-  });
-}
-
-async function seekTo(video: HTMLVideoElement, time: number): Promise<void> {
-  if (video.currentTime === time) return;
-  video.currentTime = time;
-  await waitForEvent(video, "seeked");
-}
-
-function computeMotionEnergy(
-  current: Uint8ClampedArray,
-  previous?: Uint8ClampedArray
-): number {
-  if (!previous || previous.length !== current.length) {
-    return 0;
-  }
-
-  let sum = 0;
-  for (let i = 0; i < current.length; i += 4) {
-    const currentGray = (current[i] + current[i + 1] + current[i + 2]) / 3;
-    const prevGray = (previous[i] + previous[i + 1] + previous[i + 2]) / 3;
-    sum += Math.abs(currentGray - prevGray);
-  }
-
-  const pixelCount = current.length / 4;
-  return pixelCount > 0 ? sum / pixelCount : 0;
-}
-
 function clampIndex(index: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, index));
-}
-
-function findExtremeIndex(
-  samples: MotionSample[],
-  startRatio: number,
-  endRatio: number,
-  comparator: (value: number, best: number) => boolean,
-  initialValue: number
-): number {
-  const startIndex = clampIndex(
-    Math.floor(samples.length * startRatio),
-    0,
-    samples.length - 1
-  );
-  const endIndex = clampIndex(
-    Math.ceil(samples.length * endRatio),
-    0,
-    samples.length - 1
-  );
-
-  let bestIndex = startIndex;
-  let bestValue = initialValue;
-
-  for (let i = startIndex; i <= endIndex; i++) {
-    const value = samples[i]?.motionEnergy ?? initialValue;
-    if (comparator(value, bestValue)) {
-      bestValue = value;
-      bestIndex = i;
-    }
-  }
-
-  return bestIndex;
-}
-
-function detectPhaseIndices(samples: MotionSample[]): number[] | null {
-  if (!samples.length) return null;
-
-  const addressIndex = findExtremeIndex(
-    samples,
-    0,
-    0.2,
-    (value, best) => value < best,
-    Number.POSITIVE_INFINITY
-  );
-
-  const topIndex = findExtremeIndex(
-    samples,
-    0.35,
-    0.6,
-    (value, best) => value < best,
-    Number.POSITIVE_INFINITY
-  );
-
-  const impactIndex = findExtremeIndex(
-    samples,
-    0.4,
-    0.8,
-    (value, best) => value > best,
-    Number.NEGATIVE_INFINITY
-  );
-
-  const finishIndex = findExtremeIndex(
-    samples,
-    0.8,
-    1,
-    (value, best) => value < best,
-    Number.POSITIVE_INFINITY
-  );
-
-  const downswingIndex = clampIndex(
-    Math.round((topIndex + impactIndex) / 2),
-    Math.min(topIndex, impactIndex),
-    Math.max(topIndex, impactIndex)
-  );
-
-  return [addressIndex, topIndex, downswingIndex, impactIndex, finishIndex];
 }
 
 function shouldFallback(duration: number, samples: MotionSample[]): boolean {
@@ -194,7 +75,22 @@ export async function extractClientPhaseFrames(
   let captureCanvas: HTMLCanvasElement | null = null;
 
   try {
-    await waitForEvent(video, "loadedmetadata");
+    await new Promise<void>((resolve, reject) => {
+      const onLoadedMetadata = (): void => {
+        cleanup();
+        resolve();
+      };
+      const onError = (): void => {
+        cleanup();
+        reject(new Error("Failed to load video metadata"));
+      };
+      const cleanup = (): void => {
+        video.removeEventListener("loadedmetadata", onLoadedMetadata);
+        video.removeEventListener("error", onError);
+      };
+      video.addEventListener("loadedmetadata", onLoadedMetadata);
+      video.addEventListener("error", onError);
+    });
     const duration = video.duration;
 
     const sampleWidth = 160;
@@ -211,27 +107,39 @@ export async function extractClientPhaseFrames(
       throw new Error("Failed to create canvas context for sampling");
     }
 
-    let previousData: Uint8ClampedArray | undefined;
+    let previousData: ImageData | null = null;
     const totalSamples = Math.max(DEFAULT_SAMPLE_COUNT, 5);
 
     for (let i = 0; i < totalSamples; i++) {
       const timestampSec = (i / (totalSamples - 1)) * duration;
-      await seekTo(video, timestampSec);
+      await safeSeek(video, timestampSec);
       sampleCtx.drawImage(video, 0, 0, sampleWidth, sampleHeight);
       const imageData = sampleCtx.getImageData(0, 0, sampleWidth, sampleHeight);
-      const energy = computeMotionEnergy(imageData.data, previousData);
+      const energy = computeMotionEnergy(previousData, imageData);
       samples.push({ timestampSec, motionEnergy: energy });
-      previousData = new Uint8ClampedArray(imageData.data);
+      previousData = imageData;
     }
 
     const useFallback = shouldFallback(duration, samples);
-    const phaseSamples = useFallback
-      ? getFallbackTimestamps(duration)
-      : samples;
+    const phaseSamples = useFallback ? getFallbackTimestamps(duration) : samples;
 
-    const indices = useFallback ? [0, 1, 2, 3, 4] : detectPhaseIndices(phaseSamples);
-    if (!indices || indices.length !== phaseOrder.length) {
-      return [];
+    let indices: number[];
+    if (useFallback) {
+      indices = [0, 1, 2, 3, 4];
+    } else {
+      const phases = detectPhases(samples.map((sample) => sample.motionEnergy));
+      if (phases) {
+        indices = [
+          phases.address,
+          phases.top,
+          phases.downswing,
+          phases.impact,
+          phases.finish,
+        ];
+      } else {
+        const step = Math.max(1, Math.floor(totalSamples / phaseOrder.length));
+        indices = [0, step * 1, step * 2, step * 3, totalSamples - 1];
+      }
     }
 
     const captureWidth = Math.min(maxWidth, Math.max(1, video.videoWidth));
@@ -252,7 +160,7 @@ export async function extractClientPhaseFrames(
       const phase = phaseOrder[i];
       const sampleIndex = clampIndex(indices[i] ?? 0, 0, phaseSamples.length - 1);
       const timestampSec = phaseSamples[sampleIndex]?.timestampSec ?? 0;
-      await seekTo(video, timestampSec);
+      await safeSeek(video, timestampSec);
       captureCtx.drawImage(video, 0, 0, captureWidth, captureHeight);
       const dataUrl = captureCanvas.toDataURL("image/jpeg", JPEG_QUALITY);
       frames.push({
