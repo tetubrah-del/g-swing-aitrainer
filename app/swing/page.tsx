@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useState, useTransition } from "react";
+import { useState, useTransition } from "react";
 
 import { analyzeVideo, type AnalyzeVideoResult } from "../actions/analyzeVideo";
 
@@ -10,10 +10,8 @@ export default function SwingAnalyzerPage() {
   const [error, setError] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
 
-  const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    const formData = new FormData(event.currentTarget);
-
+  // Server Action directly attached to <form action={…}>
+  const handleServerAction = async (formData: FormData) => {
     // Guard against empty submissions
     const file = formData.get("video");
     if (!(file instanceof File)) {
@@ -43,7 +41,11 @@ export default function SwingAnalyzerPage() {
         </p>
       </header>
 
-      <form className="flex flex-col gap-4 rounded-lg border p-4" onSubmit={handleSubmit}>
+      <form
+        className="flex flex-col gap-4 rounded-lg border p-4"
+        action={handleServerAction}
+        encType="multipart/form-data"
+      >
         <label className="flex flex-col gap-2 text-sm font-medium text-gray-800">
           アップロードする動画
           <input
@@ -60,7 +62,7 @@ export default function SwingAnalyzerPage() {
           disabled={isPending}
           className="inline-flex items-center justify-center rounded bg-blue-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-60"
         >
-          {isPending ? "解析中..." : "動画を解析する"}
+          {isPending ? "解析中..." : "動画を解析する（Server Action）"}
         </button>
       </form>
 
