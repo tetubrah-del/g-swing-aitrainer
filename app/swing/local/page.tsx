@@ -107,9 +107,23 @@ export default function LocalSwingPage() {
             ))}
           </div>
           {frames?.debug && (
-            <div className="rounded border border-gray-200 bg-white p-3 shadow-sm">
-              <h3 className="mb-2 text-lg font-semibold">Debug</h3>
-              <pre className="whitespace-pre-wrap text-xs">{JSON.stringify(frames.debug, null, 2)}</pre>
+            <div className="rounded border border-gray-200 bg-white p-3 shadow-sm space-y-3">
+              <h3 className="text-lg font-semibold">Debug</h3>
+              <div>
+                <h4 className="font-medium">推定されたフェーズ位置</h4>
+                <div className="mt-1 text-sm space-y-1">
+                  {Object.entries(frames.debug.indices).map(([k, v]) => (
+                    <div key={k}>
+                      <span className="font-semibold">{k}</span> → {v} frame
+                    </div>
+                  ))}
+                </div>
+              </div>
+              <section className="rounded border p-3 text-xs bg-gray-900 text-green-200">
+                motionEnergy: {frames.debug.energies.length} samples
+                <br />
+                keyframes: {frames.debug.keyframes.length}
+              </section>
             </div>
           )}
         </div>

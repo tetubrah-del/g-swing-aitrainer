@@ -24,15 +24,18 @@ export async function computeMotionEnergy(frames: PhaseFrame[]): Promise<number[
     const cur = ctx.getImageData(0, 0, canvas.width, canvas.height);
 
     if (prevImg) {
+      // 1/8 サンプリングで高速化
       let diff = 0;
-      for (let i = 0; i < cur.data.length; i += 4) {
+      const stride = 8 * 4;
+
+      for (let i = 0; i < cur.data.length; i += stride) {
         const d =
           Math.abs(cur.data[i] - prevImg.data[i]) +
           Math.abs(cur.data[i + 1] - prevImg.data[i + 1]) +
           Math.abs(cur.data[i + 2] - prevImg.data[i + 2]);
         diff += d;
       }
-      energies.push(diff);
+      energies.push(diff / 8);
     } else {
       energies.push(0);
     }

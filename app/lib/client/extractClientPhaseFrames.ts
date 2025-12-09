@@ -34,10 +34,16 @@ export async function extractClientPhaseFrames(file: File): Promise<ClientPhaseF
   const energies = await computeMotionEnergy(keyframes);
 
   // 3️⃣ 動きのパターンから 5 フェーズを推定
-  const phases = detectPhases(keyframes, energies);
+  const phases = detectPhases(energies);
+
+  const clampIndex = (idx: number): number => {
+    if (Number.isNaN(idx)) return 0;
+    return Math.min(Math.max(Math.floor(idx), 0), keyframes.length - 1);
+  };
 
   const get = (idx: number): PhaseFrame => {
-    const f = keyframes[idx];
+    const safeIdx = clampIndex(idx);
+    const f = keyframes[safeIdx];
     return {
       id: f.id,
       base64Image: f.base64Image,

@@ -9,8 +9,6 @@
  - Finish: 動きが収束した終端
  */
 
-import type { PhaseFrame } from "./extractFrames";
-
 export interface PhaseIndices {
   address: number;
   top: number;
@@ -19,48 +17,49 @@ export interface PhaseIndices {
   finish: number;
 }
 
-export function detectPhases(frames: PhaseFrame[], energy: number[]): PhaseIndices {
-  const n = frames.length;
+export function detectPhases(energy: number[]): PhaseIndices {
 
-  // Address = 最初の動きが小さいフレーム
-  let address = 0;
-  for (let i = 1; i < 5 && i < n; i++) {
-    if (energy[i] < energy[address]) address = i;
-  }
+  // --- 移動平均でノイズ除去 ---
+  const smooth = movingAverage(energy, 3);
 
-  // Impact = 全体で最大の動き
-  let impact = energy.indexOf(Math.max(...energy));
+  const maxIdx = smooth.indexOf(Math.max(...smooth)); // impact
+  const minIdx = smooth.indexOf(Math.min(...smooth.slice(0, maxIdx))); // top
 
-  // Top = impact の前で最も動きが少ない谷
-  let top = 0;
-  let minE = Infinity;
-  for (let i = 1; i < impact; i++) {
-    if (energy[i] < minE) {
-      minE = energy[i];
-      top = i;
+  const downswing = Math.max(minIdx + 1, Math.floor((minIdx + maxIdx) / 2));
+
+  // --- address は最初の安定フレーム ---
+  const address = findStableStart(smooth);
+
+  return {
+    address,
+    top: minIdx,
+    downswing,
+    impact: maxIdx,
+    finish: smooth.length - 1,
+  };
+}
+
+function movingAverage(list: number[], w: number) {
+  const out: number[] = [];
+  for (let i = 0; i < list.length; i++) {
+    let s = 0;
+    let c = 0;
+    for (let j = -w; j <= w; j++) {
+      if (list[i + j] != null) {
+        s += list[i + j];
+        c++;
+      }
     }
+    out.push(s / c);
   }
+  return out;
+}
 
-  // Downswing = top 直後〜impact 直前で最も動きが大きい
-  let downswing = top + 1;
-  let maxD = -1;
-  for (let i = top + 1; i < impact; i++) {
-    if (energy[i] > maxD) {
-      maxD = energy[i];
-      downswing = i;
-    }
+// 最初の「一定以上動いていない区間」を address とする
+function findStableStart(energy: number[]) {
+  for (let i = 1; i < 5 && i < energy.length; i++) {
+    if (energy[i] < energy[0] * 1.2) return i;
   }
-
-  // Finish = impact 以降で動きが小さくなった後
-  let finish = n - 1;
-  let minAfter = Infinity;
-  for (let i = impact + 1; i < n; i++) {
-    if (energy[i] < minAfter) {
-      minAfter = energy[i];
-      finish = i;
-    }
-  }
-
-  return { address, top, downswing, impact, finish };
+  return 0;
 }
 

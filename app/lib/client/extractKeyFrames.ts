@@ -6,6 +6,9 @@
 import { safeSeek } from "../vision/safeSeek";
 import type { PhaseFrame } from "../vision/extractFrames";
 
+// 最大キャプチャ幅（4K動画対策）
+const MAX_W = 960;
+
 export async function extractKeyFrames(file: File): Promise<PhaseFrame[]> {
   const url = URL.createObjectURL(file);
   const video = document.createElement("video");
@@ -19,11 +22,20 @@ export async function extractKeyFrames(file: File): Promise<PhaseFrame[]> {
 
   const duration = video.duration;
 
+  if (!duration || duration < 0.2) {
+    throw new Error("動画が短すぎてフレーム抽出できません");
+  }
+
   const frameCount = 30; // 固定サンプリング
   const step = duration / frameCount;
 
   const canvas = document.createElement("canvas");
   const ctx = canvas.getContext("2d")!;
+
+  // 動画サイズを縮小する（メモリ使用量、速度、バッテリー消費の最適化）
+  const scale = video.videoWidth > MAX_W ? MAX_W / video.videoWidth : 1;
+  canvas.width = Math.floor(video.videoWidth * scale);
+  canvas.height = Math.floor(video.videoHeight * scale);
 
   const frames: PhaseFrame[] = [];
 
@@ -31,9 +43,7 @@ export async function extractKeyFrames(file: File): Promise<PhaseFrame[]> {
     const t = step * i;
     await safeSeek(video, t);
 
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    ctx.drawImage(video, 0, 0);
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
     const base64 = canvas.toDataURL("image/jpeg").split(",")[1];
     frames.push({
