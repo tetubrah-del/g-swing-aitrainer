@@ -87,61 +87,97 @@ async function readFileAsDataUrl(file: File): Promise<string> {
   });
 }
 
+/**
+ * 🎯 動画の任意タイムスタンプのフレームを JPEG で切り出す
+ */
+async function captureFrameAt(videoEl: HTMLVideoElement, ts: number): Promise<string> {
+  return new Promise((resolve) => {
+    videoEl.currentTime = ts;
+
+    videoEl.onseeked = () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = videoEl.videoWidth;
+      canvas.height = videoEl.videoHeight;
+      const ctx = canvas.getContext('2d');
+      ctx?.drawImage(videoEl, 0, 0);
+      resolve(canvas.toDataURL('image/jpeg'));
+    };
+  });
+}
+
+/**
+ * 🎦 動画 → RawFrame[] を生成する
+ * フルフレーム抽出ではなく、6フェーズ抽出に必要なポイントだけ取得。
+ */
+async function extractFramesFromVideo(file: File): Promise<RawFrame[]> {
+  const url = URL.createObjectURL(file);
+  const video = document.createElement('video');
+  video.src = url;
+  video.crossOrigin = 'anonymous';
+
+  // 動画のメタデータ読み込み待ち
+  await new Promise<void>((resolve) => {
+    video.onloadedmetadata = () => resolve();
+  });
+
+  const duration = video.duration;
+
+  // Address = 0s
+  const addressImg = await captureFrameAt(video, 0);
+
+  // Backswing = 5% 程度
+  const backswingTs = duration * 0.05;
+  const backswingImg = await captureFrameAt(video, backswingTs);
+
+  // Top = 40%〜55% 付近（スイング動画の特性上このあたり）
+  const topTs = duration * 0.45;
+  const topImg = await captureFrameAt(video, topTs);
+
+  // Downswing = Top の後（60%）
+  const downswingTs = duration * 0.6;
+  const downswingImg = await captureFrameAt(video, downswingTs);
+
+  // Impact = 65〜75% の間がスイング動画では安定
+  const impactTs = duration * 0.68;
+  const impactImg = await captureFrameAt(video, impactTs);
+
+  // Finish = 90% 付近
+  const finishTs = duration * 0.9;
+  const finishImg = await captureFrameAt(video, finishTs);
+
+  return [
+    { timestamp: 0, imageBase64: addressImg, mimeType: 'image/jpeg', duration },
+    { timestamp: backswingTs, imageBase64: backswingImg, mimeType: 'image/jpeg', duration },
+    { timestamp: topTs, imageBase64: topImg, mimeType: 'image/jpeg', duration },
+    { timestamp: downswingTs, imageBase64: downswingImg, mimeType: 'image/jpeg', duration },
+    { timestamp: impactTs, imageBase64: impactImg, mimeType: 'image/jpeg', duration },
+    { timestamp: finishTs, imageBase64: finishImg, mimeType: 'image/jpeg', duration },
+  ];
+}
+
+/**
+ * 🎯 統合関数：画像 or 動画を RawFrame[] に変換
+ */
 async function extractFramesFromFile(file: File): Promise<RawFrame[]> {
+  // 画像ファイル → 単一フレーム
   if (file.type.startsWith('image/')) {
     const dataUrl = await readFileAsDataUrl(file);
     return [
       {
         timestamp: 0,
         imageBase64: dataUrl,
-        mimeType: file.type || 'image/jpeg',
+        mimeType: file.type,
         duration: 0,
       },
     ];
   }
 
-  const url = URL.createObjectURL(file);
-  const video = document.createElement('video');
-  video.src = url;
-  video.preload = 'auto';
-  video.crossOrigin = 'anonymous';
-
-  await new Promise<void>((resolve, reject) => {
-    video.onloadedmetadata = () => resolve();
-    video.onerror = () => reject(new Error('動画の読み込みに失敗しました')); // eslint-disable-line prefer-promise-reject-errors
-  });
-
-  const canvas = document.createElement('canvas');
-  canvas.width = video.videoWidth || 640;
-  canvas.height = video.videoHeight || 360;
-  const ctx = canvas.getContext('2d');
-  if (!ctx) throw new Error('Canvas を初期化できませんでした');
-
-  const duration = Number.isFinite(video.duration) ? video.duration : 0;
-  const step = duration > 0 ? Math.max(1 / 30, duration / 180) : 1 / 30;
-  const frames: RawFrame[] = [];
-
-  const seekTo = (time: number) =>
-    new Promise<void>((resolve) => {
-      const handler = () => {
-        video.removeEventListener('seeked', handler);
-        resolve();
-      };
-      video.addEventListener('seeked', handler);
-      video.currentTime = time;
-    });
-
-  for (let t = 0; duration === 0 ? t < 1 : t <= duration; t += step) {
-    // eslint-disable-next-line no-await-in-loop
-    await seekTo(Math.min(t, Math.max(duration - 0.001, 0)));
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-    const dataUrl = canvas.toDataURL('image/jpeg', 0.92);
-    frames.push({ timestamp: t, imageBase64: dataUrl, mimeType: 'image/jpeg', duration: duration || 1 });
-    if (frames.length > 260) break;
+  // 🎦 動画ファイル → 正しい6フェーズ用 RawFrame[]
+  if (file.type.startsWith('video/')) {
+    return extractFramesFromVideo(file);
   }
 
-  URL.revokeObjectURL(url);
-  return frames;
+  throw new Error(`Unsupported file type: ${file.type}`);
 }
 
 function distance(a: PoseKeypoint | undefined, b: PoseKeypoint | undefined): number {
