@@ -29,6 +29,7 @@ type PhaseFrame = {
   phase: PhaseKey;
   timestamp: number;
   imageBase64: string;
+  imageUrl?: string;
 };
 
 type PoseKeyName =
@@ -91,6 +92,8 @@ type ExtractApiResponse = {
   frames: Record<PhaseKey, { timestamp: number; imageBase64: string }>;
 };
 
+type VisionPhaseMapping = Record<PhaseKey, number>;
+
 async function fetchFramesFromApi(file: File): Promise<RawFrame[]> {
   const formData = new FormData();
   formData.append('file', file);
@@ -120,6 +123,22 @@ async function fetchFramesFromApi(file: File): Promise<RawFrame[]> {
       duration: 0,
     } satisfies RawFrame;
   });
+}
+
+async function runVisionPhaseSelection(frameUrls: string[]): Promise<VisionPhaseMapping> {
+  const res = await fetch('/api/golf/extract/vision', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ frames: frameUrls }),
+  });
+
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || 'Vision extract failed');
+  }
+
+  const { mapping } = (await res.json()) as { mapping: VisionPhaseMapping };
+  return mapping;
 }
 
 /**
@@ -417,6 +436,7 @@ async function buildPhaseFrames(file: File): Promise<PhaseFrame[]> {
       phase,
       timestamp: f.timestamp,
       imageBase64: f.imageBase64,
+      imageUrl: f.imageBase64 ?? f.imageUrl,   // ← 動画抽出に対応
     };
   });
 }
@@ -437,6 +457,7 @@ const GolfUploadPage = () => {
   const [isExtracting, setIsExtracting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [phaseFrames, setPhaseFrames] = useState<PhaseFrame[]>([]);
+  const [frameUrls, setFrameUrls] = useState<string[]>([]);
 
   useEffect(() => {
     const latest = getLatestReport();
@@ -448,6 +469,9 @@ const GolfUploadPage = () => {
   useEffect(() => {
     if (!file) {
       setPhaseFrames([]);
+      return;
+    }
+    if (file.type.startsWith('video/')) {
       return;
     }
 
@@ -466,6 +490,66 @@ const GolfUploadPage = () => {
     () => PHASE_ORDER.map((phase) => phaseFrames.find((f) => f.phase === phase)).filter(Boolean) as PhaseFrame[],
     [phaseFrames],
   );
+
+  const onFileSelected = async (selectedFile: File | null) => {
+    setFile(selectedFile);
+    setFrameUrls([]);
+    setPhaseFrames([]);
+    setError(null);
+
+    if (!selectedFile) return;
+
+    if (selectedFile.type.startsWith('video/')) {
+      setIsExtracting(true);
+
+      const form = new FormData();
+      form.append('file', selectedFile);
+
+      try {
+        const res = await fetch('/api/golf/extract/video', {
+          method: 'POST',
+          body: form,
+        });
+
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          throw new Error(data.error || 'フレーム抽出に失敗しました');
+        }
+
+        const data = await res.json();
+        const urls = (data.frames || []).map((f: any) => f.url);
+        setFrameUrls(urls);
+
+        if (!urls.length) {
+          throw new Error('フレーム抽出に失敗しました');
+        }
+
+        const mapping = await runVisionPhaseSelection(urls);
+
+        const mappedFrames = PHASE_ORDER.map((phase) => {
+          const idx = mapping[phase];
+          const safeIndex =
+            typeof idx === 'number' && idx >= 0 && idx < urls.length ? idx : 0;
+          const fallback = urls[0] ?? '';
+
+          return {
+            phase,
+            timestamp: safeIndex / 15,
+            imageBase64: urls[safeIndex] ?? fallback,
+            imageUrl: urls[safeIndex] ?? fallback,
+          } satisfies PhaseFrame;
+        });
+
+        setPhaseFrames(mappedFrames);
+      } catch (err) {
+        console.error(err);
+        setError(err instanceof Error ? err.message : 'フレーム抽出に失敗しました');
+        setPhaseFrames([]);
+      } finally {
+        setIsExtracting(false);
+      }
+    }
+  };
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
@@ -543,7 +627,7 @@ const GolfUploadPage = () => {
                 accept="image/*,video/*"
                 onChange={(e) => {
                   const f = e.target.files?.[0] ?? null;
-                  setFile(f);
+                  onFileSelected(f);
                 }}
                 className="block w-full text-sm border border-slate-600 rounded-lg bg-slate-900 px-3 py-2 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:bg-slate-700 file:text-sm file:font-medium hover:file:bg-slate-600"
               />
@@ -603,6 +687,26 @@ const GolfUploadPage = () => {
               </select>
             </div>
           </div>
+
+          {frameUrls.length > 0 && (
+            <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4 space-y-3">
+              <div>
+                <p className="text-sm font-semibold">抽出されたフレーム一覧</p>
+                <p className="text-xs text-slate-400">/api/golf/extract/video から返却されたフレームURLのプレビュー</p>
+              </div>
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                {frameUrls.map((url, i) => (
+                  <div
+                    key={i}
+                    className="aspect-video w-full overflow-hidden rounded-md border border-slate-800 bg-slate-900"
+                  >
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img src={url} alt={`frame-${i}`} className="h-full w-full object-cover" />
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4 space-y-4">
             <div className="flex items-center justify-between gap-3">
