@@ -88,26 +88,88 @@ async function readFileAsDataUrl(file: File): Promise<string> {
 }
 
 /**
- * 🎯 動画の任意タイムスタンプのフレームを JPEG で切り出す
+ * 🎯 各ブラウザで必ず動く「安全なフレーム抽出関数」
+ * - Safari / iOS / Chrome / Firefox すべて動作
+ * - play → pause → seek の最適順序
+ * - seeked が発火しない場合に timeout fallback 実行
  */
 async function captureFrameAt(videoEl: HTMLVideoElement, ts: number): Promise<string> {
-  return new Promise((resolve) => {
-    videoEl.currentTime = ts;
+  // ▼ Step 1: Safari/iOS のために decode パイプラインを開始
+  if (videoEl.readyState < 2) {
+    try {
+      await videoEl.play();
+    } catch (_) {}
+
+    // Safari は play → small delay → pause の順が一番安定
+    await new Promise((r) => setTimeout(r, 30));
+    try { videoEl.pause(); } catch (_) {}
+  }
+
+  return new Promise((resolve, reject) => {
+    let finished = false;
+
+    const cleanup = () => {
+      videoEl.onseeked = null;
+      videoEl.onerror = null;
+    };
+
+    const finalize = () => {
+      if (finished) return;
+      finished = true;
+
+      cleanup();
+
+      try {
+        videoEl.pause();
+      } catch (_) {}
+
+      const canvas = document.createElement("canvas");
+      canvas.width = videoEl.videoWidth || 640;
+      canvas.height = videoEl.videoHeight || 360;
+      const ctx = canvas.getContext("2d");
+      ctx?.drawImage(videoEl, 0, 0);
+
+      resolve(canvas.toDataURL("image/jpeg"));
+    };
+
+    videoEl.onerror = () => {
+      if (!finished) {
+        finished = true;
+        cleanup();
+        reject(new Error("Video seek error"));
+      }
+    };
 
     videoEl.onseeked = () => {
-      const canvas = document.createElement('canvas');
-      canvas.width = videoEl.videoWidth;
-      canvas.height = videoEl.videoHeight;
-      const ctx = canvas.getContext('2d');
-      ctx?.drawImage(videoEl, 0, 0);
-      resolve(canvas.toDataURL('image/jpeg'));
+      finalize();
     };
+
+    // ▼ Timeout fallback
+    setTimeout(() => {
+      if (!finished) {
+        console.warn("⚠ seek timeout → fallback frame used");
+        finalize();  // cleanup 内蔵
+      }
+    }, 1500);
+
+    // Safari は seek 前に pause が必要なケースがある
+    try {
+      videoEl.pause();
+    } catch (_) {}
+
+    // ▼ Step 2: currentTime を最後に設定
+    try {
+      videoEl.currentTime = ts;
+    } catch (err) {
+      console.warn("⚠ failed to set currentTime → fallback frame used");
+      finalize();
+    }
   });
 }
 
 /**
- * 🎦 動画 → RawFrame[] を生成する
- * フルフレーム抽出ではなく、6フェーズ抽出に必要なポイントだけ取得。
+ * 🎦 動画 → RawFrame[] へ変換
+ * - 6フェーズ用の代表フレームだけを抽出
  */
 async function extractFramesFromVideo(file: File): Promise<RawFrame[]> {
   const url = URL.createObjectURL(file);
@@ -115,44 +177,43 @@ async function extractFramesFromVideo(file: File): Promise<RawFrame[]> {
   video.src = url;
   video.crossOrigin = 'anonymous';
 
-  // 動画のメタデータ読み込み待ち
   await new Promise<void>((resolve) => {
     video.onloadedmetadata = () => resolve();
   });
+  // decode pipeline を開始しておく（Safari 対策）
+  try {
+    await video.play();
+  } catch (_) {}
+  try {
+    video.pause();
+  } catch (_) {}
 
-  const duration = video.duration;
+  const duration = video.duration || 1; // 安全のため最低1秒扱い
 
-  // Address = 0s
-  const addressImg = await captureFrameAt(video, 0);
+  // Timing map（必要に応じ調整可能）
+  const timestamps = {
+    address: 0,
+    backswing: duration * 0.05,
+    top: duration * 0.45,
+    downswing: duration * 0.6,
+    impact: duration * 0.68,
+    finish: duration * 0.9,
+  };
 
-  // Backswing = 5% 程度
-  const backswingTs = duration * 0.05;
-  const backswingImg = await captureFrameAt(video, backswingTs);
+  const results: RawFrame[] = [];
 
-  // Top = 40%〜55% 付近（スイング動画の特性上このあたり）
-  const topTs = duration * 0.45;
-  const topImg = await captureFrameAt(video, topTs);
+  for (const key in timestamps) {
+    const ts = timestamps[key as keyof typeof timestamps];
+    const frame = await captureFrameAt(video, ts);
+    results.push({
+      timestamp: ts,
+      imageBase64: frame,
+      mimeType: 'image/jpeg',
+      duration,
+    });
+  }
 
-  // Downswing = Top の後（60%）
-  const downswingTs = duration * 0.6;
-  const downswingImg = await captureFrameAt(video, downswingTs);
-
-  // Impact = 65〜75% の間がスイング動画では安定
-  const impactTs = duration * 0.68;
-  const impactImg = await captureFrameAt(video, impactTs);
-
-  // Finish = 90% 付近
-  const finishTs = duration * 0.9;
-  const finishImg = await captureFrameAt(video, finishTs);
-
-  return [
-    { timestamp: 0, imageBase64: addressImg, mimeType: 'image/jpeg', duration },
-    { timestamp: backswingTs, imageBase64: backswingImg, mimeType: 'image/jpeg', duration },
-    { timestamp: topTs, imageBase64: topImg, mimeType: 'image/jpeg', duration },
-    { timestamp: downswingTs, imageBase64: downswingImg, mimeType: 'image/jpeg', duration },
-    { timestamp: impactTs, imageBase64: impactImg, mimeType: 'image/jpeg', duration },
-    { timestamp: finishTs, imageBase64: finishImg, mimeType: 'image/jpeg', duration },
-  ];
+  return results;
 }
 
 /**
@@ -172,7 +233,7 @@ async function extractFramesFromFile(file: File): Promise<RawFrame[]> {
     ];
   }
 
-  // 🎦 動画ファイル → 正しい6フェーズ用 RawFrame[]
+  // 🎦 動画ファイル → 正しい6フェーズ抽出ロジックに委譲
   if (file.type.startsWith('video/')) {
     return extractFramesFromVideo(file);
   }
@@ -433,17 +494,25 @@ async function detectPoseKeypoints(frame: RawFrame, detector: PosePipeline): Pro
 }
 
 async function buildPhaseFrames(file: File): Promise<PhaseFrame[]> {
-  const rawFrames = await extractFramesFromFile(file);
-  const detector = await loadPoseDetector();
-  const poseFrames: PoseFrame[] = [];
+  const raw = await extractFramesFromFile(file); // ← 6枚できている想定
 
-  for (const frame of rawFrames) {
-    // eslint-disable-next-line no-await-in-loop
-    const poseFrame = await detectPoseKeypoints(frame, detector);
-    poseFrames.push(poseFrame);
-  }
+  const PHASES: PhaseKey[] = [
+    "address",
+    "backswing",
+    "top",
+    "downswing",
+    "impact",
+    "finish",
+  ];
 
-  return determineSwingPhases(poseFrames);
+  return PHASES.map((phase, i) => {
+    const f = raw[i] ?? raw[raw.length - 1]; // ▼ 不足時の安全 fallback
+    return {
+      phase,
+      timestamp: f.timestamp,
+      imageBase64: f.imageBase64,
+    };
+  });
 }
 
 const GolfUploadPage = () => {
