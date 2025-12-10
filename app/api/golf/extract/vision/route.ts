@@ -72,17 +72,16 @@ export async function POST(req: Request) {
       );
     }
 
-    // Vision API 向けの正しい content block array
-    // ▼ 正式 Vision フォーマット：すべて 1 つの content[] に統合
-    const contentBlocks: any[] = [
+    // ▼ Vision API 正式対応パッチ
+    const contentBlocks = [
       {
-        type: "input_text",
+        type: "text",
         text: PROMPT,
       },
       ...frames.map((url: string) => ({
-        type: "input_image",
-        image_url: url,
-      }))
+        type: "image_url",
+        image_url: { url },
+      })),
     ];
 
     const messages = [
@@ -93,7 +92,7 @@ export async function POST(req: Request) {
     ];
 
     const result = await client.chat.completions.create({
-      model: "gpt-4o-mini", // Vision対応モデル
+      model: "gpt-4o-mini",
       messages,
       max_tokens: 300,
       temperature: 0.0,
