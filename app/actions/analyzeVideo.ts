@@ -1,5 +1,7 @@
 "use server";
 
+// 🔥 Server Actions：結果を JSON で返す。redirect は使わない。
+
 import {
   attachPoseKeypoints, defaultDetectKeypoints, determineSwingPhases
 } from "../lib/pose/determineSwingPhases";
@@ -119,6 +121,9 @@ export async function analyzeVideo(formData: FormData): Promise<AnalyzeVideoResu
     }
   }
 
-  return { frames: sixPhaseFrames, rawFrames, vision: parsed };
+  const result = { frames: sixPhaseFrames, rawFrames, vision: parsed };
+
+  // Next.js がクライアントへ自動で伝搬する
+  return result;
 }
 
