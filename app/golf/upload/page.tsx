@@ -64,26 +64,11 @@ type RawFrame = {
 
 type PosePipeline = ((input: string | Blob, options?: Record<string, unknown>) => Promise<unknown>) | null;
 
-const loadPoseDetector = (() => {
-  let loader: Promise<PosePipeline> | null = null;
-  return () => {
-    if (!loader) {
-      loader = (async () => {
-        const transformers = await import('@xenova/transformers');
-        transformers.env.allowLocalModels = true;
-        transformers.env.allowRemoteModels = true;
-        try {
-          const pipeline = await transformers.pipeline('object-detection', 'Xenova/yolov8n-pose');
-          return pipeline as PosePipeline;
-        } catch (error) {
-          console.warn('[upload] pose pipeline fallback', error);
-          return null;
-        }
-      })();
-    }
-    return loader;
-  };
-})();
+const loadPoseDetector = () => {
+  // 応急処置：Xenova transformers のロードを完全に無効化
+  // fallback モーション推定のみ使用してエラーなく Frame 抽出を通す
+  return Promise.resolve(null);
+};
 
 function stripDataUrl(input: string): { base64: string; mimeType: string } {
   const match = input.match(/^data:(.*?);base64,(.*)$/);
