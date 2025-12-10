@@ -136,14 +136,23 @@ export async function POST(req: NextRequest) {
     const prompt = genPrompt(meta, previousReport);
 
     const orderedFrames = phaseOrder.map((phase) => frames[phase]);
-    const visionFrames: PhaseFrame[] = [
-      frames.address,
-      frames.backswing ?? frames.address,
-      frames.top,
-      frames.downswing,
-      frames.impact,
-      frames.finish,
-    ].filter(Boolean) as PhaseFrame[];
+
+    // 🚨 修正：
+    // Vision に渡すフレーム順は「必ずクライアントが決めた順序」を使う。
+    // fallback で独自並び替えするとフェーズがズレる原因になる。
+
+    const PHASE_ORDER: PhaseKey[] = [
+      "address",
+      "backswing",
+      "top",
+      "downswing",
+      "impact",
+      "finish",
+    ];
+
+    const visionFrames: PhaseFrame[] = PHASE_ORDER
+      .map((phase) => frames[phase])
+      .filter((f): f is PhaseFrame => !!f);
 
     const jsonText = await askVisionAPI({ frames: visionFrames, prompt });
     const parsed = parseMultiPhaseResponse(jsonText);
