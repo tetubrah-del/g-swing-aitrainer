@@ -34,7 +34,7 @@ type OpenAIResponseMessageContent = string | object;
 export async function askVisionAPI({ frames, prompt }: AskVisionAPIParams): Promise<unknown> {
   const apiKey = assertEnv(OPENAI_API_KEY, "OPENAI_API_KEY");
   const model = OPENAI_MODEL === "gpt-4o" || OPENAI_MODEL === "gpt-4o-mini" ? OPENAI_MODEL : "gpt-4o";
-  const limitedFrames = frames.slice(0, 5);
+  const limitedFrames = frames.slice(0, 6);
   const enhancedPrompt = `${prompt}
 
 ※以下の画像フレームの内容を主に参照して分析を行ってください。

@@ -112,13 +112,14 @@ async function extractVideoPhaseFrames(inputPath: string, _mimeType: string): Pr
   try {
     const duration = await getVideoDuration(inputPath);
     const length = duration > 0 ? duration : 1;
-    const timestamps = [0.05, 0.2, 0.45, 0.7, 0.95].map((ratio) => ratio * length);
+    const timestamps = [0.03, 0.18, 0.42, 0.65, 0.82, 0.97].map((ratio) => ratio * length);
 
     const outputFiles = timestamps.map((_, idx) => path.join(tempDir, `phase-${idx}.jpg`));
     await Promise.all(timestamps.map((time, idx) => extractFrameAt(inputPath, outputFiles[idx], time)));
 
-    const [addressFile, topFile, downswingFile, impactFile, finishFile] = outputFiles;
+    const [addressFile, backswingFile, topFile, downswingFile, impactFile, finishFile] = outputFiles;
     const address = await fs.readFile(addressFile);
+    const backswing = await fs.readFile(backswingFile);
     const top = await fs.readFile(topFile);
     const downswing = await fs.readFile(downswingFile);
     const impact = await fs.readFile(impactFile);
@@ -128,6 +129,7 @@ async function extractVideoPhaseFrames(inputPath: string, _mimeType: string): Pr
 
     return {
       address: { base64Image: address.toString("base64"), mimeType: jpegMime },
+      backswing: { base64Image: backswing.toString("base64"), mimeType: jpegMime },
       top: { base64Image: top.toString("base64"), mimeType: jpegMime },
       downswing: { base64Image: downswing.toString("base64"), mimeType: jpegMime },
       impact: { base64Image: impact.toString("base64"), mimeType: jpegMime },
@@ -145,6 +147,7 @@ export async function extractPhaseFrames(params: { buffer: Buffer; mimeType: str
     const base64Image = buffer.toString("base64");
     return {
       address: { base64Image, mimeType },
+      backswing: { base64Image, mimeType },
       top: { base64Image, mimeType },
       downswing: { base64Image, mimeType },
       impact: { base64Image, mimeType },
@@ -156,6 +159,7 @@ export async function extractPhaseFrames(params: { buffer: Buffer; mimeType: str
     const base64Image = buffer.toString("base64");
     return {
       address: { base64Image, mimeType: "image/jpeg" },
+      backswing: { base64Image, mimeType: "image/jpeg" },
       top: { base64Image, mimeType: "image/jpeg" },
       downswing: { base64Image, mimeType: "image/jpeg" },
       impact: { base64Image, mimeType: "image/jpeg" },
