@@ -87,133 +87,39 @@ async function readFileAsDataUrl(file: File): Promise<string> {
   });
 }
 
-/**
- * 🎯 各ブラウザで必ず動く「安全なフレーム抽出関数」
- * - Safari / iOS / Chrome / Firefox すべて動作
- * - play → pause → seek の最適順序
- * - seeked が発火しない場合に timeout fallback 実行
- */
-async function captureFrameAt(videoEl: HTMLVideoElement, ts: number): Promise<string> {
-  // ▼ Step 1: Safari/iOS のために decode パイプラインを開始
-  if (videoEl.readyState < 2) {
-    try {
-      await videoEl.play();
-    } catch (_) {}
+type ExtractApiResponse = {
+  frames: Record<PhaseKey, { timestamp: number; imageBase64: string }>;
+};
 
-    // Safari は play → small delay → pause の順が一番安定
-    await new Promise((r) => setTimeout(r, 30));
-    try { videoEl.pause(); } catch (_) {}
+async function fetchFramesFromApi(file: File): Promise<RawFrame[]> {
+  const formData = new FormData();
+  formData.append('file', file);
+
+  const res = await fetch('/api/golf/extract', {
+    method: 'POST',
+    body: formData,
+  });
+
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || 'フレーム抽出APIの呼び出しに失敗しました');
   }
 
-  return new Promise((resolve, reject) => {
-    let finished = false;
+  const data = (await res.json()) as ExtractApiResponse;
 
-    const cleanup = () => {
-      videoEl.onseeked = null;
-      videoEl.onerror = null;
-    };
-
-    const finalize = () => {
-      if (finished) return;
-      finished = true;
-
-      cleanup();
-
-      try {
-        videoEl.pause();
-      } catch (_) {}
-
-      const canvas = document.createElement("canvas");
-      canvas.width = videoEl.videoWidth || 640;
-      canvas.height = videoEl.videoHeight || 360;
-      const ctx = canvas.getContext("2d");
-      ctx?.drawImage(videoEl, 0, 0);
-
-      resolve(canvas.toDataURL("image/jpeg"));
-    };
-
-    videoEl.onerror = () => {
-      if (!finished) {
-        finished = true;
-        cleanup();
-        reject(new Error("Video seek error"));
-      }
-    };
-
-    videoEl.onseeked = () => {
-      finalize();
-    };
-
-    // ▼ Timeout fallback
-    setTimeout(() => {
-      if (!finished) {
-        console.warn("⚠ seek timeout → fallback frame used");
-        finalize();  // cleanup 内蔵
-      }
-    }, 1500);
-
-    // Safari は seek 前に pause が必要なケースがある
-    try {
-      videoEl.pause();
-    } catch (_) {}
-
-    // ▼ Step 2: currentTime を最後に設定
-    try {
-      videoEl.currentTime = ts;
-    } catch (err) {
-      console.warn("⚠ failed to set currentTime → fallback frame used");
-      finalize();
+  return PHASE_ORDER.map((phase) => {
+    const frame = data.frames[phase];
+    if (!frame) {
+      throw new Error('フレーム抽出結果が不正です');
     }
-  });
-}
 
-/**
- * 🎦 動画 → RawFrame[] へ変換
- * - 6フェーズ用の代表フレームだけを抽出
- */
-async function extractFramesFromVideo(file: File): Promise<RawFrame[]> {
-  const url = URL.createObjectURL(file);
-  const video = document.createElement('video');
-  video.src = url;
-  video.crossOrigin = 'anonymous';
-
-  await new Promise<void>((resolve) => {
-    video.onloadedmetadata = () => resolve();
-  });
-  // decode pipeline を開始しておく（Safari 対策）
-  try {
-    await video.play();
-  } catch (_) {}
-  try {
-    video.pause();
-  } catch (_) {}
-
-  const duration = video.duration || 1; // 安全のため最低1秒扱い
-
-  // Timing map（必要に応じ調整可能）
-  const timestamps = {
-    address: 0,
-    backswing: duration * 0.05,
-    top: duration * 0.45,
-    downswing: duration * 0.6,
-    impact: duration * 0.68,
-    finish: duration * 0.9,
-  };
-
-  const results: RawFrame[] = [];
-
-  for (const key in timestamps) {
-    const ts = timestamps[key as keyof typeof timestamps];
-    const frame = await captureFrameAt(video, ts);
-    results.push({
-      timestamp: ts,
-      imageBase64: frame,
+    return {
+      timestamp: frame.timestamp,
+      imageBase64: frame.imageBase64,
       mimeType: 'image/jpeg',
-      duration,
-    });
-  }
-
-  return results;
+      duration: 0,
+    } satisfies RawFrame;
+  });
 }
 
 /**
@@ -233,9 +139,9 @@ async function extractFramesFromFile(file: File): Promise<RawFrame[]> {
     ];
   }
 
-  // 🎦 動画ファイル → 正しい6フェーズ抽出ロジックに委譲
+  // 🎦 動画ファイル → サーバーサイド抽出
   if (file.type.startsWith('video/')) {
-    return extractFramesFromVideo(file);
+    return fetchFramesFromApi(file);
   }
 
   throw new Error(`Unsupported file type: ${file.type}`);
