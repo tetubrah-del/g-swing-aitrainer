@@ -109,6 +109,33 @@ function computeMotionEnergy(frames: PoseFrame[]): number[] {
   return energies;
 }
 
+// ------------------------------
+// Utility: get left wrist X
+// ------------------------------
+const getLeftWristX = (frame: PoseFrame): number | null =>
+  frame.keypoints.left_wrist?.x ?? null;
+
+// ------------------------------
+// Utility: forearm angle (elbow → wrist)
+// ------------------------------
+function getForearmAngle(frame: PoseFrame): number | null {
+  const lw = frame.keypoints.left_wrist;
+  const le = frame.keypoints.left_elbow;
+  if (!lw || !le) return null;
+  return Math.atan2(lw.y - le.y, lw.x - le.x);
+}
+
+// ------------------------------
+// Utility: wrist X motion
+// ------------------------------
+function wristXMotion(frames: PoseFrame[], i: number): number {
+  if (i <= 0 || i >= frames.length) return 99999;
+  const a = getLeftWristX(frames[i]);
+  const b = getLeftWristX(frames[i - 1]);
+  if (a == null || b == null) return 99999;
+  return Math.abs(a - b);
+}
+
 function pickFrame(frames: PoseFrame[], index: number | undefined, fallbackIndex: number): PoseFrame | undefined {
   if (typeof index === "number" && frames[index]) return frames[index];
   return frames[fallbackIndex];
@@ -126,91 +153,132 @@ export async function attachPoseKeypoints(frames: PhaseFrame[], detectKeypoints:
 export function determineSwingPhases(poseFrames: PoseFrame[]): PhaseFrame[] {
   if (!poseFrames.length) return [];
 
-  const rotations = poseFrames.map(getRotationDelta);
-  const clubHeadPoints = poseFrames.map(getClubHeadPoint);
-  // fallback を安定化
-  const clubHeadYs = clubHeadPoints.map((kp) => kp?.y ?? 9999);
+  // ==============================================================
+  // 1. Address = motionEnergy + wristXMotion のハイブリッド最小
+  // ==============================================================
   const motionEnergy = computeMotionEnergy(poseFrames);
+  const early = Math.min(20, poseFrames.length);
 
-  const motionThreshold =
-    motionEnergy.reduce((sum, v) => sum + v, 0) / (motionEnergy.length || 1) || 0.1;
-
-  // 1. Address: minimal rotation & low motion in first 10 frames
-  const addressRange = Math.min(poseFrames.length, 10);
   let addressIndex = 0;
-  let addressScore = Number.POSITIVE_INFINITY;
-  for (let i = 0; i < addressRange; i += 1) {
-    const score = rotations[i] + motionEnergy[i] * 0.1;
-    if (score < addressScore) {
-      addressScore = score;
+  let bestAddressScore = 99999;
+
+  for (let i = 1; i < early; i++) {
+    const score = motionEnergy[i] * 0.7 + wristXMotion(poseFrames, i) * 0.3;
+    if (score < bestAddressScore) {
+      bestAddressScore = score;
       addressIndex = i;
     }
   }
 
-  // 2. Backswing start detection
-  const risingWindow = 3;
-  let backswingIndex: number | undefined;
-  for (let i = addressIndex + risingWindow; i < poseFrames.length; i += 1) {
-    const deltas = [] as number[];
-    for (let w = risingWindow; w > 0; w -= 1) {
-      const current = clubHeadYs[i - w + 1];
-      const previous = clubHeadYs[i - w];
-      deltas.push(current - previous);
-    }
+  // ==============================================================
+  // 2. Top = 正規化した (X, angle) スコアが最大
+  // ==============================================================
+  let topIndex = 0;
+  let bestTopScore = -99999;
 
-    const rising = deltas.every((delta) => delta < -3);
-    const rotationIncreasing = rotations[i] > rotations[i - 1];
-    const energetic = motionEnergy[i] > motionThreshold;
+  // X のスケールを 0〜1 に、角度を -1〜+1 に正規化
+  const maxX = Math.max(...poseFrames.map((f) => getLeftWristX(f) ?? 0));
+  const minX = Math.min(...poseFrames.map((f) => getLeftWristX(f) ?? 0));
+  const xRange = Math.max(1, maxX - minX);
 
-    if (rising && rotationIncreasing && energetic) {
-      backswingIndex = i - risingWindow + 1;
-      break;
-    }
-  }
+  for (let i = 0; i < poseFrames.length; i++) {
+    const x = getLeftWristX(poseFrames[i]);
+    const ang = getForearmAngle(poseFrames[i]);
+    if (x == null || ang == null) continue;
 
-  // 3. Top: smallest club head Y after backswing
-  const topSearchStart = backswingIndex ?? addressIndex;
-  let topIndex = topSearchStart;
-  let topScore = Number.POSITIVE_INFINITY;
-  for (let i = topSearchStart; i < poseFrames.length; i += 1) {
-    const score = clubHeadYs[i] - rotations[i] * 10;
-    if (score < topScore) {
-      topScore = score;
+    const xn = (x - minX) / xRange;        // 0〜1
+    const an = ang / Math.PI;              // -1〜1
+    const score = xn * 0.7 + an * 0.3;
+
+    if (score > bestTopScore) {
+      bestTopScore = score;
       topIndex = i;
     }
   }
 
-  // 4. Downswing: first descent after top
-  let downswingIndex: number | undefined;
-  for (let i = topIndex + 1; i < poseFrames.length; i += 1) {
-    if (clubHeadYs[i] > clubHeadYs[i - 1]) {
-      downswingIndex = i;
+  // ==============================================================
+  // 2-A. Backswing = Address → Top の間で X が上昇し始める点
+  // ==============================================================
+  let backswingIndex = Math.max(addressIndex + 3, Math.floor(topIndex * 0.3)); // fallback 初期値
+  let foundBackswing = false;
+
+  for (let i = addressIndex + 1; i < topIndex; i++) {
+    const xPrev = getLeftWristX(poseFrames[i - 1]);
+    const xNow = getLeftWristX(poseFrames[i]);
+    if (xPrev == null || xNow == null) continue;
+
+    // 左手首Xが明確に増加 → バックスイング開始
+    if (xNow - xPrev > 5.0) {
+      backswingIndex = i;
+      foundBackswing = true;
       break;
     }
   }
 
-  // 5. Impact: lowest Y around neutral rotation after downswing
-  const impactSearchStart = downswingIndex ?? topIndex;
-  let impactIndex = impactSearchStart + 2;
-  let impactScore = Number.POSITIVE_INFINITY;
-  const rotationMin = Math.min(...rotations);
-  const rotationMax = Math.max(...rotations);
-  for (let i = impactSearchStart; i < poseFrames.length; i += 1) {
-    const rotationCenter = normalize(rotations[i], rotationMin, rotationMax);
-    const score = clubHeadYs[i] + rotationCenter * 20;
-    if (score < impactScore) {
-      impactScore = score;
-      impactIndex = i;
+  // ============================================================
+  // 2-B. もし上昇点が見つからなければ、前腕角度変化で補完
+  // ============================================================
+  if (!foundBackswing) {
+    let best = backswingIndex;
+    let bestScore = -99999;
+    for (let i = addressIndex + 1; i < topIndex; i++) {
+      const aPrev = getForearmAngle(poseFrames[i - 1]);
+      const aNow = getForearmAngle(poseFrames[i]);
+      if (aPrev == null || aNow == null) continue;
+
+      const diff = Math.abs(aNow - aPrev);
+      if (diff > bestScore) {
+        best = i;
+        bestScore = diff;
+      }
+    }
+    backswingIndex = best;
+  }
+
+  // ==============================================================
+  // 3. Impact = 速度正→負 の符号反転 + |v2|>2 を満たす点
+  //    （fallback: 正速度が最大の点）
+  // ==============================================================
+  let impactIndex = topIndex;
+  let maxSpeed = -99999;
+
+  for (let i = topIndex + 2; i < poseFrames.length; i++) {
+    const xm2 = getLeftWristX(poseFrames[i - 2]);
+    const xm1 = getLeftWristX(poseFrames[i - 1]);
+    const x0 = getLeftWristX(poseFrames[i]);
+    if (xm2 == null || xm1 == null || x0 == null) continue;
+
+    const v1 = xm1 - xm2; // 過去速度
+    const v2 = x0 - xm1;  // 現在速度
+
+    // 明確なインパクト
+    if (v1 > 0 && v2 < 0 && Math.abs(v2) > 2) {
+      impactIndex = i - 1;
+      break;
+    }
+
+    if (v1 > maxSpeed) {
+      maxSpeed = v1;
+      impactIndex = i - 1;
     }
   }
 
-  // 6. Finish: stabilized high rotation with low motion
+  // ============================================================
+  // 4. Downswing = Top と Impact の中間
+  // ============================================================
+  const downswingIndex = Math.floor((topIndex + impactIndex) / 2);
+
+  // ==============================================================
+  // 5. Finish = フレーム後半 85%〜100% で最も動きが少ない点
+  // ==============================================================
+  const finishStart = Math.floor(poseFrames.length * 0.85);
   let finishIndex = poseFrames.length - 1;
-  let finishScore = Number.POSITIVE_INFINITY;
-  for (let i = impactIndex; i < poseFrames.length; i += 1) {
-    const stability = motionEnergy[i] + Math.abs(rotations[i] - rotations[impactIndex]);
-    if (stability < finishScore) {
-      finishScore = stability;
+  let minFinishMotion = 99999;
+
+  for (let i = finishStart; i < poseFrames.length; i++) {
+    const m = wristXMotion(poseFrames, i);
+    if (m < minFinishMotion) {
+      minFinishMotion = m;
       finishIndex = i;
     }
   }
