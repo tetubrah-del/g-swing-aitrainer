@@ -4,7 +4,7 @@ import { Buffer } from "node:buffer";
 import { NextRequest, NextResponse } from "next/server";
 import { AnalysisId, GolfAnalyzeMeta, GolfAnalysisRecord, SwingAnalysis } from "@/app/golf/types";
 import { askVisionAPI } from "@/app/lib/vision/askVisionAPI";
-import { extractPhaseFrames, PhaseKey } from "@/app/lib/vision/extractPhaseFrames";
+import { extractPhaseFrames, PhaseFrame, PhaseKey, PhaseFrames } from "@/app/lib/vision/extractPhaseFrames";
 import { genPrompt } from "@/app/lib/vision/genPrompt";
 import { parseMultiPhaseResponse } from "@/app/lib/vision/parseMultiPhaseResponse";
 import { getAnalysis, saveAnalysis } from "@/app/lib/store";
@@ -12,7 +12,37 @@ import { getAnalysis, saveAnalysis } from "@/app/lib/store";
 // Node.js ランタイムで動かしたい場合は明示（必須ではないが念のため）
 export const runtime = "nodejs";
 
-const phaseOrder: PhaseKey[] = ["address", "top", "downswing", "impact", "finish"];
+const phaseOrder: PhaseKey[] = ["address", "backswing", "top", "downswing", "impact", "finish"];
+const clientPhaseOrder: PhaseKey[] = ["address", "backswing", "top", "downswing", "impact", "finish"];
+
+function parseDataUrl(input: string | null): { base64Image: string; mimeType: string } | null {
+  if (!input) return null;
+  const match = input.match(/^data:(.*?);base64,(.*)$/);
+  if (!match) {
+    return { base64Image: input, mimeType: "image/jpeg" };
+  }
+  return { base64Image: match[2], mimeType: match[1] || "image/jpeg" };
+}
+
+function mergePhaseFrames(source: Partial<PhaseFrames> | null, fallback: PhaseFrames): PhaseFrames {
+  return {
+    address: source?.address ?? fallback.address,
+    // 修正点：
+    // 1. source.backswing（クライアント抽出）を最優先
+    // 2. fallback.backswing（サーバー側バックアップ）
+    // 3. source.address（極限時の代替）
+    // 4. fallback.address（最終保険）
+    backswing:
+      source?.backswing ??
+      fallback.backswing ??
+      source?.address ??
+      fallback.address,
+    top: source?.top ?? fallback.top,
+    downswing: source?.downswing ?? fallback.downswing,
+    impact: source?.impact ?? fallback.impact,
+    finish: source?.finish ?? fallback.finish,
+  } satisfies PhaseFrames;
+}
 
 export async function POST(req: NextRequest) {
   try {
@@ -24,6 +54,8 @@ export async function POST(req: NextRequest) {
     const level = formData.get("level");
     const previousAnalysisId = formData.get("previousAnalysisId");
     const previousReportJson = formData.get("previousReportJson");
+    const phaseFramesJson = formData.get("phaseFramesJson");
+    const inlinePhaseFrames = formData.getAll("phaseFrames[]");
 
     if (!(file instanceof File)) {
       return NextResponse.json({ error: "file is required" }, { status: 400 });
@@ -40,10 +72,50 @@ export async function POST(req: NextRequest) {
       previousAnalysisId: typeof previousAnalysisId === "string" ? (previousAnalysisId as AnalysisId) : null,
     };
 
+    let providedFrames: Partial<PhaseFrames> | null = null;
+
+    if (typeof phaseFramesJson === "string") {
+      try {
+        const parsed = JSON.parse(phaseFramesJson) as Array<
+          Partial<PhaseFrame> & { phase?: PhaseKey; timestamp?: number }
+        >;
+        if (Array.isArray(parsed)) {
+          providedFrames = parsed.reduce((acc, frame) => {
+            if (!frame || typeof frame !== "object" || !frame.phase || !frame.imageBase64) return acc;
+            const normalized = parseDataUrl(frame.imageBase64);
+            if (!normalized) return acc;
+            acc[frame.phase] = {
+              base64Image: normalized.base64Image,
+              mimeType: normalized.mimeType,
+              timestampSec: typeof frame.timestamp === "number" ? frame.timestamp : undefined,
+            } as PhaseFrame;
+            return acc;
+          }, {} as Partial<PhaseFrames>);
+        }
+      } catch (error) {
+        console.warn("[golf/analyze] failed to parse phaseFramesJson", error);
+      }
+    }
+
+    if (!providedFrames && inlinePhaseFrames.length) {
+      const normalized = inlinePhaseFrames
+        .map((entry) => (typeof entry === "string" ? parseDataUrl(entry) : null))
+        .filter(Boolean) as Array<{ base64Image: string; mimeType: string }>;
+
+      if (normalized.length) {
+        providedFrames = {} as Partial<PhaseFrames>;
+        normalized.forEach((value, idx) => {
+          const phase = clientPhaseOrder[idx] ?? clientPhaseOrder[clientPhaseOrder.length - 1];
+          providedFrames![phase] = { base64Image: value.base64Image, mimeType: value.mimeType } as PhaseFrame;
+        });
+      }
+    }
+
     const buffer = Buffer.from(await file.arrayBuffer());
     const mimeType = file.type || "application/octet-stream";
 
-    const frames = await extractPhaseFrames({ buffer, mimeType });
+    const extractedFrames = await extractPhaseFrames({ buffer, mimeType });
+    const frames = mergePhaseFrames(providedFrames, extractedFrames);
 
     let previousReport: SwingAnalysis | null = null;
     if (typeof previousAnalysisId === "string") {
@@ -64,7 +136,16 @@ export async function POST(req: NextRequest) {
     const prompt = genPrompt(meta, previousReport);
 
     const orderedFrames = phaseOrder.map((phase) => frames[phase]);
-    const jsonText = await askVisionAPI({ frames: orderedFrames, prompt });
+    const visionFrames: PhaseFrame[] = [
+      frames.address,
+      frames.backswing ?? frames.address,
+      frames.top,
+      frames.downswing,
+      frames.impact,
+      frames.finish,
+    ].filter(Boolean) as PhaseFrame[];
+
+    const jsonText = await askVisionAPI({ frames: visionFrames, prompt });
     const parsed = parseMultiPhaseResponse(jsonText);
 
     const totalScore = Number.isFinite(parsed.totalScore)
