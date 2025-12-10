@@ -6,10 +6,12 @@ import fs from "fs/promises";
 import path from "path";
 import crypto from "crypto";
 import { NextResponse } from "next/server";
+// ffmpeg binary path (macOS / Linux)
+import { execSync } from "child_process";
 
 // Turbopack が dynamic import を誤爆しないよう require() を使用
 let ffmpeg: any = null;
-let ffmpegStatic: string | null = null;
+let ffmpegPath: string | null = null;
 
 let ffmpegLoading = false;
 
@@ -19,13 +21,18 @@ function loadFfmpeg() {
 
   // require を使うと Turbopack は server-only と理解する
   const ff = require("fluent-ffmpeg");
-  const ffStatic = require("ffmpeg-static");
 
   ffmpeg = ff;
-  ffmpegStatic = ffStatic;
 
-  if (ffmpegStatic) {
-    ffmpeg.setFfmpegPath(ffmpegStatic);
+  try {
+    // macOS / Linux: which ffmpeg で取得
+    ffmpegPath = execSync("which ffmpeg").toString().trim();
+    if (!ffmpegPath) throw new Error("ffmpeg not found");
+    ffmpeg.setFfmpegPath(ffmpegPath);
+  } catch (err) {
+    console.error("FFmpeg binary not found. Please install ffmpeg:");
+    console.error("  brew install ffmpeg");
+    throw err;
   }
 
   ffmpegLoading = false;
