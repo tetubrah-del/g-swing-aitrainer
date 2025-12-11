@@ -1,7 +1,15 @@
-import { SwingPhase } from "@/app/golf/types";
+import { SequenceStageFeedback, SequenceStageKey, SwingPhase } from "@/app/golf/types";
 import { PhaseKey } from "./extractPhaseFrames";
 
 const phaseKeys: PhaseKey[] = ["address", "top", "downswing", "impact", "finish"];
+const sequenceStageKeys: SequenceStageKey[] = [
+  "address",
+  "address_to_backswing",
+  "backswing_to_top",
+  "top_to_downswing",
+  "downswing_to_impact",
+  "finish",
+];
 
 type RawResponse = Partial<Record<PhaseKey, unknown>> & {
   phases?: Partial<Record<PhaseKey, unknown>>;
@@ -11,6 +19,7 @@ type RawResponse = Partial<Record<PhaseKey, unknown>> & {
   recommendedDrills?: unknown;
   drills?: unknown;
   comparison?: unknown;
+  sequence?: unknown;
 };
 
 function ensureString(value: unknown, field: string): string {
@@ -40,6 +49,47 @@ function ensureNumber(value: unknown, field: string): number {
   return num;
 }
 
+function parseSequenceStages(raw: unknown): SequenceStageFeedback[] | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const source = Array.isArray(raw) ? raw : (raw as { stages?: unknown }).stages;
+  if (!Array.isArray(source)) return undefined;
+
+  const normalized: SequenceStageFeedback[] = [];
+
+  for (const entry of source) {
+    if (!entry || typeof entry !== "object") continue;
+    const stageValue = (entry as Record<string, unknown>).stage;
+    if (typeof stageValue !== "string") continue;
+
+    const stageKey = sequenceStageKeys.find((key) => key === stageValue) as SequenceStageKey | undefined;
+    if (!stageKey) continue;
+
+    const headline = (entry as Record<string, unknown>).headline;
+    const details = (entry as Record<string, unknown>).details;
+    const keyFrameIndices = (entry as Record<string, unknown>).keyFrameIndices;
+
+    const parsedHeadline = typeof headline === "string" ? headline : "";
+    const parsedDetails = Array.isArray(details)
+      ? details.filter((d): d is string => typeof d === "string")
+      : [];
+    const parsedKeyFrames = Array.isArray(keyFrameIndices)
+      ? keyFrameIndices
+          .map((idx) => Number(idx))
+          .filter((idx) => Number.isFinite(idx))
+          .map((idx) => Math.max(0, Math.round(idx)))
+      : undefined;
+
+    normalized.push({
+      stage: stageKey,
+      headline: parsedHeadline,
+      details: parsedDetails,
+      keyFrameIndices: parsedKeyFrames?.length ? parsedKeyFrames : undefined,
+    });
+  }
+
+  return normalized.length ? normalized : undefined;
+}
+
 function parsePhase(rawPhase: unknown, key: PhaseKey): SwingPhase {
   if (!rawPhase || typeof rawPhase !== "object") {
     throw new Error(`Phase ${key} must be an object`);
@@ -62,6 +112,7 @@ export function parseMultiPhaseResponse(input: unknown): {
   recommendedDrills?: string[];
   comparison?: { improved: string[]; regressed: string[] };
   phases: Record<PhaseKey, SwingPhase>;
+  sequenceStages?: SequenceStageFeedback[];
 } {
   let parsed: RawResponse;
   if (typeof input === "string") {
@@ -108,5 +159,6 @@ export function parseMultiPhaseResponse(input: unknown): {
           }
         : undefined,
     phases,
+    sequenceStages: parseSequenceStages(parsed.sequence) ?? parseSequenceStages(parsed),
   };
 }

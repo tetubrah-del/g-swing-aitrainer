@@ -25,6 +25,7 @@ function loadFFmpeg() {
 }
 
 const FPS = 15;
+const SCALE_FILTER = "scale=640:-1:force_original_aspect_ratio=decrease";
 
 export async function POST(req: Request) {
   try {
@@ -46,10 +47,10 @@ export async function POST(req: Request) {
     const outDir = path.join("/tmp", `frames-${crypto.randomUUID()}`);
     await fs.mkdir(outDir, { recursive: true });
 
-    // ffmpeg -i input -vf fps=15 out-%04d.jpg
+    // ffmpeg -i input -vf "fps=15,scale=640:-1:force_original_aspect_ratio=decrease" out-%04d.jpg
     await new Promise((resolve, reject) => {
       ffmpeg(inputPath)
-        .outputOptions([`-vf fps=${FPS}`])
+        .outputOptions([`-vf fps=${FPS},${SCALE_FILTER}`])
         .save(path.join(outDir, "frame-%04d.jpg"))
         .on("end", resolve)
         .on("error", reject);

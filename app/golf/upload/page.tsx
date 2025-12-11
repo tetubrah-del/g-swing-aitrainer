@@ -725,6 +725,7 @@ const GolfUploadPage = () => {
   const [error, setError] = useState<string | null>(null);
   const [phaseFrames, setPhaseFrames] = useState<PhaseFrame[]>([]);
   const [frameUrls, setFrameUrls] = useState<string[]>([]);
+  const [sequenceFrames, setSequenceFrames] = useState<FrameMeta[]>([]);
 
   useEffect(() => {
     const latest = getLatestReport();
@@ -761,6 +762,7 @@ const GolfUploadPage = () => {
   const onFileSelected = async (selectedFile: File | null) => {
     setFile(selectedFile);
     setFrameUrls([]);
+    setSequenceFrames([]);
     setPhaseFrames([]);
     setError(null);
 
@@ -790,9 +792,10 @@ const GolfUploadPage = () => {
         }
 
         // Vision に渡す枚数をモーションエナジーで間引く
-        const candidateFrames = await selectRepresentativeFrames(urls, 14);
+        const candidateFrames = await selectRepresentativeFrames(urls, 16);
         const timeSorted = [...candidateFrames].sort((a, b) => a.index - b.index);
         setFrameUrls(timeSorted.map((c) => c.url));
+        setSequenceFrames(timeSorted);
 
         const mapping = await runVisionPhaseSelection(timeSorted);
 
@@ -854,6 +857,11 @@ const GolfUploadPage = () => {
         orderedPhaseFrames.forEach((frame) => {
           formData.append('phaseFrames[]', frame.imageBase64);
         });
+      }
+
+      if (sequenceFrames.length) {
+        const compact = sequenceFrames.map(({ url, timestampSec }) => ({ url, timestampSec }));
+        formData.append('sequenceFramesJson', JSON.stringify(compact));
       }
 
       const res = await fetch('/api/golf/analyze', {

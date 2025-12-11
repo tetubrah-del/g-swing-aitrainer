@@ -10,6 +10,26 @@ export interface SwingPhase {
   advice: string[];
 }
 
+export type SequenceStageKey =
+  | "address"
+  | "address_to_backswing"
+  | "backswing_to_top"
+  | "top_to_downswing"
+  | "downswing_to_impact"
+  | "finish";
+
+export interface SequenceStageFeedback {
+  stage: SequenceStageKey;
+  headline: string;
+  details: string[];
+  keyFrameIndices?: number[];
+}
+
+export interface SequenceReview {
+  frames: Array<{ url: string; timestampSec?: number }>;
+  stages?: SequenceStageFeedback[];
+}
+
 export interface SwingAnalysis {
   analysisId: string;
   createdAt: string;
@@ -27,6 +47,7 @@ export interface SwingAnalysis {
     improved: string[];
     regressed: string[];
   };
+  sequence?: SequenceReview;
 }
 
 // POST /api/golf/analyze に渡ってくるメタ情報
@@ -74,4 +95,39 @@ export const MOCK_GOLF_ANALYSIS_RESULT: SwingAnalysis = {
     "ハーフスイングでフェース向きを一定に保つ練習を20球×3セット",
     "左足一本素振りでフィニッシュまでバランスを取る練習を15回×2セット",
   ],
+  sequence: {
+    frames: [],
+    stages: [
+      {
+        stage: "address",
+        headline: "アドレスの安定性",
+        details: ["スタンス幅と前傾角は概ね適正"],
+      },
+      {
+        stage: "address_to_backswing",
+        headline: "テークバックの滑らかさ",
+        details: ["ヘッドが内に入りすぎないよう注意"],
+      },
+      {
+        stage: "backswing_to_top",
+        headline: "トップでの捻転差",
+        details: ["腕とクラブの一体感がやや不足"],
+      },
+      {
+        stage: "top_to_downswing",
+        headline: "切り返しのリズム",
+        details: ["下半身リードを意識すると◎"],
+      },
+      {
+        stage: "downswing_to_impact",
+        headline: "インパクトゾーンの再現性",
+        details: ["ハンドファーストを保ちつつフェース管理を安定化"],
+      },
+      {
+        stage: "finish",
+        headline: "フィニッシュのバランス",
+        details: ["左足への体重移動を最後まで維持"],
+      },
+    ],
+  },
 };

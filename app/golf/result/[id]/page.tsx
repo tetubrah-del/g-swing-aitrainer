@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
-import type { GolfAnalysisResponse } from '@/app/golf/types';
+import type { GolfAnalysisResponse, SequenceStageKey } from '@/app/golf/types';
 import { saveReport } from '@/app/golf/utils/reportStorage';
 
 const phaseOrder: Array<keyof GolfAnalysisResponse['result']['phases']> = [
@@ -12,6 +12,15 @@ const phaseOrder: Array<keyof GolfAnalysisResponse['result']['phases']> = [
   'impact',
   'finish',
 ];
+
+const stageLabels: Record<SequenceStageKey, string> = {
+  address: 'Address',
+  address_to_backswing: 'Address → Backswing',
+  backswing_to_top: 'Backswing → Top',
+  top_to_downswing: 'Top → Downswing',
+  downswing_to_impact: 'Downswing → Impact',
+  finish: 'Finish',
+};
 
 const GolfResultPage = () => {
   const params = useParams();
@@ -117,6 +126,8 @@ const GolfResultPage = () => {
   }
 
   const { result, note, meta } = data;
+  const sequenceFrames = result.sequence?.frames ?? [];
+  const sequenceStages = result.sequence?.stages ?? [];
   const comparison = result.comparison;
 
   return (
@@ -179,6 +190,63 @@ const GolfResultPage = () => {
             {result.summary}
           </p>
         </section>
+
+        {(sequenceFrames.length > 0 || sequenceStages.length > 0) && (
+          <section className="rounded-xl bg-slate-900/70 border border-slate-700 p-4 space-y-3">
+            <div className="flex items-center justify-between">
+              <div>
+                <h2 className="text-sm font-semibold">連続フレーム診断</h2>
+                <p className="text-xs text-slate-400">抽出された14〜16フレームをそのまま診断に使用しています。</p>
+              </div>
+              <span className="text-xs text-slate-300">
+                {sequenceFrames.length ? `${sequenceFrames.length}枚のフレーム` : 'ステージコメントのみ'}
+              </span>
+            </div>
+
+            {sequenceFrames.length > 0 && (
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                {sequenceFrames.map((frame, idx) => (
+                  <div key={`${frame.url}-${idx}`} className="rounded-lg border border-slate-800 bg-slate-950/50 p-2 space-y-2">
+                    <div className="flex items-center justify-between text-xs text-slate-300">
+                      <span className="font-semibold">#{idx + 1}</span>
+                      {typeof frame.timestampSec === 'number' && <span>{frame.timestampSec.toFixed(2)}s</span>}
+                    </div>
+                    <div className="aspect-video w-full overflow-hidden rounded-md border border-slate-800 bg-slate-900">
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img src={frame.url} alt={`sequence-frame-${idx + 1}`} className="h-full w-full object-contain bg-slate-950" />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {sequenceStages.length > 0 && (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                {sequenceStages.map((stage, idx) => (
+                  <div
+                    key={`${stage.stage}-${idx}`}
+                    className="rounded-lg border border-slate-800 bg-slate-950/60 p-3 space-y-2"
+                  >
+                    <div className="flex items-center justify-between">
+                      <p className="text-sm font-semibold">{stageLabels[stage.stage]}</p>
+                      {stage.keyFrameIndices?.length ? (
+                        <span className="text-xs text-slate-300">
+                          #{stage.keyFrameIndices.map((n) => n + 1).join(', ')}
+                        </span>
+                      ) : null}
+                    </div>
+                    <p className="text-sm font-semibold text-emerald-200">{stage.headline || 'ステージ評価'}</p>
+                    <ul className="list-disc pl-4 text-sm space-y-1">
+                      {(stage.details?.length ? stage.details : ['詳細情報がありません。']).map((line, i) => (
+                        <li key={i}>{line}</li>
+                      ))}
+                    </ul>
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+        )}
 
         {comparison && (comparison.improved.length > 0 || comparison.regressed.length > 0) && (
           <section className="rounded-xl bg-slate-900/70 border border-slate-700 p-4 space-y-3">
