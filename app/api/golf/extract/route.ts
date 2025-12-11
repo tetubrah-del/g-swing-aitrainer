@@ -10,6 +10,7 @@ import { NextResponse } from "next/server";
 import { execSync } from "child_process";
 
 // Turbopack が dynamic import を誤爆しないよう require() を使用
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 let ffmpeg: any = null;
 let ffmpegPath: string | null = null;
 
@@ -20,6 +21,7 @@ function loadFfmpeg() {
   ffmpegLoading = true;
 
   // require を使うと Turbopack は server-only と理解する
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
   const ff = require("fluent-ffmpeg");
 
   ffmpeg = ff;
@@ -82,6 +84,7 @@ async function pLimit<T>(tasks: (() => Promise<T>)[], limit = 2): Promise<T[]> {
 async function getVideoDuration(inputPath: string): Promise<number> {
   loadFfmpeg();
   return new Promise((resolve, reject) => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     ffmpeg.ffprobe(inputPath, (err: any, data: any) => {
       if (err) {
         return reject(new Error(`ffprobe failed: ${err.message || err}`));
@@ -108,6 +111,7 @@ async function extractFrameAtTimestamp(
       .outputOptions(["-frames:v 1", "-q:v 2"])
       .save(outputPath)
       .on("end", resolve)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       .on("error", async (err: any) => {
         // エラー時も確実に削除
         await fs.rm(outputPath, { force: true });
@@ -169,10 +173,10 @@ export async function POST(req: Request) {
     await fs.rm(inputPath, { force: true });
 
     return NextResponse.json({ frames });
-  } catch (err: any) {
+  } catch (err) {
     console.error("[extract] Error:", err);
     return NextResponse.json(
-      { error: "Failed to extract frames", detail: err?.message },
+      { error: "Failed to extract frames", detail: (err as Error)?.message },
       { status: 500 }
     );
   }

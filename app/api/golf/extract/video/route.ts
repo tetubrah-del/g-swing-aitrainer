@@ -8,12 +8,14 @@ import crypto from "crypto";
 import { execSync } from "child_process";
 
 // ffmpeg 実体
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 let ffmpeg: any = null;
 let ffmpegPath: string | null = null;
 
 function loadFFmpeg() {
   if (ffmpeg) return;
 
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
   ffmpeg = require("fluent-ffmpeg");
 
   ffmpegPath = execSync("which ffmpeg").toString().trim();
@@ -57,15 +59,17 @@ export async function POST(req: Request) {
       .filter((f) => f.endsWith(".jpg"))
       .sort();
 
+    const baseUrl = (process.env.NEXT_PUBLIC_BASE_URL || new URL(req.url).origin).replace(/\/$/, "");
+
     const frames = jpgs.map((f) => ({
-      url: `/api/golf/extract/file?id=${f}&dir=${path.basename(outDir)}`,
+      url: `${baseUrl}/api/golf/extract/file?id=${f}&dir=${path.basename(outDir)}`,
     }));
 
     return NextResponse.json({ frames });
-  } catch (err: any) {
+  } catch (err) {
     console.error("[video extract]", err);
     return NextResponse.json(
-      { error: "frame extraction failed", detail: err?.message },
+      { error: "frame extraction failed", detail: (err as Error)?.message },
       { status: 500 }
     );
   }

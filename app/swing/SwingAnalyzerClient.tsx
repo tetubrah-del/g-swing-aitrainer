@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 "use client";
 
 import { useState } from "react";
@@ -10,13 +11,14 @@ export default function SwingAnalyzerClient() {
 
   // Next.js Server Actions の結果を受け取る仕組み
   if (typeof window !== "undefined") {
-    // @ts-ignore Next.js 内部で仕込まれる Action 結果を拾う
+    // @ts-expect-error Next.js 内部で仕込まれる Action 結果を拾う
     window.__ACTION_RESULT__?.then?.((data: any) => {
       if (!data) return;
 
       if (data.error) setError(data.error);
       else setResult(data);
 
+      // eslint-disable-next-line react-hooks/immutability
       window.__ACTION_RESULT__ = null; // 一度だけ
     });
   }
@@ -42,6 +44,7 @@ export default function SwingAnalyzerClient() {
                       : "N/A"}
                     s
                   </div>
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
                   <img
                     src={`data:${frame.mimeType};base64,${frame.base64Image}`}
                     alt={frame.id}

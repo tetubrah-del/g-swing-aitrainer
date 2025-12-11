@@ -8,50 +8,33 @@ const client = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-// Vision プロンプト（精度最適化済）
+// Vision はフェーズ判定をせず、ポーズ・キーポイント抽出のみを行う
 const PROMPT = `
-You are an expert golf swing analyst.
+You are a vision model. Extract human pose keypoints and club shaft vector for each image. Do NOT classify swing phases.
 
-I will provide ~30 extracted frames from a golf swing video.
-From these images, pick **exactly 1 best frame** for each phase:
+For EACH input image, return an object with:
+- idx: the image index (0-based, same order as provided)
+- pose: { leftShoulder, rightShoulder, leftElbow, rightElbow, leftWrist, rightWrist, leftHip, rightHip, leftKnee, rightKnee, leftAnkle, rightAnkle } with x,y in normalized [0,1] coordinates (origin = top-left of image)
+- club: { shaftVector: [dx, dy] } where dx,dy is a unit-ish 2D vector pointing from grip to clubhead; if unknown, set shaftVector: null
 
-1. address
-2. backswing
-3. top
-4. downswing
-5. impact
-6. finish
+Output JSON only in this shape:
+{ "frames": [ { "idx": 0, "pose": { ... }, "club": { "shaftVector": [dx, dy] | null } }, ... ] }
 
-Rules:
-- Consider the *golf swing motion* and choose the frame that best represents each phase.
-- If multiple frames look similar, choose the earliest one.
-- Return ONLY JSON in the following format:
+Do not add explanations.`;
 
-{
- "address": <index>,
- "backswing": <index>,
- "top": <index>,
- "downswing": <index>,
- "impact": <index>,
- "finish": <index>
-}
-
-No explanation. Only JSON.
-`;
-
-function parseJsonContent(content: string | null | undefined) {
-  if (!content) {
-    throw new Error("No content returned from vision model");
+function parseJsonContent(content: unknown) {
+  if (content === null || content === undefined) {
+    return {};
   }
 
+  if (typeof content === "object") return content;
+
+  const text = String(content).trim();
   try {
-    return JSON.parse(content);
-  } catch {
-    const match = content.match(/\{[\s\S]*\}/);
-    if (match) {
-      return JSON.parse(match[0]);
-    }
-    throw new Error("Unable to parse JSON from vision response");
+    return JSON.parse(text);
+  } catch (err) {
+    console.error("[vision parse json failed]", text.slice(0, 500), err);
+    return {};
   }
 }
 
@@ -72,16 +55,65 @@ export async function POST(req: Request) {
       );
     }
 
-    // ▼ Vision API 正式対応パッチ
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const normalizedFrames: Array<{ url: string; timestampSec?: number }> = frames.map((f: any) => {
+      if (typeof f === "string") return { url: f, timestampSec: undefined };
+      if (f && typeof f === "object" && typeof f.url === "string") {
+        return { url: f.url, timestampSec: typeof f.timestampSec === "number" ? f.timestampSec : undefined };
+      }
+      return { url: String(f ?? "") };
+    });
+
+    // フレームが多いと Vision への data URL 送信でトークン超過しやすいので上限を設けて間引く
+    // 429 (TPM) を避けるため画像枚数を厳しめに制限しつつ、最終フレームは必ず含める
+    const MAX_FRAMES = 18;
+    const stride = Math.max(1, Math.ceil(normalizedFrames.length / MAX_FRAMES));
+    const sampledFrames = normalizedFrames
+      .filter((_: unknown, idx: number) => idx % stride === 0)
+      .slice(0, MAX_FRAMES);
+    const last = normalizedFrames[normalizedFrames.length - 1];
+    if (last && !sampledFrames.includes(last)) sampledFrames.push(last);
+
+    // ダウンロード不可な相対URLやローカルURLを Vision に渡さないよう、サーバー側で画像を取得して data URL 化する
+    const imageContents = [];
+    for (const item of sampledFrames) {
+      const url = item.url;
+      try {
+        const absolute = new URL(url, req.url).toString();
+        const response = await fetch(absolute);
+        if (!response.ok) throw new Error(`fetch failed: ${response.status}`);
+        const arrayBuffer = await response.arrayBuffer();
+        const mime = response.headers.get("content-type") || "image/jpeg";
+        const base64 = Buffer.from(arrayBuffer).toString("base64");
+        imageContents.push({
+          type: "image_url" as const,
+          image_url: { url: `data:${mime};base64,${base64}`, detail: "low" as const },
+        });
+      } catch (err) {
+        console.error("[vision fetch image failed]", url, err);
+      }
+    }
+
+    if (!imageContents.length) {
+      return NextResponse.json(
+        { error: "frames could not be loaded" },
+        { status: 400 }
+      );
+    }
+
+    // ▼ Vision API へポーズ抽出だけを依頼
     const contentBlocks = [
       {
         type: "text",
         text: PROMPT,
       },
-      ...frames.map((url: string) => ({
-        type: "image_url",
-        image_url: { url },
-      })),
+      ...imageContents.flatMap((ic, idx) => [
+        {
+          type: "text" as const,
+          text: `frame #${idx}`,
+        },
+        ic,
+      ]),
     ];
 
     const messages = [
@@ -94,15 +126,18 @@ export async function POST(req: Request) {
     const result = await client.chat.completions.create({
       model: "gpt-4o-mini",
       messages,
-      max_tokens: 300,
+      max_tokens: 800,
       temperature: 0.0,
+      response_format: { type: "json_object" },
     });
 
-    const content = result.choices[0]?.message?.content?.toString().trim();
-    const json = parseJsonContent(content);
+    // OpenAI SDK v4 returns structured_object when using response_format json_object
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const structured = (result as any).choices?.[0]?.message?.parsed ?? result.choices?.[0]?.message?.content;
+    const json = parseJsonContent(structured);
 
-    return NextResponse.json({ mapping: json });
-  } catch (err: any) {
+    return NextResponse.json({ keypoints: json });
+  } catch (err) {
     console.error("[vision extract]", err);
     return NextResponse.json(
       { error: "vision processing failed", detail: err?.message },

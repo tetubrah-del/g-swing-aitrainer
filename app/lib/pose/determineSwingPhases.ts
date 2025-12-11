@@ -35,6 +35,7 @@ function getVectorAngle(a: PoseKeypoint | undefined, b: PoseKeypoint | undefined
   return Math.atan2(dy, dx);
 }
 
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 function normalize(value: number, min: number, max: number): number {
   if (!Number.isFinite(value)) return 0;
   if (max - min === 0) return 0;
@@ -49,12 +50,14 @@ function distance(a: PoseKeypoint | undefined, b: PoseKeypoint | undefined): num
   return Math.hypot(dx, dy);
 }
 
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 function getRotationDelta(frame: PoseFrame): number {
   const shoulderAngle = getVectorAngle(frame.keypoints.left_shoulder, frame.keypoints.right_shoulder);
   const hipAngle = getVectorAngle(frame.keypoints.left_hip, frame.keypoints.right_hip);
   return Math.abs(shoulderAngle - hipAngle);
 }
 
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 function getClubHeadPoint(frame: PoseFrame): PoseKeypoint | undefined {
   const candidates = [
     frame.keypoints.left_wrist,
@@ -311,4 +314,3 @@ export function determineSwingPhases(poseFrames: PoseFrame[]): PhaseFrame[] {
     } satisfies PhaseFrame;
   });
 }
-

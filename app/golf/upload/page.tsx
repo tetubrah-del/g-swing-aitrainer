@@ -4,6 +4,7 @@ import { FormEvent, useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { GolfAnalysisResponse } from '@/app/golf/types';
 import { getLatestReport } from '@/app/golf/utils/reportStorage';
+import { computePhaseIndices, type FramePose } from '@/app/lib/swing/phases';
 
 const PHASE_ORDER = [
   'address',
@@ -65,11 +66,221 @@ type RawFrame = {
 
 type PosePipeline = ((input: string | Blob, options?: Record<string, unknown>) => Promise<unknown>) | null;
 
-const loadPoseDetector = () => {
-  // 応急処置：Xenova transformers のロードを完全に無効化
-  // fallback モーション推定のみ使用してエラーなく Frame 抽出を通す
-  return Promise.resolve(null);
-};
+type FrameMeta = { url: string; index: number; timestampSec: number };
+type PhaseKeypoints = { idx: number; pose?: { leftWrist?: { x: number; y: number }; rightWrist?: { x: number; y: number } } };
+
+// 画像URL配列から動きが異なる代表フレームだけを選ぶためのユーティリティ
+async function loadImageData(url: string): Promise<ImageData> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => {
+      const targetWidth = 320;
+      const scale = img.naturalWidth ? Math.min(1, targetWidth / img.naturalWidth) : 1;
+      const w = Math.max(1, Math.round((img.naturalWidth || targetWidth) * scale));
+      const h = Math.max(1, Math.round((img.naturalHeight || targetWidth) * scale));
+      const canvas = document.createElement('canvas');
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        reject(new Error('canvas context unavailable'));
+        return;
+      }
+      ctx.drawImage(img, 0, 0, w, h);
+      try {
+        const data = ctx.getImageData(0, 0, w, h);
+        resolve(data);
+      } catch (err) {
+        reject(err instanceof Error ? err : new Error('getImageData failed'));
+      }
+    };
+    img.onerror = () => reject(new Error(`image load failed: ${url}`));
+    img.src = url;
+  });
+}
+
+async function computeMotionEnergiesFromUrls(urls: string[]): Promise<number[]> {
+  const energies: number[] = [];
+  let prev: ImageData | null = null;
+
+  for (const url of urls) {
+    const cur = await loadImageData(url);
+    if (prev) {
+      let diff = 0;
+      const stride = 8 * 4;
+      const len = Math.min(prev.data.length, cur.data.length);
+      for (let i = 0; i < len; i += stride) {
+        const d =
+          Math.abs(cur.data[i] - prev.data[i]) +
+          Math.abs(cur.data[i + 1] - prev.data[i + 1]) +
+          Math.abs(cur.data[i + 2] - prev.data[i + 2]);
+        diff += d;
+      }
+      energies.push(diff / 8);
+    } else {
+      energies.push(0);
+    }
+    prev = cur;
+  }
+
+  return energies;
+}
+
+function pickRepresentativeIndicesByBuckets(energies: number[], bucketCount: number): number[] {
+  const n = energies.length;
+  if (!n) return [];
+  const indices = new Set<number>();
+  indices.add(0);
+  indices.add(n - 1);
+
+  const bucketSize = Math.max(1, Math.floor(n / bucketCount));
+  for (let b = 0; b < bucketCount; b++) {
+    const start = b * bucketSize;
+    const end = Math.min(n, start + bucketSize);
+    if (start >= n) break;
+    let bestIdx = start;
+    let bestEnergy = -1;
+    for (let i = start; i < end; i++) {
+      if (energies[i] > bestEnergy) {
+        bestEnergy = energies[i];
+        bestIdx = i;
+      }
+    }
+    indices.add(bestIdx);
+  }
+
+  return Array.from(indices).sort((a, b) => a - b);
+}
+
+async function selectRepresentativeFrames(urls: string[], maxFrames = 14, fps = 15): Promise<FrameMeta[]> {
+  if (urls.length <= maxFrames) {
+    return urls.map((url, index) => ({ url, index, timestampSec: index / fps }));
+  }
+
+  const energies = await computeMotionEnergiesFromUrls(urls);
+  const bucketCount = Math.min(maxFrames, Math.ceil(urls.length / 2));
+  const picked = pickRepresentativeIndicesByBuckets(energies, bucketCount);
+
+  // 中盤の動きが速い区間を厚めに拾う（全体の25%〜75%でエナジー上位を追加）
+  const midStart = Math.floor(urls.length * 0.25);
+  const midEnd = Math.min(urls.length, Math.ceil(urls.length * 0.75));
+  const midExtras = energies
+    .map((e, idx) => ({ idx, e }))
+    .filter(({ idx }) => idx >= midStart && idx < midEnd)
+    .sort((a, b) => b.e - a.e)
+    .slice(0, 3)
+    .map(({ idx }) => idx);
+
+  // トップ付近（0.35〜0.6）の動きが大きいフレームを追加で拾う
+  const topWindowStart = Math.floor(urls.length * 0.35);
+  const topWindowEnd = Math.min(urls.length, Math.ceil(urls.length * 0.6));
+  const topWindowExtras = energies
+    .map((e, idx) => ({ idx, e }))
+    .filter(({ idx }) => idx >= topWindowStart && idx < topWindowEnd)
+    .sort((a, b) => b.e - a.e)
+    .slice(0, 3)
+    .map(({ idx }) => idx);
+
+  // Top 用に前寄り(35〜50%)で最小エナジーの静止っぽい1枚を必ず追加
+  const topMinStart = Math.floor(urls.length * 0.35);
+  const topMinEnd = Math.min(urls.length, Math.ceil(urls.length * 0.55));
+  let topMinIdx = topMinStart;
+  let topMinEnergy = Number.POSITIVE_INFINITY;
+  for (let i = topMinStart; i < topMinEnd; i++) {
+    if (energies[i] < topMinEnergy) {
+      topMinEnergy = energies[i];
+      topMinIdx = i;
+    }
+  }
+
+  // 終盤20%の動きが大きいものを追加（ダウンスイング〜フィニッシュを確保）
+  const tailStart = Math.floor(urls.length * 0.8);
+  const tailExtras = energies
+    .map((e, idx) => ({ idx, e }))
+    .filter(({ idx }) => idx >= tailStart)
+    .sort((a, b) => b.e - a.e)
+    .slice(0, 3)
+    .map(({ idx }) => idx);
+
+  // 均等アンカーで全体をカバー
+  const anchorCount = 6;
+  const anchors: number[] = [];
+  for (let i = 0; i < anchorCount; i++) {
+    const pos = i / Math.max(anchorCount - 1, 1);
+    anchors.push(Math.min(urls.length - 1, Math.max(0, Math.round(pos * (urls.length - 1)))));
+  }
+
+  const priorityList = [
+    0,
+    topMinIdx,
+    ...topWindowExtras,
+    ...tailExtras,
+    ...midExtras,
+    ...picked,
+    ...anchors,
+    urls.length - 1,
+  ];
+
+  const seen = new Set<number>();
+  const ordered: number[] = [];
+  for (const idx of priorityList) {
+    if (idx < 0 || idx >= urls.length) continue;
+    if (seen.has(idx)) continue;
+    seen.add(idx);
+    ordered.push(idx);
+    if (ordered.length >= maxFrames) break;
+  }
+
+  return ordered
+    .map((idx) => ({ url: urls[idx], index: idx, timestampSec: idx / fps }))
+    .slice(0, maxFrames);
+}
+
+function computePhaseMappingFromKeypoints(data: { frames?: PhaseKeypoints[] } | undefined, totalFrames: number): VisionPhaseMapping {
+  const frames = data?.frames ?? [];
+  if (!frames.length) {
+    // fallback: evenly spread
+    return {
+      address: 0,
+      backswing: Math.floor(totalFrames * 0.2),
+      top: Math.floor(totalFrames * 0.4),
+      downswing: Math.floor(totalFrames * 0.6),
+      impact: Math.floor(totalFrames * 0.8),
+      finish: totalFrames - 1,
+    };
+  }
+
+  // use computePhaseIndices utility on keypoints
+  const mapped: FramePose[] = frames.map((f) => ({
+    idx: f.idx,
+    pose: {
+      leftShoulder: f.pose?.leftShoulder,
+      rightShoulder: f.pose?.rightShoulder,
+      leftElbow: f.pose?.leftElbow,
+      rightElbow: f.pose?.rightElbow,
+      leftWrist: f.pose?.leftWrist,
+      rightWrist: f.pose?.rightWrist,
+      leftHip: f.pose?.leftHip,
+      rightHip: f.pose?.rightHip,
+      leftKnee: f.pose?.leftKnee,
+      rightKnee: f.pose?.rightKnee,
+      leftAnkle: f.pose?.leftAnkle,
+      rightAnkle: f.pose?.rightAnkle,
+    },
+  }));
+  // normalize sorting by idx
+  mapped.sort((a, b) => a.idx - b.idx);
+  const indices = computePhaseIndices(mapped);
+  return {
+    address: indices.address,
+    backswing: indices.backswing,
+    top: indices.top,
+    downswing: indices.downswing,
+    impact: indices.impact,
+    finish: indices.finish,
+  };
+}
 
 function stripDataUrl(input: string): { base64: string; mimeType: string } {
   const match = input.match(/^data:(.*?);base64,(.*)$/);
@@ -93,6 +304,76 @@ type ExtractApiResponse = {
 };
 
 type VisionPhaseMapping = Record<PhaseKey, number>;
+
+type ExtractedKeypoints = {
+  frames: Array<{
+    idx: number;
+    pose?: {
+      leftShoulder?: { x: number; y: number };
+      rightShoulder?: { x: number; y: number };
+      leftElbow?: { x: number; y: number };
+      rightElbow?: { x: number; y: number };
+      leftWrist?: { x: number; y: number };
+      rightWrist?: { x: number; y: number };
+      leftHip?: { x: number; y: number };
+      rightHip?: { x: number; y: number };
+      leftKnee?: { x: number; y: number };
+      rightKnee?: { x: number; y: number };
+      leftAnkle?: { x: number; y: number };
+      rightAnkle?: { x: number; y: number };
+    };
+    club?: { shaftVector: [number, number] | null };
+  }>;
+};
+
+async function computePhaseMappingFromEnergy(urls: string[]): Promise<VisionPhaseMapping> {
+  const n = urls.length;
+  if (!n) {
+    return { address: 0, backswing: 0, top: 0, downswing: 0, impact: 0, finish: 0 };
+  }
+  // エネルギー計算は使わず、時系列の割合で決め打ち（単調増加を保証）
+  const picks: number[] = [];
+  const ratios = [0, 0.2, 0.5, 0.75, 0.9, 1]; // address, backswing, top, downswing, impact, finish
+  ratios.forEach((r, idx) => {
+    const raw = Math.round(r * (n - 1));
+    const prev = picks[idx - 1] ?? -1;
+    const chosen = Math.min(n - (ratios.length - idx), Math.max(raw, prev + 1));
+    picks.push(chosen);
+  });
+
+  return {
+    address: picks[0],
+    backswing: picks[1],
+    top: picks[2],
+    downswing: picks[3],
+    impact: picks[4],
+    finish: picks[5],
+  };
+}
+
+async function runVisionPhaseSelection(frames: FrameMeta[]): Promise<VisionPhaseMapping> {
+  const res = await fetch('/api/golf/extract/vision', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ frames }),
+  });
+
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || 'Vision extract failed');
+  }
+
+  const { keypoints } = (await res.json()) as { keypoints: ExtractedKeypoints };
+  // If keypoints are missing, fallback to energy-based heuristic
+  const hasPose =
+    keypoints?.frames?.some((f) => f.pose?.leftWrist || f.pose?.rightWrist) ?? false;
+
+  if (!hasPose) {
+    return computePhaseMappingFromEnergy(frames.map((f) => f.url));
+  }
+
+  return computePhaseMappingFromKeypoints(keypoints, frames.length);
+}
 
 async function fetchFramesFromApi(file: File): Promise<RawFrame[]> {
   const formData = new FormData();
@@ -123,22 +404,6 @@ async function fetchFramesFromApi(file: File): Promise<RawFrame[]> {
       duration: 0,
     } satisfies RawFrame;
   });
-}
-
-async function runVisionPhaseSelection(frameUrls: string[]): Promise<VisionPhaseMapping> {
-  const res = await fetch('/api/golf/extract/vision', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ frames: frameUrls }),
-  });
-
-  if (!res.ok) {
-    const data = await res.json().catch(() => ({}));
-    throw new Error(data.error || 'Vision extract failed');
-  }
-
-  const { mapping } = (await res.json()) as { mapping: VisionPhaseMapping };
-  return mapping;
 }
 
 /**
@@ -219,6 +484,7 @@ function computeMotionEnergy(frames: PoseFrame[]): number[] {
   return energies;
 }
 
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 function determineSwingPhases(poseFrames: PoseFrame[]): PhaseFrame[] {
   if (!poseFrames.length) return [];
 
@@ -356,6 +622,7 @@ function determineSwingPhases(poseFrames: PoseFrame[]): PhaseFrame[] {
   });
 }
 
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 async function detectPoseKeypoints(frame: RawFrame, detector: PosePipeline): Promise<PoseFrame> {
   const { base64, mimeType } = stripDataUrl(frame.imageBase64);
   let detected: Partial<Record<PoseKeyName, PoseKeypoint>> | null = null;
@@ -516,27 +783,30 @@ const GolfUploadPage = () => {
           throw new Error(data.error || 'フレーム抽出に失敗しました');
         }
 
-        const data = await res.json();
-        const urls = (data.frames || []).map((f: any) => f.url);
-        setFrameUrls(urls);
-
+        const data = (await res.json()) as { frames?: Array<{ url: string }> };
+        const urls = (data.frames || []).map((f) => f.url);
         if (!urls.length) {
           throw new Error('フレーム抽出に失敗しました');
         }
 
-        const mapping = await runVisionPhaseSelection(urls);
+        // Vision に渡す枚数をモーションエナジーで間引く
+        const candidateFrames = await selectRepresentativeFrames(urls, 14);
+        const timeSorted = [...candidateFrames].sort((a, b) => a.index - b.index);
+        setFrameUrls(timeSorted.map((c) => c.url));
+
+        const mapping = await runVisionPhaseSelection(timeSorted);
 
         const mappedFrames = PHASE_ORDER.map((phase) => {
           const idx = mapping[phase];
           const safeIndex =
-            typeof idx === 'number' && idx >= 0 && idx < urls.length ? idx : 0;
-          const fallback = urls[0] ?? '';
+            typeof idx === 'number' && idx >= 0 && idx < timeSorted.length ? idx : 0;
+          const fallback = timeSorted[0]?.url ?? '';
 
           return {
             phase,
-            timestamp: safeIndex / 15,
-            imageBase64: urls[safeIndex] ?? fallback,
-            imageUrl: urls[safeIndex] ?? fallback,
+            timestamp: timeSorted[safeIndex]?.timestampSec ?? 0,
+            imageBase64: timeSorted[safeIndex]?.url ?? fallback,
+            imageUrl: timeSorted[safeIndex]?.url ?? fallback,
           } satisfies PhaseFrame;
         });
 
@@ -701,7 +971,7 @@ const GolfUploadPage = () => {
                     className="aspect-video w-full overflow-hidden rounded-md border border-slate-800 bg-slate-900"
                   >
                     {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img src={url} alt={`frame-${i}`} className="h-full w-full object-cover" />
+                    <img src={url} alt={`frame-${i}`} className="h-full w-full object-contain bg-slate-950" />
                   </div>
                 ))}
               </div>
@@ -734,7 +1004,11 @@ const GolfUploadPage = () => {
                   </div>
                   <div className="aspect-video w-full overflow-hidden rounded-md border border-slate-800 bg-slate-900">
                     {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img src={frame.imageBase64} alt={`${frame.phase} frame`} className="h-full w-full object-cover" />
+                    <img
+                      src={frame.imageBase64}
+                      alt={`${frame.phase} frame`}
+                      className="h-full w-full object-contain bg-slate-950"
+                    />
                   </div>
                 </div>
               ))}

@@ -135,8 +135,6 @@ export async function POST(req: NextRequest) {
 
     const prompt = genPrompt(meta, previousReport);
 
-    const orderedFrames = phaseOrder.map((phase) => frames[phase]);
-
     // 🚨 修正：
     // Vision に渡すフレーム順は「必ずクライアントが決めた順序」を使う。
     // fallback で独自並び替えするとフェーズがズレる原因になる。
