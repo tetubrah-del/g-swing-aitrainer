@@ -102,6 +102,86 @@ const GolfResultPage = () => {
     }));
   }, [data?.result?.phases]);
 
+  const levelEstimate = useMemo(() => {
+    const score = data?.result?.totalScore ?? 0;
+    if (score >= 85)
+      return {
+        label: '上級',
+        detail:
+          '完成度が高く、安定した再現性が期待できます。細部のフェース管理と球筋コントロールを磨けば競技レベルでも通用します。下半身リードとトップの静止をキープしつつ、セットアップの精度を日々確認するとさらに安定度が上がります。',
+      };
+    if (score >= 70)
+      return {
+        label: '中上級',
+        detail:
+          '全体のバランスは良好で、再現性も高い段階です。トップからダウンの切り返しでクラブをスムーズに落とし、インパクトでのフェース向きを安定させると一気に上級域へ近づきます。ルーティンの質とテンポ管理を強化しましょう。',
+      };
+    if (score >= 55)
+      return {
+        label: '中級',
+        detail:
+          '基本は安定しており、リズムと軌道の精度を上げることで大きく伸びます。アドレスの重心とトップのクラブポジションを毎回揃えることが次のステップです。切り返しで手先が暴れないよう、下半身主導のイメージを持ちましょう。',
+      };
+    if (score >= 40)
+      return {
+        label: '初級',
+        detail:
+          '姿勢とテンポの基礎づくりを強化するタイミングです。アドレスの前傾とグリッププレッシャーを一定にし、ハーフスイングでフェース向きとコンタクトを安定させる練習がおすすめです。体重移動のリズムをゆっくり身につけましょう。',
+      };
+    return {
+      label: 'ビギナー',
+      detail:
+        'まずはアドレスとリズムの基礎を固める段階です。スタンス幅、前傾角、グリップを毎回揃え、ハーフスイングで芯に当てる感覚を作りましょう。重心を左右に大きく動かさず、一定のテンポで振り抜くことを意識すると次のステップに進みやすくなります。',
+    };
+  }, [data?.result?.totalScore]);
+
+  const roundEstimates = useMemo(() => {
+    const totalScore = data?.result?.totalScore ?? 0;
+    const mid = Math.round(100 - totalScore * 0.3); // スコアが高いほどストロークは小さい想定
+    const spread = 2;
+    const clamp = (v: number, min: number, max: number) => Math.min(max, Math.max(min, v));
+    const low = clamp(mid - spread, 60, 110);
+    const high = clamp(mid + spread, 60, 110);
+
+    // 簡易推定（適当な変換でイメージを示す）
+    const fwKeep = clamp(55 + totalScore * 0.2, 40, 80); // フェアウェイキープ率
+    const gir = clamp(35 + totalScore * 0.25, 20, 75); // パーオン率
+    const ob = clamp(2.5 - totalScore * 0.015, 0.3, 4); // 推定OB数/18H
+
+    return {
+      strokeRange: `${low}〜${high}`,
+      fwKeep: `${fwKeep.toFixed(0)}%`,
+      gir: `${gir.toFixed(0)}%`,
+      ob: `${ob.toFixed(1)} 回`,
+    };
+  }, [data?.result?.totalScore]);
+
+  const extendedSummary = useMemo(() => {
+    const base = (data?.result?.summary ?? '').trim();
+    const extras: string[] = [];
+    const phases = data?.result?.phases;
+    const addPhase = (key: keyof typeof phases, label: string) => {
+      const phase = phases?.[key];
+      if (!phase) return;
+      const good = phase.good?.[0];
+      const issue = phase.issues?.[0];
+      if (good || issue) {
+        const goodText = good ? `良い点: ${good}` : '';
+        const issueText = issue ? `改善点: ${issue}` : '';
+        extras.push(`${label} — ${[goodText, issueText].filter(Boolean).join(' / ')}`);
+      }
+    };
+    addPhase('address', 'Address');
+    addPhase('top', 'Top');
+    addPhase('downswing', 'Downswing');
+    addPhase('impact', 'Impact');
+    addPhase('finish', 'Finish');
+
+    if (!extras.length) return base;
+    const extraText = extras.map((e) => `- ${e}`).join('\n');
+    return `${base}\n\n補足:\n${extraText}`;
+  }, [data?.result?.summary, data?.result?.phases]);
+
   // ▼ early return は Hooks の後に置く
   if (isLoading) {
     return (
@@ -183,12 +263,23 @@ const GolfResultPage = () => {
           </div>
         </section>
 
-        {/* まとめ */}
-        <section className="rounded-xl bg-slate-900/70 border border-slate-700 p-4 space-y-2">
-          <h2 className="text-sm font-semibold">総評</h2>
-          <p className="text-sm leading-relaxed whitespace-pre-line">
-            {result.summary}
-          </p>
+        {/* 推定ラウンドスコア＆レベル診断 */}
+        <section className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div className="rounded-xl bg-slate-900/70 border border-slate-700 p-4">
+            <p className="text-xs text-slate-400">推定ラウンドスコア</p>
+            <p className="text-3xl font-bold mt-1">{roundEstimates.strokeRange}</p>
+            <p className="text-xs text-slate-400 mt-1">ラウンドスコアの目安レンジ（ストローク）</p>
+            <div className="mt-3 space-y-1 text-xs text-slate-300">
+              <p>推定フェアウェイキープ率: {roundEstimates.fwKeep}</p>
+              <p>推定パーオン率: {roundEstimates.gir}</p>
+              <p>推定OB数（18H換算）: {roundEstimates.ob}</p>
+            </div>
+          </div>
+          <div className="rounded-xl bg-slate-900/70 border border-slate-700 p-4">
+            <p className="text-xs text-slate-400">推定レベル診断</p>
+            <p className="text-xl font-semibold mt-1">{levelEstimate.label}</p>
+            <p className="text-sm text-slate-300 mt-1">{levelEstimate.detail}</p>
+          </div>
         </section>
 
         {(sequenceFrames.length > 0 || sequenceStages.length > 0) && (
