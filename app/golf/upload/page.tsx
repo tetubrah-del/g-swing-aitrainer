@@ -1,6 +1,6 @@
 'use client';
 
-import { FormEvent, useEffect, useMemo, useState } from 'react';
+import { FormEvent, useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { GolfAnalysisResponse } from '@/app/golf/types';
 import { getLatestReport } from '@/app/golf/utils/reportStorage';
@@ -714,18 +714,11 @@ const GolfUploadPage = () => {
   const [file, setFile] = useState<File | null>(null);
   const [handedness, setHandedness] = useState<'right' | 'left'>('right');
   const [clubType, setClubType] = useState<'driver' | 'iron' | 'wedge'>('driver');
-  const [level, setLevel] = useState<
-    'beginner' | 'beginner_plus' | 'intermediate' | 'upper_intermediate' | 'advanced'
-  >('intermediate');
 
   const [previousReport, setPreviousReport] = useState<GolfAnalysisResponse | null>(null);
 
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [isExtracting, setIsExtracting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [phaseFrames, setPhaseFrames] = useState<PhaseFrame[]>([]);
-  const [frameUrls, setFrameUrls] = useState<string[]>([]);
-  const [sequenceFrames, setSequenceFrames] = useState<FrameMeta[]>([]);
 
   useEffect(() => {
     const latest = getLatestReport();
@@ -734,94 +727,10 @@ const GolfUploadPage = () => {
     }
   }, []);
 
-  useEffect(() => {
-    if (!file) {
-      setPhaseFrames([]);
-      return;
-    }
-    if (file.type.startsWith('video/')) {
-      return;
-    }
-
-    setIsExtracting(true);
-    buildPhaseFrames(file)
-      .then((frames) => setPhaseFrames(frames))
-      .catch((err) => {
-        console.error(err);
-        setError(err instanceof Error ? err.message : 'フレーム抽出に失敗しました');
-        setPhaseFrames([]);
-      })
-      .finally(() => setIsExtracting(false));
-  }, [file]);
-
-  const orderedPhaseFrames = useMemo(
-    () => PHASE_ORDER.map((phase) => phaseFrames.find((f) => f.phase === phase)).filter(Boolean) as PhaseFrame[],
-    [phaseFrames],
-  );
-
   const onFileSelected = async (selectedFile: File | null) => {
     setFile(selectedFile);
-    setFrameUrls([]);
-    setSequenceFrames([]);
-    setPhaseFrames([]);
     setError(null);
 
-    if (!selectedFile) return;
-
-    if (selectedFile.type.startsWith('video/')) {
-      setIsExtracting(true);
-
-      const form = new FormData();
-      form.append('file', selectedFile);
-
-      try {
-        const res = await fetch('/api/golf/extract/video', {
-          method: 'POST',
-          body: form,
-        });
-
-        if (!res.ok) {
-          const data = await res.json().catch(() => ({}));
-          throw new Error(data.error || 'フレーム抽出に失敗しました');
-        }
-
-        const data = (await res.json()) as { frames?: Array<{ url: string }> };
-        const urls = (data.frames || []).map((f) => f.url);
-        if (!urls.length) {
-          throw new Error('フレーム抽出に失敗しました');
-        }
-
-        // Vision に渡す枚数をモーションエナジーで間引く
-        const candidateFrames = await selectRepresentativeFrames(urls, 16);
-        const timeSorted = [...candidateFrames].sort((a, b) => a.index - b.index);
-        setFrameUrls(timeSorted.map((c) => c.url));
-        setSequenceFrames(timeSorted);
-
-        const mapping = await runVisionPhaseSelection(timeSorted);
-
-        const mappedFrames = PHASE_ORDER.map((phase) => {
-          const idx = mapping[phase];
-          const safeIndex =
-            typeof idx === 'number' && idx >= 0 && idx < timeSorted.length ? idx : 0;
-          const fallback = timeSorted[0]?.url ?? '';
-
-          return {
-            phase,
-            timestamp: timeSorted[safeIndex]?.timestampSec ?? 0,
-            imageBase64: timeSorted[safeIndex]?.url ?? fallback,
-            imageUrl: timeSorted[safeIndex]?.url ?? fallback,
-          } satisfies PhaseFrame;
-        });
-
-        setPhaseFrames(mappedFrames);
-      } catch (err) {
-        console.error(err);
-        setError(err instanceof Error ? err.message : 'フレーム抽出に失敗しました');
-        setPhaseFrames([]);
-      } finally {
-        setIsExtracting(false);
-      }
-    }
   };
 
   const handleSubmit = async (e: FormEvent) => {
@@ -833,35 +742,17 @@ const GolfUploadPage = () => {
       return;
     }
 
-    if (isExtracting) {
-      setError('フレーム抽出完了までお待ちください。');
-      return;
-    }
-
     try {
       setIsSubmitting(true);
 
-      const formData = new FormData();
-      formData.append('file', file);
-      formData.append('handedness', handedness);
-      formData.append('clubType', clubType);
-      formData.append('level', level);
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('handedness', handedness);
+    formData.append('clubType', clubType);
 
       if (previousReport) {
         formData.append('previousAnalysisId', previousReport.analysisId);
         formData.append('previousReportJson', JSON.stringify(previousReport.result));
-      }
-
-      if (orderedPhaseFrames.length) {
-        formData.append('phaseFramesJson', JSON.stringify(orderedPhaseFrames));
-        orderedPhaseFrames.forEach((frame) => {
-          formData.append('phaseFrames[]', frame.imageBase64);
-        });
-      }
-
-      if (sequenceFrames.length) {
-        const compact = sequenceFrames.map(({ url, timestampSec }) => ({ url, timestampSec }));
-        formData.append('sequenceFramesJson', JSON.stringify(compact));
       }
 
       const res = await fetch('/api/golf/analyze', {
@@ -949,78 +840,6 @@ const GolfUploadPage = () => {
                 <option value="wedge">ウェッジ</option>
               </select>
             </div>
-
-            <div className="space-y-2">
-              <label className="block text-sm font-medium">現在のレベル感</label>
-              <select
-                value={level}
-                onChange={(e) => setLevel(e.target.value as typeof level)}
-                className="w-full rounded-md border border-slate-600 bg-slate-900 px-3 py-2 text-sm"
-              >
-                <option value="beginner">初心者</option>
-                <option value="beginner_plus">初級</option>
-                <option value="intermediate">中級</option>
-                <option value="upper_intermediate">中上級</option>
-                <option value="advanced">上級</option>
-              </select>
-            </div>
-          </div>
-
-          {frameUrls.length > 0 && (
-            <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4 space-y-3">
-              <div>
-                <p className="text-sm font-semibold">抽出されたフレーム一覧</p>
-                <p className="text-xs text-slate-400">/api/golf/extract/video から返却されたフレームURLのプレビュー</p>
-              </div>
-              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                {frameUrls.map((url, i) => (
-                  <div
-                    key={i}
-                    className="aspect-video w-full overflow-hidden rounded-md border border-slate-800 bg-slate-900"
-                  >
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img src={url} alt={`frame-${i}`} className="h-full w-full object-contain bg-slate-950" />
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4 space-y-4">
-            <div className="flex items-center justify-between gap-3">
-              <div>
-                <p className="text-sm font-semibold">抽出された6フェーズ（デバッグ用）</p>
-                <p className="text-xs text-slate-400">
-                  動画読み込み後に Address → Finish までの代表フレームを自動抽出します。
-                </p>
-              </div>
-              <span className="text-xs px-3 py-1 rounded-full border border-emerald-500/60 text-emerald-200">
-                {isExtracting ? '解析中…' : '準備完了'}
-              </span>
-            </div>
-
-            {orderedPhaseFrames.length === 0 && (
-              <p className="text-sm text-slate-400">ファイル選択後にプレビューがここに表示されます。</p>
-            )}
-
-            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-              {orderedPhaseFrames.map((frame) => (
-                <div key={frame.phase} className="rounded-lg border border-slate-800 bg-slate-950/40 p-3 space-y-2">
-                  <div className="flex items-center justify-between text-xs text-slate-300">
-                    <span className="font-semibold">{PHASE_LABELS[frame.phase]}</span>
-                    <span>{frame.timestamp.toFixed(2)}s</span>
-                  </div>
-                  <div className="aspect-video w-full overflow-hidden rounded-md border border-slate-800 bg-slate-900">
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img
-                      src={frame.imageBase64}
-                      alt={`${frame.phase} frame`}
-                      className="h-full w-full object-contain bg-slate-950"
-                    />
-                  </div>
-                </div>
-              ))}
-            </div>
           </div>
 
           {error && (
@@ -1031,7 +850,7 @@ const GolfUploadPage = () => {
 
           <button
             type="submit"
-            disabled={isSubmitting || isExtracting}
+            disabled={isSubmitting}
             className="w-full rounded-md bg-emerald-500 hover:bg-emerald-400 disabled:bg-emerald-700 px-4 py-3 text-sm font-semibold text-slate-900 transition-colors"
           >
             {isSubmitting ? '診断中…' : 'このフレームで診断する'}

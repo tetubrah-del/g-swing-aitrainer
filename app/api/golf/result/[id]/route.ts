@@ -14,7 +14,7 @@ export async function GET(
   const { id } = await context.params;
   const analysisId = id as AnalysisId;
 
-  const stored = getAnalysis(analysisId);
+  const stored = await getAnalysis(analysisId);
 
   if (!stored) {
     return NextResponse.json(
