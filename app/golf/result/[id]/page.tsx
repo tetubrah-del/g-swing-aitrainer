@@ -135,18 +135,19 @@ const GolfResultPage = () => {
     };
   }, [data?.result?.totalScore]);
 
-  const roundEstimates = useMemo(() => {
+  const fallbackRoundEstimates = useMemo(() => {
     const totalScore = data?.result?.totalScore ?? 0;
-    const mid = Math.round(100 - totalScore * 0.3); // スコアが高いほどストロークは小さい想定
-    const spread = 2;
+    // 少し厳しめに換算して、実力より甘く出ないよう調整
+    const mid = Math.round(105 - totalScore * 0.28); // スコアが高いほどストロークは小さい想定
+    const spread = 3;
     const clamp = (v: number, min: number, max: number) => Math.min(max, Math.max(min, v));
-    const low = clamp(mid - spread, 60, 110);
-    const high = clamp(mid + spread, 60, 110);
+    const low = clamp(mid - spread, 60, 115);
+    const high = clamp(mid + spread, 60, 115);
 
-    // 簡易推定（適当な変換でイメージを示す）
-    const fwKeep = clamp(55 + totalScore * 0.2, 40, 80); // フェアウェイキープ率
-    const gir = clamp(35 + totalScore * 0.25, 20, 75); // パーオン率
-    const ob = clamp(2.5 - totalScore * 0.015, 0.3, 4); // 推定OB数/18H
+    // 簡易推定（少し厳しめ）
+    const fwKeep = clamp(50 + totalScore * 0.18, 40, 75); // フェアウェイキープ率
+    const gir = clamp(32 + totalScore * 0.18, 25, 65); // パーオン率
+    const ob = clamp(3.2 - totalScore * 0.012, 0.5, 4); // 推定OB数/18H
 
     return {
       strokeRange: `${low}〜${high}`,
@@ -155,6 +156,56 @@ const GolfResultPage = () => {
       ob: `${ob.toFixed(1)} 回`,
     };
   }, [data?.result?.totalScore]);
+
+  const [roundEstimates, setRoundEstimates] = useState(fallbackRoundEstimates);
+
+  useEffect(() => {
+    setRoundEstimates(fallbackRoundEstimates);
+    if (!data?.result) return;
+
+    let cancelled = false;
+    const run = async () => {
+      try {
+        const res = await fetch('/api/golf/round-estimate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            totalScore: data.result.totalScore,
+            phases: data.result.phases,
+            meta: data.meta,
+          }),
+        });
+
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          throw new Error(body.error || 'round-estimate failed');
+        }
+
+        const json = (await res.json()) as Partial<{
+          strokeRange: string;
+          fwKeep: string;
+          gir: string;
+          ob: string;
+        }>;
+
+        if (cancelled) return;
+        setRoundEstimates({
+          strokeRange: typeof json.strokeRange === 'string' ? json.strokeRange : fallbackRoundEstimates.strokeRange,
+          fwKeep: typeof json.fwKeep === 'string' ? json.fwKeep : fallbackRoundEstimates.fwKeep,
+          gir: typeof json.gir === 'string' ? json.gir : fallbackRoundEstimates.gir,
+          ob: typeof json.ob === 'string' ? json.ob : fallbackRoundEstimates.ob,
+        });
+      } catch (err) {
+        console.warn('[round-estimate fetch failed]', err);
+        if (!cancelled) setRoundEstimates(fallbackRoundEstimates);
+      }
+    };
+
+    run();
+    return () => {
+      cancelled = true;
+    };
+  }, [data?.result, data?.meta, fallbackRoundEstimates]);
 
   const extendedSummary = useMemo(() => {
     const base = (data?.result?.summary ?? '').trim();

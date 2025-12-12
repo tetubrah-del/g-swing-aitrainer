@@ -132,8 +132,9 @@ async function extractSequenceFramesFromBuffer(params: {
   buffer: Buffer;
   mimeType: string;
   maxFrames?: number;
+  mode?: "default" | "beta";
 }): Promise<Array<PhaseFrame & { timestampSec?: number }>> {
-  const { buffer, mimeType, maxFrames = 16 } = params;
+  const { buffer, mimeType, maxFrames = 16, mode = "default" } = params;
 
   if (mimeType.startsWith("image/")) {
     return [{ base64Image: buffer.toString("base64"), mimeType, timestampSec: 0 }];
@@ -152,11 +153,43 @@ async function extractSequenceFramesFromBuffer(params: {
     const duration = await getVideoDuration(inputPath);
     const count = Math.max(2, Math.min(maxFrames, 16));
 
+    // --------------------------------------------
+    // 抽出モード切替
+    // - default: 0.1s 刻みで先頭から終端まで埋める（端固定なし）
+    // - beta:    動画長に応じた可変刻み（0.06〜0.14s）で全域を均等配置
+    // --------------------------------------------
+    const safeEnd = Math.max(0, duration - 0.05);
+    const start = 0;
+    const end = safeEnd;
+
     const timestamps: number[] = [];
-    for (let i = 0; i < count; i++) {
-      const ratio = count === 1 ? 0 : i / Math.max(count - 1, 1);
-      const t = Math.min(Math.max(0, ratio * duration), Math.max(0, duration - 0.001));
-      timestamps.push(t);
+
+    if (mode === "beta") {
+      const step = Math.max(0.06, Math.min(0.14, (end - start) / Math.max(count - 1, 1)));
+      let t = start;
+      while (timestamps.length < count && t <= end + 1e-6) {
+        timestamps.push(Math.min(Math.max(0, t), safeEnd));
+        t += step;
+      }
+    } else {
+      const step = 0.1;
+      let t = start;
+      while (timestamps.length < count && t <= end + 1e-6) {
+        timestamps.push(Math.min(Math.max(0, t), safeEnd));
+        t += step;
+      }
+    }
+
+    // 足りない場合は均等補完して終端を確実に入れる
+    while (timestamps.length < count) {
+      const ratio = timestamps.length / Math.max(count - 1, 1);
+      const extra = start + (end - start) * ratio;
+      timestamps.push(Math.min(Math.max(0, extra), safeEnd));
+    }
+
+    // 終端が含まれない場合は末尾を置換
+    if (timestamps.length && Math.abs(timestamps[timestamps.length - 1] - safeEnd) > 1e-3) {
+      timestamps[timestamps.length - 1] = safeEnd;
     }
 
     const outputs = timestamps.map((_, idx) => path.join(tempDir, `seq-${idx}.jpg`));
@@ -293,8 +326,9 @@ export async function POST(req: NextRequest) {
 
     const file = formData.get("file");
     const handedness = formData.get("handedness");
-    const clubType = formData.get("clubType");
-    const level = formData.get("level");
+  const clubType = formData.get("clubType");
+  const level = formData.get("level");
+  const mode = formData.get("mode");
     const previousAnalysisId = formData.get("previousAnalysisId");
     const previousReportJson = formData.get("previousReportJson");
     const phaseFramesJson = formData.get("phaseFramesJson");
@@ -372,7 +406,12 @@ export async function POST(req: NextRequest) {
 
     let autoSequenceFrames: SequenceFrameInput[] = [];
     try {
-      const seqFrames = await extractSequenceFramesFromBuffer({ buffer, mimeType, maxFrames: 16 });
+    const seqFrames = await extractSequenceFramesFromBuffer({
+      buffer,
+      mimeType,
+      maxFrames: 16,
+      mode: mode === "beta" ? "beta" : "default",
+    });
       autoSequenceFrames = seqFrames.map((f) => ({
         url: `data:${f.mimeType};base64,${f.base64Image}`,
         timestampSec: f.timestampSec,

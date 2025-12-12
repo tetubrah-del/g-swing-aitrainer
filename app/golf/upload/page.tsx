@@ -1,7 +1,7 @@
 'use client';
 
 import { FormEvent, useEffect, useState } from 'react';
-import { useRouter } from 'next/navigation';
+import { usePathname, useRouter } from 'next/navigation';
 import { GolfAnalysisResponse } from '@/app/golf/types';
 import { getLatestReport } from '@/app/golf/utils/reportStorage';
 import { computePhaseIndices, type FramePose } from '@/app/lib/swing/phases';
@@ -710,6 +710,8 @@ async function buildPhaseFrames(file: File): Promise<PhaseFrame[]> {
 
 const GolfUploadPage = () => {
   const router = useRouter();
+  const pathname = usePathname();
+  const isBeta = pathname.includes('/golf/upload-beta');
 
   const [file, setFile] = useState<File | null>(null);
   const [handedness, setHandedness] = useState<'right' | 'left'>('right');
@@ -749,6 +751,7 @@ const GolfUploadPage = () => {
     formData.append('file', file);
     formData.append('handedness', handedness);
     formData.append('clubType', clubType);
+    formData.append('mode', isBeta ? 'beta' : 'default');
 
       if (previousReport) {
         formData.append('previousAnalysisId', previousReport.analysisId);
@@ -770,7 +773,7 @@ const GolfUploadPage = () => {
         throw new Error('analysisId がレスポンスに含まれていません。');
       }
 
-      router.push(`/golf/result/${data.analysisId}`);
+      router.push(isBeta ? `/golf/result-beta/${data.analysisId}` : `/golf/result/${data.analysisId}`);
     } catch (err: unknown) {
       console.error(err);
       const message = err instanceof Error ? err.message : '予期せぬエラーが発生しました。';
