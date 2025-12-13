@@ -30,6 +30,17 @@ export interface SequenceReview {
   stages?: SequenceStageFeedback[];
 }
 
+export interface CausalImpactExplanation {
+  issue: string;
+  relatedMiss: string;
+  scoreImpact: {
+    obDelta?: number;
+    scoreDelta: number;
+  };
+  source?: "ai" | "rule" | "fallback";
+  note?: string;
+}
+
 export interface SwingAnalysis {
   analysisId: string;
   createdAt: string;
@@ -68,9 +79,55 @@ export interface GolfAnalysisRecord {
 export interface GolfAnalysisResponse {
   analysisId: AnalysisId;
   result: SwingAnalysis;
+  causalImpact?: CausalImpactExplanation;
   note?: string;
   meta?: GolfAnalyzeMeta;
   createdAt?: number;
+}
+
+// スイングタイプ判定（AI用）
+export type SwingTypeKey =
+  | "body_turn"
+  | "arm_rotation"
+  | "shallow"
+  | "steep"
+  | "hand_first"
+  | "sweep"
+  | "one_plane"
+  | "two_plane";
+
+export interface SwingTypeMatch {
+  type: SwingTypeKey;
+  label: string;
+  matchScore: number; // 0-1
+  reason: string;
+}
+
+export interface SwingTypeDetail {
+  title: string;
+  shortDescription: string;
+  overview: string;
+  characteristics: string[];
+  recommendedFor: string[];
+  advantages: string[];
+  disadvantages: string[];
+  commonMistakes: string[];
+  cta: {
+    headline: string;
+    message: string;
+    buttonText: string;
+  };
+}
+
+export interface SwingTypeLLMResult {
+  swingTypeMatch: SwingTypeMatch[];
+  swingTypeDetails: Record<SwingTypeKey, SwingTypeDetail>;
+  nextCoachingContext?: {
+    description: string;
+    promptInstruction: string;
+  };
+  source?: "ai" | "fallback";
+  note?: string;
 }
 
 // MVP ダミー用のサンプル結果
