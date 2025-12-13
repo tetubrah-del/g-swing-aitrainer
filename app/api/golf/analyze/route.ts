@@ -151,7 +151,11 @@ async function extractSequenceFramesFromBuffer(params: {
   try {
     await fs.writeFile(inputPath, buffer);
     const duration = await getVideoDuration(inputPath);
-    const count = Math.max(2, Math.min(maxFrames, 16));
+    if (duration > 7) {
+      throw new Error("Video duration exceeds limit (7 seconds)");
+    }
+    const targetCount = Math.max(2, Math.min(maxFrames, 16));
+    const timeCount = mode === "beta" ? Math.min(20, targetCount + 6) : targetCount;
 
     // --------------------------------------------
     // 抽出モード切替
@@ -165,38 +169,122 @@ async function extractSequenceFramesFromBuffer(params: {
     const timestamps: number[] = [];
 
     if (mode === "beta") {
-      const step = Math.max(0.06, Math.min(0.14, (end - start) / Math.max(count - 1, 1)));
+      // ベータ: 全域均等ステップ + ダウン/インパクト寄りアンカーを優先、フィニッシュは1枚に抑制
+      const step = Math.max(0.05, (end - start) / Math.max(timeCount - 1, 1));
       let t = start;
-      while (timestamps.length < count && t <= end + 1e-6) {
+      while (timestamps.length < timeCount && t <= end + 1e-6) {
         timestamps.push(Math.min(Math.max(0, t), safeEnd));
         t += step;
       }
+
+      // 動画尺に応じてアンカーをスケーリング
+      const isLong = duration >= 4.0;
+      const anchorRatios = isLong
+        ? [0.34, 0.36, 0.40, 0.44, 0.48, 0.52, 0.56] // 長尺は前倒し
+        : [0.42, 0.44, 0.46, 0.48, 0.50, 0.52, 0.54, 0.58, 0.62, 0.66];
+      const anchors = anchorRatios.map((r) => Math.min(Math.max(0, r * duration), safeEnd));
+      anchors.forEach((v) => timestamps.push(v));
+
+      const unique = Array.from(new Set(timestamps.map((v) => Number(v.toFixed(4))))).sort((a, b) => a - b);
+
+      // フィニッシュ抑制: 終盤枠は1枚だけ
+      const finishThreshold = duration * 0.82;
+      const late = unique.filter((v) => v >= finishThreshold);
+      const latePick = late.length ? late[late.length - 1] : Math.min(safeEnd, duration);
+
+      const anchorSet = new Set(anchors.map((v) => Number(v.toFixed(4))));
+      const priority = Array.from(new Set([unique[0], ...unique.filter((v) => anchorSet.has(v)), latePick])).sort(
+        (a, b) => a - b
+      );
+
+      const remaining = unique.filter((v) => !priority.includes(v) && v < finishThreshold);
+      const slots = Math.max(timeCount - priority.length, 0);
+      const chosen: number[] = [];
+      if (slots > 0 && remaining.length > 0) {
+        const stride = (remaining.length - 1) / Math.max(slots - 1, 1);
+        for (let i = 0; i < slots; i += 1) {
+          const idx = Math.round(i * stride);
+          chosen.push(remaining[Math.min(remaining.length - 1, idx)]);
+        }
+      }
+
+      const merged = Array.from(new Set([...priority, ...chosen])).sort((a, b) => a - b);
+      const result =
+        merged.length > targetCount
+          ? (() => {
+              const res: number[] = [];
+              const stride = (merged.length - 1) / Math.max(targetCount - 1, 1);
+              for (let i = 0; i < targetCount; i += 1) {
+                const idx = Math.round(i * stride);
+                res.push(merged[Math.min(merged.length - 1, idx)]);
+              }
+              return res;
+            })()
+          : merged;
+
+      timestamps.length = 0;
+      timestamps.push(...result);
     } else {
-      const step = 0.1;
+      // default も beta と同じ: 均等ステップ + アンカー（動画尺で前倒し） + フィニッシュ1枚
+      const step = Math.max(0.05, (end - start) / Math.max(timeCount - 1, 1));
       let t = start;
-      while (timestamps.length < count && t <= end + 1e-6) {
+      while (timestamps.length < timeCount && t <= end + 1e-6) {
         timestamps.push(Math.min(Math.max(0, t), safeEnd));
         t += step;
       }
-    }
 
-    // 足りない場合は均等補完して終端を確実に入れる
-    while (timestamps.length < count) {
-      const ratio = timestamps.length / Math.max(count - 1, 1);
-      const extra = start + (end - start) * ratio;
-      timestamps.push(Math.min(Math.max(0, extra), safeEnd));
-    }
+      const isLong = duration >= 4.0;
+      const anchorRatios = isLong
+        ? [0.34, 0.36, 0.40, 0.44, 0.48, 0.52, 0.56]
+        : [0.42, 0.44, 0.46, 0.48, 0.50, 0.52, 0.54, 0.58, 0.62, 0.66];
+      const anchors = anchorRatios.map((r) => Math.min(Math.max(0, r * duration), safeEnd));
+      anchors.forEach((v) => timestamps.push(v));
 
-    // 終端が含まれない場合は末尾を置換
-    if (timestamps.length && Math.abs(timestamps[timestamps.length - 1] - safeEnd) > 1e-3) {
-      timestamps[timestamps.length - 1] = safeEnd;
+      const unique = Array.from(new Set(timestamps.map((v) => Number(v.toFixed(4))))).sort((a, b) => a - b);
+
+      const finishThreshold = duration * 0.82;
+      const late = unique.filter((v) => v >= finishThreshold);
+      const latePick = late.length ? late[late.length - 1] : Math.min(safeEnd, duration);
+
+      const anchorSet = new Set(anchors.map((v) => Number(v.toFixed(4))));
+      const priority = Array.from(new Set([unique[0], ...unique.filter((v) => anchorSet.has(v)), latePick])).sort(
+        (a, b) => a - b
+      );
+
+      const remaining = unique.filter((v) => !priority.includes(v) && v < finishThreshold);
+      const slots = Math.max(timeCount - priority.length, 0);
+      const chosen: number[] = [];
+      if (slots > 0 && remaining.length > 0) {
+        const stride = (remaining.length - 1) / Math.max(slots - 1, 1);
+        for (let i = 0; i < slots; i += 1) {
+          const idx = Math.round(i * stride);
+          chosen.push(remaining[Math.min(remaining.length - 1, idx)]);
+        }
+      }
+
+      const merged = Array.from(new Set([...priority, ...chosen])).sort((a, b) => a - b);
+      const result =
+        merged.length > targetCount
+          ? (() => {
+              const res: number[] = [];
+              const stride = (merged.length - 1) / Math.max(targetCount - 1, 1);
+              for (let i = 0; i < targetCount; i += 1) {
+                const idx = Math.round(i * stride);
+                res.push(merged[Math.min(merged.length - 1, idx)]);
+              }
+              return res;
+            })()
+          : merged;
+
+      timestamps.length = 0;
+      timestamps.push(...result);
     }
 
     const outputs = timestamps.map((_, idx) => path.join(tempDir, `seq-${idx}.jpg`));
     await Promise.all(timestamps.map((t, idx) => extractFrameAt(inputPath, outputs[idx], t)));
 
     const jpegMime = "image/jpeg";
-    const frames: Array<PhaseFrame & { timestampSec?: number }> = [];
+    let frames: Array<PhaseFrame & { timestampSec?: number }> = [];
     for (let i = 0; i < outputs.length; i++) {
       try {
         const fileBuf = await fs.readFile(outputs[i]);
@@ -209,6 +297,66 @@ async function extractSequenceFramesFromBuffer(params: {
         // skip missing frames; continue
       }
     }
+
+    // beta: 2段階抽出 - エナジーピークとアンカーで targetCount に絞り込む
+    if (mode === "beta" && frames.length > targetCount) {
+      const energy: number[] = [];
+      for (let i = 1; i < frames.length; i += 1) {
+        const a = Buffer.from(frames[i - 1].base64Image, "base64");
+        const b = Buffer.from(frames[i].base64Image, "base64");
+        const len = Math.min(a.length, b.length);
+        let diff = 0;
+        const stride = 24;
+        for (let j = 0; j < len; j += stride) {
+          diff += Math.abs(a[j] - b[j]);
+        }
+        energy.push(diff / Math.max(1, len / stride));
+      }
+
+      const pick = new Set<number>();
+      pick.add(0);
+      pick.add(frames.length - 1);
+
+      const addNearest = (ratio: number) => {
+        const t = ratio * duration;
+        let best = 0;
+        let bestDiff = Infinity;
+        frames.forEach((f, idx) => {
+          const d = Math.abs((f.timestampSec ?? 0) - t);
+          if (d < bestDiff) {
+            bestDiff = d;
+            best = idx;
+          }
+        });
+        pick.add(best);
+      };
+
+      [0.44, 0.5, 0.6].forEach(addNearest); // トップ〜インパクト近辺
+
+      // エナジーピーク（中盤優先）
+      const midStart = Math.floor(energy.length * 0.2);
+      const midEnd = Math.ceil(energy.length * 0.85);
+      const peakCandidates = energy
+        .map((e, i) => ({ e, idx: i + 1 })) // energy[i]は i->i+1 間
+        .filter(({ idx }) => idx >= midStart && idx <= midEnd)
+        .sort((a, b) => b.e - a.e)
+        .slice(0, 3);
+      peakCandidates.forEach(({ idx }) => pick.add(idx));
+
+      // 均等補完
+      const missing = targetCount - pick.size;
+      if (missing > 0) {
+        const stride = (frames.length - 1) / Math.max(missing + 1, 1);
+        for (let i = 1; i <= missing; i += 1) {
+          const idx = Math.round(i * stride);
+          pick.add(Math.min(frames.length - 1, idx));
+        }
+      }
+
+      const finalIdx = Array.from(pick).sort((a, b) => a - b).slice(0, targetCount);
+      frames = finalIdx.map((idx) => frames[idx]);
+    }
+
     return frames;
   } finally {
     await fs.rm(tempDir, { recursive: true, force: true }).catch(() => undefined);

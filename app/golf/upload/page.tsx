@@ -794,6 +794,9 @@ const GolfUploadPage = () => {
           <div className="grid gap-4 md:grid-cols-2">
             <div className="space-y-2">
               <label className="block text-sm font-medium">スイング画像 / 動画ファイル</label>
+              <p className="text-xs text-slate-400">
+                推奨: 3秒前後の単一スイング。7秒以上の動画はアップロードできません。
+              </p>
               <input
                 type="file"
                 accept="image/*,video/*"
