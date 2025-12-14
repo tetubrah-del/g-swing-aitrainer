@@ -2,6 +2,8 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
+import { buildCoachContext } from '@/app/coach/utils/context';
+import { saveBootstrapContext } from '@/app/coach/utils/storage';
 import type {
   CausalImpactExplanation,
   GolfAnalysisResponse,
@@ -357,6 +359,7 @@ const GolfResultPage = () => {
   const [anonymousUserId, setAnonymousUserId] = useState<string | null>(null);
   const [previousHistory, setPreviousHistory] = useState<SwingAnalysisHistory | null>(null);
   const [hasSavedHistory, setHasSavedHistory] = useState(false);
+  const [hasSeededCoachContext, setHasSeededCoachContext] = useState(false);
 
   useEffect(() => {
     const id = getAnonymousUserId();
@@ -798,6 +801,36 @@ const GolfResultPage = () => {
     hasSavedHistory,
     nextActionText,
     roundEstimates.strokeRange,
+    swingTypeSummary?.label,
+  ]);
+
+  useEffect(() => {
+    if (!anonymousUserId || !data?.analysisId || !causalImpact || hasSeededCoachContext) return;
+    const swingTypeTitle = bestTypeDetail?.title || bestType?.label || swingTypeSummary?.label || null;
+    const analyzedAtIso = data.createdAt ? new Date(data.createdAt).toISOString() : null;
+    const context = buildCoachContext({
+      causal: causalImpact,
+      displayIssue: displayIssueInfo.label,
+      chain: causalChain,
+      nextAction: nextActionText,
+      analysisId: data.analysisId,
+      summary: extendedSummary,
+      swingTypeHeadline: swingTypeTitle,
+      analyzedAt: analyzedAtIso,
+    });
+    saveBootstrapContext(anonymousUserId, context);
+    setHasSeededCoachContext(true);
+  }, [
+    anonymousUserId,
+    bestType?.label,
+    bestTypeDetail?.title,
+    causalChain,
+    causalImpact,
+    data?.analysisId,
+    displayIssueInfo.label,
+    extendedSummary,
+    hasSeededCoachContext,
+    nextActionText,
     swingTypeSummary?.label,
   ]);
 
