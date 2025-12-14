@@ -6,10 +6,13 @@ import type {
   CausalImpactExplanation,
   GolfAnalysisResponse,
   SequenceStageKey,
+  SwingAnalysisHistory,
   SwingTypeKey,
   SwingTypeLLMResult,
 } from '@/app/golf/types';
 import { saveReport } from '@/app/golf/utils/reportStorage';
+import { getAnonymousUserId, getSwingHistories, saveSwingHistory } from '@/app/golf/utils/historyStorage';
+import { buildRuleBasedCausalImpact } from '@/app/golf/utils/causalImpact';
 import { saveSwingTypeResult } from '@/app/golf/utils/swingTypeStorage';
 
 type SwingTypeBadge = {
@@ -127,53 +130,14 @@ type RoundEstimateMetrics = {
   ob: string;
 };
 
-const parseObFromText = (text?: string | null): number | null => {
-  if (!text) return null;
-  const match = text.match(/([0-9]+(?:\.[0-9]+)?)/);
-  if (!match) return null;
-  const value = Number(match[1]);
-  return Number.isFinite(value) ? value : null;
-};
-
 const buildLocalCausalImpact = (
   result: GolfAnalysisResponse['result'],
   estimates: RoundEstimateMetrics
 ): CausalImpactExplanation => {
-  const entries = Object.entries(result.phases) as Array<
-    [keyof typeof result.phases, (typeof result.phases)[keyof typeof result.phases]]
-  >;
-  const sorted = entries.sort((a, b) => (a[1]?.score ?? 99) - (b[1]?.score ?? 99));
-  const worst = sorted.find(([, phase]) => phase?.issues?.length)?.[1];
-
-  const issue =
-    worst?.issues?.[0] ||
-    result.summary?.split('。')?.[0]?.trim() ||
-    'スイング再現性が不足しています';
-
-  let relatedMiss = '打点と方向性が乱れやすい';
-  if (issue.includes('フェース') || issue.includes('開き')) {
-    relatedMiss = 'フェース管理が不安定';
-  } else if (issue.includes('体重') || issue.includes('重心')) {
-    relatedMiss = '軌道とコンタクトがぶれる';
-  } else if (issue.includes('リリース') || issue.includes('手首') || issue.includes('コック')) {
-    relatedMiss = 'リリースが早まりトップ/ダフリが出る';
-  }
-
-  const obParsed = parseObFromText(estimates.ob);
-  const fallbackOb = Math.max(0.6, 3 - result.totalScore * 0.01);
-  const obDelta = obParsed ?? fallbackOb;
-  const scoreDelta = Math.max(1, Math.round(obDelta * 2.3));
-
-  return {
-    issue,
-    relatedMiss,
-    scoreImpact: {
-      obDelta: Number(obDelta.toFixed(1)),
-      scoreDelta,
-    },
-    source: 'fallback',
-    note: '簡易推定（数値は目安）',
-  };
+  return buildRuleBasedCausalImpact({
+    result,
+    roundEstimates: { ob: estimates.ob, strokeRange: estimates.strokeRange },
+  });
 };
 
 const pickIssueRule = (text?: string | null): IssueRule | undefined => {
@@ -390,9 +354,19 @@ const GolfResultPage = () => {
   const [selectedSwingType, setSelectedSwingType] = useState<SwingTypeKey | null>(null);
   const [expandedAlt, setExpandedAlt] = useState<SwingTypeKey | null>(null);
   const [highlightFrames, setHighlightFrames] = useState<number[]>([]);
+  const [anonymousUserId, setAnonymousUserId] = useState<string | null>(null);
+  const [previousHistory, setPreviousHistory] = useState<SwingAnalysisHistory | null>(null);
+  const [hasSavedHistory, setHasSavedHistory] = useState(false);
+
+  useEffect(() => {
+    const id = getAnonymousUserId();
+    setAnonymousUserId(id || null);
+  }, []);
 
   useEffect(() => {
     if (!id) return;
+    setHasSavedHistory(false);
+    setPreviousHistory(null);
 
     const fetchResult = async () => {
       try {
@@ -439,6 +413,13 @@ const GolfResultPage = () => {
     };
     saveReport(record);
   }, [data]);
+
+  useEffect(() => {
+    if (!anonymousUserId || !data?.analysisId) return;
+    const histories = getSwingHistories(anonymousUserId);
+    const prev = histories.find((item) => item.analysisId !== data.analysisId) ?? null;
+    setPreviousHistory(prev);
+  }, [anonymousUserId, data?.analysisId]);
 
   const handleRetry = () => {
     router.push('/golf/upload');
@@ -706,7 +687,14 @@ const GolfResultPage = () => {
 
   const displayIssueInfo = useMemo(() => getDisplayIssue(causalImpact?.issue), [causalImpact?.issue]);
   const displayMissLabel = useMemo(() => getDisplayMiss(causalImpact?.relatedMiss), [causalImpact?.relatedMiss]);
-  const nextActionText = displayIssueInfo.nextAction;
+  const nextActionText = causalImpact?.nextAction?.content ?? displayIssueInfo.nextAction;
+  const causalChain = useMemo(() => {
+    if (!causalImpact) return [];
+    if (causalImpact.chain?.length) return causalImpact.chain;
+    const chain = [displayIssueInfo.label, displayMissLabel];
+    if (causalImpactText) chain.push(causalImpactText);
+    return chain;
+  }, [causalImpact, causalImpactText, displayIssueInfo.label, displayMissLabel]);
   const swingTypeBadges = useMemo(
     () => (data?.result ? deriveSwingTypes(data.result) : swingTypes),
     [data?.result, swingTypes]
@@ -766,6 +754,54 @@ const GolfResultPage = () => {
   }, [swingTypeMatches]);
 
   useEffect(() => {
+    if (
+      !anonymousUserId ||
+      !data?.analysisId ||
+      !data.result ||
+      !causalImpact ||
+      !roundEstimates.strokeRange ||
+      hasSavedHistory
+    ) {
+      return;
+    }
+
+    const createdAtSource = data.result.createdAt ?? data.createdAt;
+    const createdAtIso =
+      typeof createdAtSource === 'number'
+        ? new Date(createdAtSource).toISOString()
+        : createdAtSource ?? new Date().toISOString();
+
+    const history: SwingAnalysisHistory = {
+      analysisId: data.analysisId,
+      userId: anonymousUserId,
+      createdAt: createdAtIso,
+      swingScore: data.result.totalScore,
+      estimatedOnCourseScore: roundEstimates.strokeRange,
+      swingType: bestType?.label ?? swingTypeSummary?.label ?? '診断中',
+      priorityIssue: displayIssueInfo.label,
+      nextAction: nextActionText,
+    };
+
+    saveSwingHistory(history);
+    const histories = getSwingHistories(anonymousUserId);
+    const prev = histories.find((item) => item.analysisId !== history.analysisId) ?? null;
+    setPreviousHistory(prev);
+    setHasSavedHistory(true);
+  }, [
+    anonymousUserId,
+    bestType?.label,
+    causalImpact,
+    data?.analysisId,
+    data?.createdAt,
+    data?.result,
+    displayIssueInfo.label,
+    hasSavedHistory,
+    nextActionText,
+    roundEstimates.strokeRange,
+    swingTypeSummary?.label,
+  ]);
+
+  useEffect(() => {
     if (!highlightFrames.length) return;
     const targetId = `sequence-frame-${highlightFrames[0]}`;
     const el = typeof document !== 'undefined' ? document.getElementById(targetId) : null;
@@ -801,6 +837,9 @@ const GolfResultPage = () => {
   const sequenceFrames = result.sequence?.frames ?? [];
   const sequenceStages = result.sequence?.stages ?? [];
   const comparison = result.comparison;
+  const previousScoreDelta = previousHistory ? result.totalScore - previousHistory.swingScore : null;
+  const previousAnalyzedAt =
+    previousHistory?.createdAt ? new Date(previousHistory.createdAt).toLocaleString('ja-JP') : null;
 
   return (
     <main className="min-h-screen bg-slate-950 text-slate-50 flex justify-center">
@@ -840,6 +879,20 @@ const GolfResultPage = () => {
             <p className="text-xs text-slate-400">総合スイングスコア</p>
             <p className="text-3xl font-bold mt-1">{result.totalScore}</p>
             <p className="text-xs text-slate-400 mt-1">（100点満点）</p>
+            {previousHistory && (
+              <div className="mt-3 space-y-1 text-xs text-slate-300">
+                <p>
+                  前回{previousAnalyzedAt ? `（${previousAnalyzedAt}）` : ''}：{previousHistory.swingScore} 点
+                </p>
+                {typeof previousScoreDelta === 'number' && (
+                  <p className={previousScoreDelta >= 0 ? 'text-emerald-300' : 'text-rose-300'}>
+                    {previousScoreDelta === 0
+                      ? 'スコアは変化なし'
+                      : `今回 ${previousScoreDelta >= 0 ? '+' : ''}${previousScoreDelta} 点`}
+                  </p>
+                )}
+              </div>
+            )}
           </div>
           <div className="rounded-xl bg-slate-900/70 border border-slate-700 p-4 sm:col-span-2">
             <p className="text-xs text-slate-400">推奨ドリル</p>
@@ -859,39 +912,54 @@ const GolfResultPage = () => {
         <section className="rounded-xl bg-slate-900/70 border border-slate-700 p-4 space-y-3">
           <div className="flex items-center justify-between gap-3">
             <div>
-              <p className="text-xs text-slate-400">スコアへの因果チェーン</p>
+              <p className="text-xs text-slate-400">スコアへの因果チェーン（AI推定）</p>
               <p className="text-sm font-semibold text-slate-100">最もスコアに影響する1点をピックアップ</p>
             </div>
-            <div className="text-[11px] text-slate-400">
-              {isCausalLoading ? '推定中…' : causalImpact?.source === 'ai' ? 'AI推定' : 'ルールベース'}
+            <div className="flex items-center gap-2 text-[11px] text-slate-400">
+              {causalImpact?.confidence && (
+                <span
+                  className={
+                    causalImpact.confidence === 'high'
+                      ? 'text-emerald-300'
+                      : causalImpact.confidence === 'medium'
+                        ? 'text-amber-200'
+                        : 'text-rose-200'
+                  }
+                >
+                  信頼度: {causalImpact.confidence === 'high' ? '高' : causalImpact.confidence === 'medium' ? '中' : '低（参考）'}
+                </span>
+              )}
+              <span>{isCausalLoading ? '推定中…' : causalImpact?.source === 'ai' ? 'AI推定' : 'ルールベース'}</span>
             </div>
           </div>
           {causalImpact ? (
             <div className="space-y-2">
-              <div className="flex flex-col sm:flex-row sm:items-center sm:space-x-2 space-y-2 sm:space-y-0">
-                <span className="px-3 py-2 rounded-lg bg-rose-900/40 border border-rose-700/50 text-sm font-semibold text-rose-100">
-                  {displayIssueInfo.label}
-                </span>
-                <span className="text-slate-400 text-lg sm:px-1">→</span>
-                <span className="px-3 py-2 rounded-lg bg-slate-800/60 border border-slate-700 text-sm text-slate-100">
-                  {displayMissLabel}
-                </span>
-                <span className="text-slate-400 text-lg sm:px-1">→</span>
-                <span className="px-3 py-2 rounded-lg bg-emerald-900/40 border border-emerald-700/50 text-sm font-semibold text-emerald-100">
-                  {causalImpactText}
-                </span>
-              </div>
-              <div className="flex flex-col sm:items-end">
-                <div className="flex items-start gap-2 text-sm text-emerald-100 sm:text-right">
-                  <span className="text-[12px] text-emerald-200 whitespace-nowrap">▶ 次の練習で意識：</span>
-                  <span className="leading-tight">{nextActionText}</span>
-                </div>
+              <div className="flex flex-wrap items-center gap-2">
+                {causalChain.map((item, idx) => (
+                  <div key={`${item}-${idx}`} className="flex items-center gap-2">
+                    <div
+                      className={`px-3 py-2 rounded-lg border text-sm ${
+                        idx === 0
+                          ? 'bg-rose-900/40 border-rose-700/50 text-rose-100'
+                          : idx === causalChain.length - 1
+                            ? 'bg-emerald-900/40 border-emerald-700/50 text-emerald-100'
+                            : 'bg-slate-800/60 border-slate-700 text-slate-100'
+                      }`}
+                    >
+                      {item}
+                    </div>
+                    {idx < causalChain.length - 1 && <span className="text-slate-400 text-lg">→</span>}
+                  </div>
+                ))}
               </div>
             </div>
           ) : (
             <p className="text-sm text-slate-300">因果チェーンを準備中です。</p>
           )}
-          <p className="text-[11px] text-slate-500">数値は推定です。最重要の1点のみ表示しています。</p>
+          <p className="text-[11px] text-slate-500">
+            {causalImpact?.note ?? '数値は推定です。最重要の1点のみ表示しています。'}
+            {causalImpact?.confidence === 'low' ? '（参考表示）' : ''}
+          </p>
         </section>
 
         {/* 推定ラウンドスコア＆レベル診断 */}
@@ -1229,19 +1297,44 @@ const GolfResultPage = () => {
             <p className="text-sm font-semibold">ほかに進められるスイング型</p>
             <div className="space-y-2">
               {alternativeTypes.map((match, idx) => {
-                const detail = swingTypeLLM.swingTypeDetails[match.type];
+                const detail =
+                  swingTypeLLM.swingTypeDetails[match.type] ||
+                  {
+                    title: match.label,
+                    shortDescription: match.reason,
+                    overview: swingTypeSummary?.reasons?.join('。') ?? match.reason,
+                    characteristics: [],
+                    recommendedFor: [],
+                    advantages: [],
+                    disadvantages: [],
+                    commonMistakes: [],
+                    cta: bestTypeDetail?.cta || {
+                      headline: 'このスイングを目指したい方へ',
+                      message:
+                        'このスイング型を自分に合った形で身につけるには、自己流ではなく客観的なチェックが重要です。AIコーチなら、あなたのスイング動画をもとに、この型に近づくための具体的な改善ポイントを段階的にアドバイスできます。',
+                      buttonText: 'この型を目標にAIコーチに相談する',
+                    },
+                  };
                 const isOpen = expandedAlt === match.type;
+                const reasonText =
+                  match.reason && /記述/.test(match.reason)
+                    ? detail.shortDescription || 'この型の動きがマッチするため'
+                    : match.reason || detail.shortDescription || 'この型の動きがマッチするため';
                 return (
                   <div key={`${match.type}-${idx}`} className="rounded-lg border border-slate-800 bg-slate-950/60">
                     <button
+                      type="button"
                       onClick={() => setExpandedAlt(isOpen ? null : match.type)}
                       className={`w-full flex items-center justify-between px-3 py-2 text-left transition-colors ${
                         isOpen ? 'bg-slate-900/70 border-b border-emerald-500/40' : 'hover:border-emerald-400/50'
                       }`}
                     >
                       <div className="flex flex-col">
-                        <span className="text-sm font-semibold text-slate-100">{match.label}</span>
-                        <span className="text-[11px] text-slate-400">{match.reason}</span>
+                        <span className="text-sm font-semibold text-slate-100 flex items-center gap-2">
+                          <span>{match.label}</span>
+                          <span className="text-[10px] text-slate-400">{isOpen ? '▲' : '▼'}</span>
+                        </span>
+                        <span className="text-[11px] text-slate-400">{reasonText}</span>
                       </div>
                       <span className="text-xs font-semibold text-emerald-200">{Math.round(match.matchScore * 100)}%</span>
                     </button>

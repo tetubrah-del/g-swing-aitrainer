@@ -32,10 +32,17 @@ export interface SequenceReview {
 
 export interface CausalImpactExplanation {
   issue: string;
+  primaryIssue?: string;
   relatedMiss: string;
   scoreImpact: {
     obDelta?: number;
     scoreDelta: number;
+  };
+  chain?: string[];
+  confidence?: "high" | "medium" | "low";
+  nextAction?: {
+    title: string;
+    content: string;
   };
   source?: "ai" | "rule" | "fallback";
   note?: string;
@@ -129,6 +136,17 @@ export interface SwingTypeLLMResult {
   source?: "ai" | "fallback";
   note?: string;
 }
+
+export type SwingAnalysisHistory = {
+  analysisId: string;
+  userId: string;
+  createdAt: string;
+  swingScore: number;
+  estimatedOnCourseScore: string;
+  swingType: string;
+  priorityIssue: string;
+  nextAction: string;
+};
 
 // MVP ダミー用のサンプル結果
 export const MOCK_GOLF_ANALYSIS_RESULT: SwingAnalysis = {

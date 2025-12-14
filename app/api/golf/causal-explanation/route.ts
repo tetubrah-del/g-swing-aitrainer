@@ -2,6 +2,7 @@
 import { NextResponse } from "next/server";
 import OpenAI from "openai";
 import { CausalImpactExplanation, GolfAnalyzeMeta, SwingAnalysis } from "@/app/golf/types";
+import { buildRuleBasedCausalImpact } from "@/app/golf/utils/causalImpact";
 
 export const runtime = "nodejs";
 
@@ -22,69 +23,6 @@ type CausalRequestPayload = {
   // fallback: result を丸ごと送ってきた場合も拾えるように
   result?: Pick<SwingAnalysis, "totalScore" | "phases" | "summary">;
 };
-
-const clamp = (v: number, min: number, max: number) => Math.min(max, Math.max(min, v));
-
-function parseObEstimate(ob?: string | number | null): number | undefined {
-  if (typeof ob === "number" && Number.isFinite(ob)) return ob;
-  if (typeof ob === "string") {
-    const m = ob.match(/([0-9]+(?:\.[0-9]+)?)/);
-    if (m) {
-      const n = Number(m[1]);
-      if (Number.isFinite(n)) return n;
-    }
-  }
-  return undefined;
-}
-
-function pickWorstIssue(phases?: SwingAnalysis["phases"], summary?: string): { issue: string; relatedMiss: string } {
-  if (phases) {
-    const entries = Object.entries(phases) as Array<[keyof typeof phases, (typeof phases)[keyof typeof phases]]>;
-    const sorted = entries.sort((a, b) => (a[1]?.score ?? 99) - (b[1]?.score ?? 99));
-    for (const [, phase] of sorted) {
-      const candidate = phase?.issues?.[0];
-      if (candidate) {
-        const relatedMiss =
-          candidate.includes("フェース") || candidate.includes("開き")
-            ? "フェース管理が不安定"
-            : candidate.includes("体重") || candidate.includes("重心")
-              ? "軌道とコンタクトがぶれる"
-              : candidate.includes("リリース") || candidate.includes("リスト") || candidate.includes("手首")
-                ? "リリースが早まりトップやダフリが出る"
-                : "打点と方向性が乱れやすい";
-        return { issue: candidate, relatedMiss };
-      }
-    }
-  }
-
-  const fallbackIssue = summary?.split("\n")?.[0]?.trim() || "スイングの再現性が不足";
-  return {
-    issue: fallbackIssue,
-    relatedMiss: "打点と方向性が乱れやすい",
-  };
-}
-
-function buildFallback(payload: CausalRequestPayload): CausalImpactExplanation {
-  const totalScoreRaw = payload.totalScore ?? payload.result?.totalScore ?? 0;
-  const totalScore = clamp(Number.isFinite(totalScoreRaw) ? Number(totalScoreRaw) : 0, 0, 100);
-  const phases = payload.phases ?? payload.result?.phases;
-  const summary = payload.summary ?? payload.result?.summary;
-  const { issue, relatedMiss } = pickWorstIssue(phases, summary);
-  const obFromEstimate = parseObEstimate(payload.roundEstimates?.ob);
-  const obDelta = obFromEstimate ?? clamp(3.2 - totalScore * 0.012, 0.6, 4.5);
-  const scoreDelta = Math.max(1, Math.round(obDelta * 2.3 + (100 - totalScore) * 0.015));
-
-  return {
-    issue,
-    relatedMiss,
-    scoreImpact: {
-      obDelta: Number.isFinite(obDelta) ? Number(obDelta.toFixed(1)) : undefined,
-      scoreDelta,
-    },
-    source: "fallback",
-    note: "ルールベースの推定（数値は推定値）",
-  };
-}
 
 function buildPrompt(params: { payload: CausalRequestPayload; fallback: CausalImpactExplanation }) {
   const { payload, fallback } = params;
@@ -127,6 +65,9 @@ function buildPrompt(params: { payload: CausalRequestPayload; fallback: CausalIm
     "obDelta": 2.2,
     "scoreDelta": 5
   },
+  "chain": ["問題点", "ミス", "OB +2.2回（18H換算）", "推定スコア +5打"],
+  "confidence": "high | medium | low",
+  "nextAction": { "title": "次の練習で意識", "content": "1つだけ提示" },
   "note": "数値は推定であることを明示"
 }
 `;
@@ -142,7 +83,7 @@ function normalizeFromAi(candidate: unknown, fallback: CausalImpactExplanation):
       : fallback.relatedMiss;
 
   const impact = (obj.scoreImpact ?? {}) as Record<string, unknown>;
-  const obDeltaRaw = typeof impact.obDelta === "number" ? impact.obDelta : parseObEstimate(impact.obDelta as any);
+  const obDeltaRaw = typeof impact.obDelta === "number" ? impact.obDelta : fallback.scoreImpact.obDelta;
   const obDelta = Number.isFinite(obDeltaRaw) ? Number((obDeltaRaw as number).toFixed(1)) : fallback.scoreImpact.obDelta;
   const scoreDeltaCandidate = typeof impact.scoreDelta === "number" ? impact.scoreDelta : fallback.scoreImpact.scoreDelta;
   const scoreDelta = Number.isFinite(scoreDeltaCandidate)
@@ -150,11 +91,28 @@ function normalizeFromAi(candidate: unknown, fallback: CausalImpactExplanation):
     : fallback.scoreImpact.scoreDelta;
 
   const note = typeof obj.note === "string" && obj.note.trim().length > 0 ? obj.note.trim() : fallback.note;
+  const chain = Array.isArray(obj.chain) ? (obj.chain.filter((c) => typeof c === "string") as string[]) : fallback.chain;
+  const confidence =
+    obj.confidence === "high" || obj.confidence === "medium" || obj.confidence === "low"
+      ? obj.confidence
+      : fallback.confidence;
+  const nextActionRaw = obj.nextAction as Record<string, unknown> | undefined;
+  const nextAction =
+    nextActionRaw && typeof nextActionRaw === "object" && typeof nextActionRaw.content === "string"
+      ? {
+          title: typeof nextActionRaw.title === "string" ? nextActionRaw.title : fallback.nextAction?.title ?? "次の練習で意識",
+          content: nextActionRaw.content,
+        }
+      : fallback.nextAction;
 
   return {
     issue,
+    primaryIssue: issue,
     relatedMiss,
     scoreImpact: { obDelta, scoreDelta },
+    chain,
+    nextAction,
+    confidence,
     source: "ai",
     note,
   };
@@ -163,7 +121,14 @@ function normalizeFromAi(candidate: unknown, fallback: CausalImpactExplanation):
 export async function POST(req: Request) {
   try {
     const payload = (await req.json().catch(() => ({}))) as CausalRequestPayload;
-    const fallback = buildFallback(payload);
+    const fallback = buildRuleBasedCausalImpact({
+      result: payload.result as SwingAnalysis | undefined,
+      phases: payload.phases,
+      totalScore: payload.totalScore,
+      summary: payload.summary,
+      roundEstimates: payload.roundEstimates,
+      meta: payload.meta,
+    });
 
     if (!client.apiKey) {
       return NextResponse.json(
@@ -204,7 +169,7 @@ export async function POST(req: Request) {
   } catch (err: unknown) {
     console.error("[causal-explanation]", err);
     return NextResponse.json(
-      { causalImpact: buildFallback({}), note: "AI generation failed; fallback used" },
+      { causalImpact: buildRuleBasedCausalImpact({}), note: "AI generation failed; fallback used" },
       { status: 200 }
     );
   }
