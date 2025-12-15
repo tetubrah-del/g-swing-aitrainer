@@ -12,7 +12,13 @@ async function loadFromDisk() {
     const parsed = JSON.parse(raw) as Record<string, GolfAnalysisRecord>;
     Object.entries(parsed).forEach(([id, record]) => {
       if (record && typeof record === "object") {
-        analyses.set(id, record);
+        const normalized: GolfAnalysisRecord = {
+          ...record,
+          createdAt: typeof record.createdAt === "number" ? record.createdAt : Date.now(),
+          userId: "userId" in record ? record.userId : null,
+          anonymousUserId: "anonymousUserId" in record ? record.anonymousUserId : null,
+        };
+        analyses.set(id, normalized);
       }
     });
   } catch {
@@ -40,4 +46,48 @@ export async function saveAnalysis(record: GolfAnalysisRecord) {
 export async function getAnalysis(id: string) {
   await loadPromise;
   return analyses.get(id) ?? null;
+}
+
+export async function countMonthlyAnalyses(
+  identifiers: { userId?: string | null; anonymousUserId?: string | null },
+  now: number = Date.now()
+): Promise<number> {
+  await loadPromise;
+
+  const startOfMonth = new Date(now);
+  startOfMonth.setUTCDate(1);
+  startOfMonth.setUTCHours(0, 0, 0, 0);
+  const startTs = startOfMonth.getTime();
+
+  const { userId, anonymousUserId } = identifiers;
+
+  let count = 0;
+  analyses.forEach((record) => {
+    const createdAt = typeof record.createdAt === "number" ? record.createdAt : Date.now();
+    if (createdAt < startTs) return;
+
+    const belongsToUser =
+      (userId && record.userId === userId) || (anonymousUserId && record.anonymousUserId === anonymousUserId);
+    if (belongsToUser) {
+      count += 1;
+    }
+  });
+
+  return count;
+}
+
+export async function attachUserToAnonymousAnalyses(anonymousUserId: string, userId: string) {
+  await loadPromise;
+  let updated = false;
+
+  analyses.forEach((record, id) => {
+    if (record.anonymousUserId === anonymousUserId && record.userId !== userId) {
+      analyses.set(id, { ...record, userId });
+      updated = true;
+    }
+  });
+
+  if (updated) {
+    await persistToDisk();
+  }
 }

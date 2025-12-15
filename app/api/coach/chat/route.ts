@@ -34,6 +34,7 @@ const buildPrompt = (payload: CoachChatRequest) => {
   const summary = payload.summaryText?.slice(0, 600) || "前回要約なし";
   const profile = payload.userProfileSummary || "ユーザープロフィール情報なし";
   const recent = formatRecentMessages(payload.recentMessages);
+  const latestUserMessage = payload.userMessage?.slice(0, 400) || "";
   const toneInstruction =
     confidence === "high"
       ? "断定的かつ行動重視で提示する。"
@@ -69,14 +70,18 @@ ${summary}
 【RecentMessages（新しい順）】
 ${recent}
 
+【最新のユーザー質問/要望】
+${latestUserMessage || "（直近の質問なし）"}
+
 ${toneInstruction}
 ${ask}
 
 制約:
+- まずユーザー質問に1文で直接答える。答えられない場合はその旨を簡潔に伝える。
 - 改善点は1つだけ。
 - primaryFactorから逸脱しない。
 - confidenceがlowの場合は「参考推定」「次回動画で確認」を含める。
-- 返答は日本語で4〜6文以内。
+- 返答は日本語で4〜6文以内（うち1文は質問への直接回答）。
 - 行動や次の動画撮影で見るポイントを必ず1つ入れる。
 `;
 };
@@ -116,7 +121,7 @@ export async function POST(req: Request) {
         {
           role: "system",
           content:
-            "厳守: (1) 改善は常に1つ。 (2) primaryFactorに紐づける。 (3) 次の練習・次回動画で確認するチェックポイントを入れる。 (4) confidenceがlowなら参考推定として扱う。",
+            "厳守: (1) 最新のユーザー質問にまず1文で答える（できない場合はできないと述べる）。 (2) 改善は常に1つ。 (3) primaryFactorに紐づける。 (4) 次の練習・次回動画で確認するチェックポイントを入れる。 (5) confidenceがlowなら参考推定として扱う。",
         },
         { role: "user", content: prompt },
       ],

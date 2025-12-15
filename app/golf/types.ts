@@ -76,11 +76,41 @@ export interface GolfAnalyzeMeta {
   previousAnalysisId?: AnalysisId | null;
 }
 
+export type AuthProvider = "google";
+export type ProAccessReason = "paid" | "monitor";
+
+export type UserUsageState = {
+  isAuthenticated: boolean;
+  hasProAccess: boolean;
+  isMonitor?: boolean;
+  monthlyAnalysis?: {
+    used: number;
+    limit: number | null;
+    remaining: number | null;
+  };
+};
+
+export interface UserAccount {
+  userId: string;
+  email: string | null;
+  authProvider: AuthProvider | null;
+  createdAt: number;
+  updatedAt: number;
+  proAccess: boolean;
+  proAccessReason: ProAccessReason | null;
+  proAccessExpiresAt: number | null;
+  anonymousIds?: string[];
+}
+
+export type UserState = "anonymous" | "registered" | "pro";
+
 export interface GolfAnalysisRecord {
   id: AnalysisId;
   result: SwingAnalysis;
   meta: GolfAnalyzeMeta;
   createdAt: number;
+  userId?: string | null;
+  anonymousUserId?: string | null;
 }
 
 export interface GolfAnalysisResponse {
@@ -90,6 +120,7 @@ export interface GolfAnalysisResponse {
   note?: string;
   meta?: GolfAnalyzeMeta;
   createdAt?: number;
+  userState?: UserUsageState;
 }
 
 // スイングタイプ判定（AI用）

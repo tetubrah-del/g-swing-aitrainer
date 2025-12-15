@@ -2,9 +2,11 @@
 
 import { FormEvent, useEffect, useState } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
-import { GolfAnalysisResponse } from '@/app/golf/types';
+import { GolfAnalysisResponse, UserUsageState } from '@/app/golf/types';
+import { getAnonymousUserId } from '@/app/golf/utils/historyStorage';
 import { getLatestReport } from '@/app/golf/utils/reportStorage';
 import { computePhaseIndices, type FramePose } from '@/app/lib/swing/phases';
+import { useUserState } from '@/app/golf/state/userState';
 
 const PHASE_ORDER = [
   'address',
@@ -62,6 +64,12 @@ type RawFrame = {
   imageBase64: string;
   mimeType: string;
   duration: number;
+};
+
+type AnalyzeResponse = {
+  analysisId: string;
+  note?: string;
+  userState?: UserUsageState;
 };
 
 type PosePipeline = ((input: string | Blob, options?: Record<string, unknown>) => Promise<unknown>) | null;
@@ -712,15 +720,18 @@ const GolfUploadPage = () => {
   const router = useRouter();
   const pathname = usePathname();
   const isBeta = pathname.includes('/golf/upload-beta');
+  const { state: userState, setUserState } = useUserState();
 
   const [file, setFile] = useState<File | null>(null);
   const [handedness, setHandedness] = useState<'right' | 'left'>('right');
   const [clubType, setClubType] = useState<'driver' | 'iron' | 'wedge'>('driver');
 
   const [previousReport, setPreviousReport] = useState<GolfAnalysisResponse | null>(null);
+  const [anonymousUserId] = useState<string>(() => getAnonymousUserId());
 
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [limitInfo, setLimitInfo] = useState<UserUsageState['monthlyAnalysis'] | null>(null);
 
   useEffect(() => {
     const latest = getLatestReport();
@@ -728,6 +739,14 @@ const GolfUploadPage = () => {
       setPreviousReport(latest);
     }
   }, []);
+
+  useEffect(() => {
+    if (!userState.hasProAccess && userState.monthlyAnalysis) {
+      setLimitInfo(userState.monthlyAnalysis ?? null);
+    } else if (userState.hasProAccess) {
+      setLimitInfo(null);
+    }
+  }, [userState]);
 
   const onFileSelected = async (selectedFile: File | null) => {
     setFile(selectedFile);
@@ -738,6 +757,7 @@ const GolfUploadPage = () => {
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
     setError(null);
+    setLimitInfo(null);
 
     if (!file) {
       setError('スイングの画像または動画ファイルを選択してください。');
@@ -747,11 +767,14 @@ const GolfUploadPage = () => {
     try {
       setIsSubmitting(true);
 
-    const formData = new FormData();
-    formData.append('file', file);
-    formData.append('handedness', handedness);
-    formData.append('clubType', clubType);
-    formData.append('mode', isBeta ? 'beta' : 'default');
+      const formData = new FormData();
+      formData.append('file', file);
+      formData.append('handedness', handedness);
+      formData.append('clubType', clubType);
+      formData.append('mode', isBeta ? 'beta' : 'default');
+      if (anonymousUserId) {
+        formData.append('anonymousUserId', anonymousUserId);
+      }
 
       if (previousReport) {
         formData.append('previousAnalysisId', previousReport.analysisId);
@@ -763,13 +786,29 @@ const GolfUploadPage = () => {
         body: formData,
       });
 
+      const data = (await res.json().catch(() => ({}))) as AnalyzeResponse & { error?: string; message?: string };
+
       if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        throw new Error(data.error || '診断APIの呼び出しに失敗しました。');
+        if (res.status === 429 && data?.userState) {
+          setUserState(data.userState);
+          if (data.userState.monthlyAnalysis) {
+            setLimitInfo(data.userState.monthlyAnalysis ?? null);
+          }
+          setError(data.message || data.error || '今月の無料診断回数を使い切りました。');
+          return;
+        }
+        setError(data?.message || data?.error || '診断APIの呼び出しに失敗しました。');
+        return;
       }
 
-      const data = (await res.json()) as { analysisId: string };
-      if (!data.analysisId) {
+      if (data.userState) {
+        setUserState(data.userState);
+        if (!data.userState.hasProAccess && data.userState.monthlyAnalysis) {
+          setLimitInfo(data.userState.monthlyAnalysis ?? null);
+        }
+      }
+
+      if (!data?.analysisId) {
         throw new Error('analysisId がレスポンスに含まれていません。');
       }
 
@@ -789,6 +828,40 @@ const GolfUploadPage = () => {
         <h1 className="text-2xl font-semibold text-center">
           AIゴルフスイング診断 – アップロード
         </h1>
+
+        {!userState.hasProAccess && limitInfo && (
+          <div className="rounded-lg border border-amber-400/60 bg-amber-500/10 px-4 py-3 text-sm text-amber-50 space-y-1">
+            <div className="flex items-center justify-between gap-3">
+              <p className="font-semibold">今月の無料診断：残り {limitInfo.remaining ?? 0} 回</p>
+              <span className="text-xs text-amber-100/80">
+                {limitInfo.used} / {limitInfo.limit ?? 0} 回利用
+              </span>
+            </div>
+            {(limitInfo.remaining ?? 0) <= 1 && (
+              <p className="text-xs text-amber-200">
+                継続的なスイング改善には複数回の分析が必要です。PROなら回数無制限で試せます。
+              </p>
+            )}
+            <div className="mt-2 flex flex-wrap gap-2">
+              {!userState.isAuthenticated && (
+                <button
+                  type="button"
+                  className="rounded-md border border-amber-200/60 bg-white/10 px-3 py-2 text-xs font-semibold hover:bg-white/15"
+                >
+                  登録して続ける
+                </button>
+              )}
+              {userState.isAuthenticated && (
+                <button
+                  type="button"
+                  className="rounded-md border border-emerald-200/60 bg-emerald-500/15 px-3 py-2 text-xs font-semibold text-emerald-50 hover:bg-emerald-500/25"
+                >
+                  PROにアップグレード
+                </button>
+              )}
+            </div>
+          </div>
+        )}
 
         <form onSubmit={handleSubmit} className="space-y-6">
           <div className="grid gap-4 md:grid-cols-2">

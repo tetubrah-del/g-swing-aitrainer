@@ -16,6 +16,7 @@ import { getLatestReport, getReportById, saveReport } from '@/app/golf/utils/rep
 import { getAnonymousUserId, getSwingHistories, saveSwingHistory } from '@/app/golf/utils/historyStorage';
 import { buildRuleBasedCausalImpact } from '@/app/golf/utils/causalImpact';
 import { saveSwingTypeResult } from '@/app/golf/utils/swingTypeStorage';
+import { useUserState } from '@/app/golf/state/userState';
 
 type SwingTypeBadge = {
   label: string;
@@ -343,6 +344,7 @@ const GolfResultPage = () => {
   const params = useParams();
   const router = useRouter();
   const id = (params?.id ?? '') as string;
+  const { state: userState } = useUserState();
 
   const [data, setData] = useState<GolfAnalysisResponse | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -908,6 +910,7 @@ const GolfResultPage = () => {
   const previousScoreDelta = previousHistory ? result.totalScore - previousHistory.swingScore : null;
   const previousAnalyzedAt =
     previousHistory?.createdAt ? new Date(previousHistory.createdAt).toLocaleString('ja-JP') : null;
+  const usageBanner = !userState.hasProAccess ? userState.monthlyAnalysis : null;
 
   return (
     <main className="min-h-screen bg-slate-950 text-slate-50 flex justify-center">
@@ -934,6 +937,22 @@ const GolfResultPage = () => {
             再診断する
           </button>
         </header>
+
+        {usageBanner && (
+          <div className="rounded-lg border border-amber-300/60 bg-amber-500/10 px-4 py-3 text-sm text-amber-50 space-y-1">
+            <div className="flex items-center justify-between gap-3">
+              <p className="font-semibold">今月の無料診断：残り {usageBanner.remaining ?? 0} 回</p>
+              <span className="text-xs text-amber-100/80">
+                {usageBanner.used} / {usageBanner.limit ?? 0} 回利用
+              </span>
+            </div>
+            {(usageBanner.remaining ?? 0) <= 1 && (
+              <p className="text-xs text-amber-200">
+                継続的なスイング改善には複数回の分析が必要です。PROなら回数無制限で試せます。
+              </p>
+            )}
+          </div>
+        )}
 
         {(note || fallbackNote) && (
           <p className="text-xs text-amber-300">

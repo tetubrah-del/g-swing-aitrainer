@@ -8,11 +8,19 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { NextRequest, NextResponse } from "next/server";
-import { AnalysisId, GolfAnalyzeMeta, GolfAnalysisRecord, SwingAnalysis, MOCK_GOLF_ANALYSIS_RESULT } from "@/app/golf/types";
+import {
+  AnalysisId,
+  GolfAnalyzeMeta,
+  GolfAnalysisRecord,
+  SwingAnalysis,
+  MOCK_GOLF_ANALYSIS_RESULT,
+  UserAccount,
+} from "@/app/golf/types";
 import { askVisionAPI } from "@/app/lib/vision/askVisionAPI";
 import { extractPhaseFrames, PhaseFrame, PhaseKey, PhaseFrames } from "@/app/lib/vision/extractPhaseFrames";
 import { genPrompt } from "@/app/lib/vision/genPrompt";
 import { parseMultiPhaseResponse } from "@/app/lib/vision/parseMultiPhaseResponse";
+import { buildUserUsageState, canCreateAnalysisForUser, resolveGoogleUserFromHeaders } from "@/app/lib/membership";
 import { getAnalysis, saveAnalysis } from "@/app/lib/store";
 
 const execFileAsync = promisify(execFile);
@@ -25,6 +33,48 @@ const clientPhaseOrder: PhaseKey[] = ["address", "backswing", "top", "downswing"
 const PHASE_ORDER: PhaseKey[] = ["address", "backswing", "top", "downswing", "impact", "finish"];
 
 const ALLOWED_IMAGE_MIME = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"]);
+
+type UserContext = {
+  user: UserAccount | null;
+  anonymousUserId: string | null;
+};
+
+function normalizeId(input: unknown): string | null {
+  if (typeof input !== "string") return null;
+  const trimmed = input.trim();
+  return trimmed.length ? trimmed : null;
+}
+
+async function resolveUserContext(req: NextRequest, formData: FormData): Promise<UserContext> {
+  const anonymousFromForm = normalizeId(formData.get("anonymousUserId"));
+  const anonymousFromHeader = normalizeId(req.headers.get("x-anonymous-id"));
+  const anonymousUserId = anonymousFromForm ?? anonymousFromHeader ?? null;
+
+  const googleSub = normalizeId(req.headers.get("x-user-id"));
+  const email = normalizeId(req.headers.get("x-user-email"));
+  const proAccessHeader = normalizeId(req.headers.get("x-pro-access"));
+  const proExpiresHeader = normalizeId(req.headers.get("x-pro-expires-at"));
+  const proReasonHeader = normalizeId(req.headers.get("x-pro-reason"));
+
+  const proAccess =
+    proAccessHeader === "true" || proAccessHeader === "1" ? true : proAccessHeader === "false" ? false : undefined;
+  const proAccessExpiresAt =
+    typeof proExpiresHeader === "string" && proExpiresHeader.length ? Number(proExpiresHeader) : undefined;
+  const proAccessReason = proReasonHeader === "monitor" ? "monitor" : proReasonHeader === "paid" ? "paid" : undefined;
+
+  const user =
+    (googleSub || email) &&
+    (await resolveGoogleUserFromHeaders({
+      googleSub,
+      email,
+      anonymousUserId,
+      proAccess,
+      proAccessExpiresAt: Number.isFinite(proAccessExpiresAt) ? Number(proAccessExpiresAt) : undefined,
+      proAccessReason,
+    }));
+
+  return { user, anonymousUserId };
+}
 
 function normalizeMime(mime?: string | null): string {
   if (!mime) return "image/jpeg";
@@ -487,6 +537,23 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "file is required" }, { status: 400 });
     }
 
+    const userContext = await resolveUserContext(req, formData);
+    const limitCheck = await canCreateAnalysisForUser({
+      user: userContext.user,
+      anonymousUserId: userContext.anonymousUserId,
+    });
+
+    if (!limitCheck.allowed) {
+      return NextResponse.json(
+        {
+          error: "ANALYSIS_LIMIT_EXCEEDED",
+          message: "今月の無料診断回数を使い切りました",
+          userState: limitCheck.userState,
+        },
+        { status: 429 }
+      );
+    }
+
     const normalizedHandedness: GolfAnalyzeMeta["handedness"] =
       handedness === "left" ? "left" : "right";
     const normalizedClub: GolfAnalyzeMeta["clubType"] =
@@ -734,13 +801,21 @@ export async function POST(req: NextRequest) {
       result,
       meta,
       createdAt: timestamp,
+      userId: userContext.user?.userId ?? null,
+      anonymousUserId: userContext.anonymousUserId ?? null,
     };
 
     await saveAnalysis(record);
 
+    const usageState = await buildUserUsageState({
+      user: userContext.user,
+      anonymousUserId: userContext.anonymousUserId,
+    });
+
     return NextResponse.json({
       analysisId,
       note,
+      userState: usageState,
     });
   } catch (error) {
     console.error("[golf/analyze] error:", error);
