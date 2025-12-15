@@ -24,7 +24,7 @@ import {
   updateThreadMetadata,
 } from '@/app/coach/utils/storage';
 import { getAnonymousUserId } from '@/app/golf/utils/historyStorage';
-import { getLatestReport } from '@/app/golf/utils/reportStorage';
+import { getLatestReport, getMostRecentReportWithSequence, getReportById, saveReport } from '@/app/golf/utils/reportStorage';
 import type { GolfAnalysisResponse } from '@/app/golf/types';
 
 const QUICK_REPLIES: CoachQuickReply[] = [
@@ -56,6 +56,12 @@ const chainSummary = (chain?: string[]) => {
   return chain.join(' → ');
 };
 
+const resolveAnalysisIdFromMessages = (messages: CoachMessage[]): string | null => {
+  const reversed = [...messages].reverse();
+  const found = reversed.find((m) => typeof m.analysisId === 'string' && m.analysisId.length > 0);
+  return found?.analysisId ?? null;
+};
+
 const buildSummaryText = (context: CoachCausalImpactExplanation | null, messages: CoachMessage[]): string => {
   const latestAssistant = [...messages].filter((m) => m.role === 'assistant').slice(-2).map((m) => m.content).join(' / ');
   const latestUser = [...messages].filter((m) => m.role === 'user').slice(-2).map((m) => m.content).join(' / ');
@@ -75,7 +81,8 @@ const CoachPage = () => {
   const chatRef = useRef<HTMLDivElement | null>(null);
   const seededContextRef = useRef(false);
 
-  const swingTypeFromQuery = searchParams?.get('swingType') || '';
+const swingTypeFromQuery = searchParams?.get('swingType') || '';
+const analysisIdFromQuery = searchParams?.get('analysisId') || '';
 
   const [userId, setUserId] = useState('');
   const [thread, setThread] = useState<CoachThread | null>(null);
@@ -89,6 +96,7 @@ const CoachPage = () => {
   const [visibleCount, setVisibleCount] = useState(40);
   const [showQuickReplies, setShowQuickReplies] = useState(true);
   const sendingRef = useRef(false);
+  const ensureReportSavedRef = useRef(false);
 
   const visibleMessages = useMemo(() => messages.slice(-visibleCount), [messages, visibleCount]);
 
@@ -134,34 +142,85 @@ const CoachPage = () => {
   }, []);
 
   useEffect(() => {
-    if (!thread || !userId || seededContextRef.current) return;
-    let context = loadCausalContext(thread.threadId) || loadBootstrapContext(userId);
-    if (!context) {
-      const report = getLatestReport() as GolfAnalysisResponse | null;
-      if (report?.result) {
-        context = buildCoachContext({
-          causal: report.causalImpact,
-          displayIssue: report.result.summary,
-          chain: report.causalImpact?.chain,
-          nextAction: report.causalImpact?.nextAction?.content,
-          analysisId: report.analysisId,
-          summary: report.result.summary,
-          swingTypeHeadline: swingTypeFromQuery || null,
-          analyzedAt: report.createdAt ? new Date(report.createdAt).toISOString() : null,
-        });
-      }
+    if (!thread || !userId) return;
+
+    const storedContext = loadCausalContext(thread.threadId);
+    const bootstrap = loadBootstrapContext(userId);
+    const bootstrapReport = bootstrap?.analysisId ? getReportById(bootstrap.analysisId) : null;
+    const queryReport = analysisIdFromQuery ? getReportById(analysisIdFromQuery) : null;
+
+    // stored と bootstrap で analysisId が異なる場合は bootstrap を優先して上書き
+    if (bootstrap && bootstrap.analysisId && storedContext?.analysisId !== bootstrap.analysisId) {
+      saveCausalContext(thread.threadId, bootstrap);
+      updateThreadMetadata(thread, { lastAnalysisId: bootstrap.analysisId });
+      const ctx = swingTypeFromQuery ? { ...bootstrap, swingTypeHeadline: swingTypeFromQuery } : bootstrap;
+      setAnalysisContext(ctx);
+      seededContextRef.current = true;
+      setIsLoading(false);
+      return;
     }
-    if (context && swingTypeFromQuery) {
-      context = { ...context, swingTypeHeadline: swingTypeFromQuery };
+
+    if (storedContext) {
+      const ctx = swingTypeFromQuery ? { ...storedContext, swingTypeHeadline: swingTypeFromQuery } : storedContext;
+      setAnalysisContext(ctx);
+      seededContextRef.current = true;
+      setIsLoading(false);
+      return;
     }
-    if (context && thread.threadId) {
+
+    const threadReport = thread.lastAnalysisId ? getReportById(thread.lastAnalysisId) : null;
+    const recentMessageId = resolveAnalysisIdFromMessages(messages);
+    const recentReport = recentMessageId ? getReportById(recentMessageId) : null;
+    const latest = getMostRecentReportWithSequence() || getLatestReport();
+
+    // 優先順位: query指定 → bootstrap（最新診断）→ threadメタ → 直近メッセージ → 最新保存
+    const targetReport = queryReport || bootstrapReport || threadReport || recentReport || latest || null;
+
+    if (targetReport?.result) {
+      const context = buildCoachContext({
+        causal: targetReport.causalImpact,
+        displayIssue: targetReport.result.summary,
+        chain: targetReport.causalImpact?.chain,
+        nextAction: targetReport.causalImpact?.nextAction?.content,
+        analysisId: targetReport.analysisId,
+        summary: targetReport.result.summary,
+        swingTypeHeadline: swingTypeFromQuery || null,
+        analyzedAt: targetReport.createdAt ? new Date(targetReport.createdAt).toISOString() : null,
+      });
       saveCausalContext(thread.threadId, context);
-      updateThreadMetadata(thread, { lastAnalysisId: context.analysisId });
+      if (context.analysisId) {
+        updateThreadMetadata(thread, { lastAnalysisId: context.analysisId });
+      }
       setAnalysisContext(context);
       seededContextRef.current = true;
     }
+
     setIsLoading(false);
-  }, [swingTypeFromQuery, thread, userId]);
+  }, [messages, swingTypeFromQuery, thread, userId]);
+
+  useEffect(() => {
+    const analysisId = analysisContext?.analysisId || thread?.lastAnalysisId;
+    if (!analysisId || ensureReportSavedRef.current) return;
+    const local = getReportById(analysisId);
+    if (local?.result) {
+      ensureReportSavedRef.current = true;
+      return;
+    }
+    const save = async () => {
+      try {
+        const res = await fetch(`/api/golf/result/${analysisId}`, { method: 'GET', cache: 'no-store' });
+        if (!res.ok) return;
+        const json = (await res.json()) as GolfAnalysisResponse;
+        if (json?.result) {
+          saveReport(json);
+          ensureReportSavedRef.current = true;
+        }
+      } catch {
+        // ignore
+      }
+    };
+    void save();
+  }, [analysisContext?.analysisId]);
 
   useEffect(() => {
     if (!chatRef.current) return;
@@ -299,10 +358,17 @@ const CoachPage = () => {
             新しく診断する
           </button>
           <button
-            onClick={() => router.push('/golf/result')}
+            onClick={() => {
+              const latestId = getLatestReport()?.analysisId;
+              if (latestId) {
+                router.push(`/golf/result/${latestId}`);
+              } else {
+                router.push('/golf/upload');
+              }
+            }}
             className="rounded-lg bg-slate-800 px-4 py-2 text-sm text-slate-200 border border-slate-700 hover:bg-slate-700"
           >
-            診断一覧に戻る
+            診断結果に戻る
           </button>
         </div>
       </main>
@@ -329,9 +395,21 @@ const CoachPage = () => {
             <div className="flex flex-wrap items-center gap-2">
               <button
                 type="button"
-                onClick={() => analysisContext.analysisId && router.push(`/golf/result/${analysisContext.analysisId}`)}
+                onClick={() => {
+                  const recentId = resolveAnalysisIdFromMessages(messages);
+                  const latestSeqId = getMostRecentReportWithSequence()?.analysisId;
+                  const latestId = latestSeqId || getLatestReport()?.analysisId;
+                  const navId = analysisContext.analysisId || thread.lastAnalysisId || recentId || latestSeqId || latestId;
+                  if (navId) router.push(`/golf/result/${navId}`);
+                }}
                 className="flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-900/70 px-3 py-2 text-xs text-slate-200 hover:border-emerald-400/60 hover:text-emerald-100 transition-colors disabled:opacity-50"
-                disabled={!analysisContext.analysisId}
+                disabled={
+                  !analysisContext.analysisId &&
+                  !thread.lastAnalysisId &&
+                  !resolveAnalysisIdFromMessages(messages) &&
+                  !getMostRecentReportWithSequence()?.analysisId &&
+                  !getLatestReport()?.analysisId
+                }
               >
                 <span>📊</span>
                 <span>今回の診断を見る</span>

@@ -41,3 +41,17 @@ export function getLatestReport(): GolfAnalysisResponse | null {
   if (reports.length === 0) return null;
   return reports[reports.length - 1] ?? null;
 }
+
+export function getReportById(analysisId: string): GolfAnalysisResponse | null {
+  if (!analysisId) return null;
+  const reports = loadStoredReports();
+  return reports.find((r) => r.analysisId === analysisId) ?? null;
+}
+
+export function getMostRecentReportWithSequence(): GolfAnalysisResponse | null {
+  const reports = loadStoredReports();
+  if (!reports.length) return null;
+  const withSeq = reports.filter((r) => r.result?.sequence?.frames?.length);
+  if (withSeq.length) return withSeq[withSeq.length - 1];
+  return reports[reports.length - 1] ?? null;
+}

@@ -12,7 +12,7 @@ import type {
   SwingTypeKey,
   SwingTypeLLMResult,
 } from '@/app/golf/types';
-import { saveReport } from '@/app/golf/utils/reportStorage';
+import { getLatestReport, getReportById, saveReport } from '@/app/golf/utils/reportStorage';
 import { getAnonymousUserId, getSwingHistories, saveSwingHistory } from '@/app/golf/utils/historyStorage';
 import { buildRuleBasedCausalImpact } from '@/app/golf/utils/causalImpact';
 import { saveSwingTypeResult } from '@/app/golf/utils/swingTypeStorage';
@@ -360,6 +360,7 @@ const GolfResultPage = () => {
   const [previousHistory, setPreviousHistory] = useState<SwingAnalysisHistory | null>(null);
   const [hasSavedHistory, setHasSavedHistory] = useState(false);
   const [hasSeededCoachContext, setHasSeededCoachContext] = useState(false);
+  const [fallbackNote, setFallbackNote] = useState<string | null>(null);
 
   useEffect(() => {
     const id = getAnonymousUserId();
@@ -370,6 +371,18 @@ const GolfResultPage = () => {
     if (!id) return;
     setHasSavedHistory(false);
     setPreviousHistory(null);
+
+    // まずローカル保存済みの診断を優先表示し、サーバーにデータが無い場合のダミー表示を防ぐ
+    const local = typeof window !== 'undefined' ? getReportById(id) : null;
+    if (local?.result) {
+      setData(local);
+      setSwingTypes(deriveSwingTypes(local.result));
+      setSwingTypeResult(deriveSwingTypeResult(local.result));
+      setCausalImpact(local.result.causalImpact ?? null);
+      setFallbackNote(null);
+      setIsLoading(false);
+      return;
+    }
 
     const fetchResult = async () => {
       try {
@@ -386,18 +399,40 @@ const GolfResultPage = () => {
           throw new Error(body.error || '診断結果の取得に失敗しました。');
         }
 
-    const json = (await res.json()) as GolfAnalysisResponse;
-        setData(json);
-        if (json.result) {
-          setSwingTypes(deriveSwingTypes(json.result));
-          setSwingTypeResult(deriveSwingTypeResult(json.result));
+        const json = (await res.json()) as GolfAnalysisResponse;
+        let resolved = json;
+
+        if (typeof window !== 'undefined') {
+          const stored = getReportById(id);
+          if (stored?.result) {
+            resolved = stored;
+            setFallbackNote(null);
+          }
+          // API 取得が成功したらローカルにも保存して次回以降同一IDを参照
+          saveReport(json);
         }
-        if (json.result?.causalImpact) {
-          setCausalImpact(json.result.causalImpact);
+
+        setData(resolved);
+        if (resolved.result) {
+          setSwingTypes(deriveSwingTypes(resolved.result));
+          setSwingTypeResult(deriveSwingTypeResult(resolved.result));
+        }
+        if (resolved.result?.causalImpact) {
+          setCausalImpact(resolved.result.causalImpact);
         }
       } catch (err: unknown) {
         console.error(err);
         const message = err instanceof Error ? err.message : '予期せぬエラーが発生しました。';
+        if (typeof window !== 'undefined') {
+          const stored = getReportById(id);
+          if (stored?.result) {
+            setData(stored);
+            setSwingTypes(deriveSwingTypes(stored.result));
+            setSwingTypeResult(deriveSwingTypeResult(stored.result));
+            setCausalImpact(stored.result.causalImpact ?? null);
+            return;
+          }
+        }
         setError(message);
       } finally {
         setIsLoading(false);
@@ -900,9 +935,9 @@ const GolfResultPage = () => {
           </button>
         </header>
 
-        {note && (
+        {(note || fallbackNote) && (
           <p className="text-xs text-amber-300">
-            {note}
+            {fallbackNote ? fallbackNote : note}
           </p>
         )}
 
@@ -1311,8 +1346,11 @@ const GolfResultPage = () => {
               </div>
               <button
                 onClick={() => {
-                  const query = bestTypeDetail?.title ? `?swingType=${encodeURIComponent(bestTypeDetail.title)}` : '';
-                  router.push(`/coach${query}`);
+                  const params = new URLSearchParams();
+                  if (bestTypeDetail?.title) params.set('swingType', bestTypeDetail.title);
+                  if (data?.analysisId) params.set('analysisId', data.analysisId);
+                  const query = params.toString();
+                  router.push(`/coach${query ? `?${query}` : ''}`);
                 }}
                 className="w-full rounded-lg border border-emerald-500/50 bg-emerald-900/30 px-3 py-2 text-sm font-semibold text-emerald-100 hover:bg-emerald-900/50 transition-colors"
               >
@@ -1385,8 +1423,11 @@ const GolfResultPage = () => {
                         </div>
                         <button
                           onClick={() => {
-                            const query = detail?.title ? `?swingType=${encodeURIComponent(detail.title)}` : '';
-                            router.push(`/coach${query}`);
+                            const params = new URLSearchParams();
+                            if (detail?.title) params.set('swingType', detail.title);
+                            if (data?.analysisId) params.set('analysisId', data.analysisId);
+                            const query = params.toString();
+                            router.push(`/coach${query ? `?${query}` : ''}`);
                           }}
                           className="w-full rounded-lg border border-emerald-500/50 bg-emerald-900/30 px-3 py-2 text-sm font-semibold text-emerald-100 hover:bg-emerald-900/50 transition-colors"
                         >
