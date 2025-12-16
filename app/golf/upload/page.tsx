@@ -732,6 +732,7 @@ const GolfUploadPage = () => {
 
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [quotaExceeded, setQuotaExceeded] = useState(false);
   const [limitInfo, setLimitInfo] = useState<UserUsageState['monthlyAnalysis'] | null>(null);
 
   useEffect(() => {
@@ -767,6 +768,7 @@ const GolfUploadPage = () => {
 
     try {
       setIsSubmitting(true);
+      setQuotaExceeded(false);
 
       const formData = new FormData();
       formData.append('file', file);
@@ -795,10 +797,10 @@ const GolfUploadPage = () => {
           if (data.userState.monthlyAnalysis) {
             setLimitInfo(data.userState.monthlyAnalysis ?? null);
           }
+          setQuotaExceeded(true);
           setError(
             data.message ||
-              data.error ||
-              '無料診断の回数を使い切りました。PROなら無制限で利用できます。'
+              '利用回数超過により利用できません。利用いただくにはメール会員もしくはPRO会員への登録をお願いします。'
           );
           return;
         }
@@ -929,9 +931,21 @@ const GolfUploadPage = () => {
           </div>
 
           {error && (
-            <p className="text-sm text-red-400">
-              {error}
-            </p>
+            <div className="space-y-2">
+              <p className="text-sm text-red-400">
+                {error}
+              </p>
+              {quotaExceeded && (
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    className="rounded-md bg-emerald-500 hover:bg-emerald-400 px-3 py-2 text-xs font-semibold text-slate-900"
+                  >
+                    メール会員 / PRO に登録する
+                  </button>
+                </div>
+              )}
+            </div>
           )}
 
           <button
