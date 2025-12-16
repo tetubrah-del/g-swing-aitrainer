@@ -794,7 +794,11 @@ const GolfUploadPage = () => {
           if (data.userState.monthlyAnalysis) {
             setLimitInfo(data.userState.monthlyAnalysis ?? null);
           }
-          setError(data.message || data.error || '今月の無料診断回数を使い切りました。');
+          setError(
+            data.message ||
+              data.error ||
+              '無料診断の回数を使い切りました。PROなら無制限で利用できます。'
+          );
           return;
         }
         setError(data?.message || data?.error || '診断APIの呼び出しに失敗しました。');
@@ -832,14 +836,16 @@ const GolfUploadPage = () => {
         {!userState.hasProAccess && limitInfo && (
           <div className="rounded-lg border border-amber-400/60 bg-amber-500/10 px-4 py-3 text-sm text-amber-50 space-y-1">
             <div className="flex items-center justify-between gap-3">
-              <p className="font-semibold">今月の無料診断：残り {limitInfo.remaining ?? 0} 回</p>
+              <p className="font-semibold">
+                無料診断 残り {limitInfo.remaining ?? 0} 回（合計 {limitInfo.limit ?? 0} 回まで）
+              </p>
               <span className="text-xs text-amber-100/80">
-                {limitInfo.used} / {limitInfo.limit ?? 0} 回利用
+                累計 {limitInfo.used} / {limitInfo.limit ?? 0} 回利用
               </span>
             </div>
             {(limitInfo.remaining ?? 0) <= 1 && (
               <p className="text-xs text-amber-200">
-                継続的なスイング改善には複数回の分析が必要です。PROなら回数無制限で試せます。
+                無料診断は上限に達しつつあります。PROなら診断回数は無制限で利用できます。
               </p>
             )}
             <div className="mt-2 flex flex-wrap gap-2">

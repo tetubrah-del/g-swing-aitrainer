@@ -76,6 +76,24 @@ export async function countMonthlyAnalyses(
   return count;
 }
 
+export async function countAnalysesAllTime(identifiers: { userId?: string | null; anonymousUserId?: string | null }) {
+  await loadPromise;
+
+  const { userId, anonymousUserId } = identifiers;
+  if (!userId && !anonymousUserId) return 0;
+
+  let count = 0;
+  analyses.forEach((record) => {
+    const belongsToUser =
+      (userId && record.userId === userId) || (anonymousUserId && record.anonymousUserId === anonymousUserId);
+    if (belongsToUser) {
+      count += 1;
+    }
+  });
+
+  return count;
+}
+
 export async function attachUserToAnonymousAnalyses(anonymousUserId: string, userId: string) {
   await loadPromise;
   let updated = false;

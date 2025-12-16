@@ -941,14 +941,16 @@ const GolfResultPage = () => {
         {usageBanner && (
           <div className="rounded-lg border border-amber-300/60 bg-amber-500/10 px-4 py-3 text-sm text-amber-50 space-y-1">
             <div className="flex items-center justify-between gap-3">
-              <p className="font-semibold">今月の無料診断：残り {usageBanner.remaining ?? 0} 回</p>
+              <p className="font-semibold">
+                無料診断 残り {usageBanner.remaining ?? 0} 回（合計 {usageBanner.limit ?? 0} 回まで）
+              </p>
               <span className="text-xs text-amber-100/80">
-                {usageBanner.used} / {usageBanner.limit ?? 0} 回利用
+                累計 {usageBanner.used} / {usageBanner.limit ?? 0} 回利用
               </span>
             </div>
             {(usageBanner.remaining ?? 0) <= 1 && (
               <p className="text-xs text-amber-200">
-                継続的なスイング改善には複数回の分析が必要です。PROなら回数無制限で試せます。
+                無料診断の上限が近づいています。PROなら診断回数は無制限で利用できます。
               </p>
             )}
           </div>

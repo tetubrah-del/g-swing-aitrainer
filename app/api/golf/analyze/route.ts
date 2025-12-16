@@ -14,14 +14,19 @@ import {
   GolfAnalysisRecord,
   SwingAnalysis,
   MOCK_GOLF_ANALYSIS_RESULT,
-  UserAccount,
+  UserUsageState,
 } from "@/app/golf/types";
 import { askVisionAPI } from "@/app/lib/vision/askVisionAPI";
 import { extractPhaseFrames, PhaseFrame, PhaseKey, PhaseFrames } from "@/app/lib/vision/extractPhaseFrames";
 import { genPrompt } from "@/app/lib/vision/genPrompt";
 import { parseMultiPhaseResponse } from "@/app/lib/vision/parseMultiPhaseResponse";
-import { buildUserUsageState, canCreateAnalysisForUser, resolveGoogleUserFromHeaders } from "@/app/lib/membership";
+import { resolveGoogleUserFromHeaders } from "@/app/lib/membership";
+import { canAnalyzeNow } from "@/app/lib/quota";
 import { getAnalysis, saveAnalysis } from "@/app/lib/store";
+import { incrementAnonymousQuotaCount, getAnonymousQuotaCount } from "@/app/lib/quotaStore";
+import { incrementFreeAnalysisCount } from "@/app/lib/userStore";
+import { canPerform } from "@/app/lib/permissions";
+import { User, UserPlan } from "@/types/user";
 
 const execFileAsync = promisify(execFile);
 
@@ -35,7 +40,7 @@ const PHASE_ORDER: PhaseKey[] = ["address", "backswing", "top", "downswing", "im
 const ALLOWED_IMAGE_MIME = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"]);
 
 type UserContext = {
-  user: UserAccount | null;
+  user: User;
   anonymousUserId: string | null;
 };
 
@@ -45,8 +50,9 @@ function normalizeId(input: unknown): string | null {
   return trimmed.length ? trimmed : null;
 }
 
-async function resolveUserContext(req: NextRequest, formData: FormData): Promise<UserContext> {
-  const anonymousFromForm = normalizeId(formData.get("anonymousUserId"));
+async function resolveUserContext(req: NextRequest, formData?: FormData): Promise<UserContext> {
+  const providedFormData = formData ?? (await req.formData());
+  const anonymousFromForm = normalizeId(providedFormData.get("anonymousUserId"));
   const anonymousFromHeader = normalizeId(req.headers.get("x-anonymous-id"));
   const anonymousUserId = anonymousFromForm ?? anonymousFromHeader ?? null;
 
@@ -62,7 +68,7 @@ async function resolveUserContext(req: NextRequest, formData: FormData): Promise
     typeof proExpiresHeader === "string" && proExpiresHeader.length ? Number(proExpiresHeader) : undefined;
   const proAccessReason = proReasonHeader === "monitor" ? "monitor" : proReasonHeader === "paid" ? "paid" : undefined;
 
-  const user =
+  const account =
     (googleSub || email) &&
     (await resolveGoogleUserFromHeaders({
       googleSub,
@@ -73,7 +79,89 @@ async function resolveUserContext(req: NextRequest, formData: FormData): Promise
       proAccessReason,
     }));
 
-  return { user, anonymousUserId };
+  const now = Date.now();
+
+  if (account) {
+    const plan: UserPlan =
+      account.proAccess === true && (account.proAccessExpiresAt == null || account.proAccessExpiresAt > now)
+        ? "pro"
+        : account.plan ?? (account.email ? "free" : "anonymous");
+    const monitorExpiresAt =
+      account.proAccessReason === "monitor" && account.proAccessExpiresAt ? account.proAccessExpiresAt : null;
+
+    return {
+      user: {
+        id: account.userId,
+        plan,
+        email: account.email,
+        isMonitor: account.proAccessReason === "monitor",
+        monitorExpiresAt: monitorExpiresAt ? new Date(monitorExpiresAt) : null,
+        freeAnalysisCount: account.freeAnalysisCount ?? 0,
+        freeAnalysisResetAt: account.freeAnalysisResetAt ? new Date(account.freeAnalysisResetAt) : new Date(0),
+        createdAt: new Date(account.createdAt ?? now),
+      },
+      anonymousUserId,
+    };
+  }
+
+  const anonymousId = anonymousUserId ?? crypto.randomUUID();
+  const freeAnalysisCount = await getAnonymousQuotaCount(anonymousId);
+
+  return {
+    user: {
+      id: anonymousId,
+      plan: "anonymous",
+      email: null,
+      isMonitor: false,
+      monitorExpiresAt: null,
+      freeAnalysisCount,
+      freeAnalysisResetAt: new Date(0),
+      createdAt: new Date(now),
+    },
+    anonymousUserId: anonymousId,
+  };
+}
+
+function buildUsageStateFromUser(user: User, usedOverride?: number): UserUsageState {
+  const used = usedOverride ?? user.freeAnalysisCount ?? 0;
+  const hasPro = canPerform(user, "unlimited_analysis");
+  const isAnonymous = user.plan === "anonymous";
+  const isFree = user.plan === "free";
+
+  if (hasPro) {
+    return {
+      isAuthenticated: !isAnonymous,
+      hasProAccess: true,
+      isMonitor: user.isMonitor,
+      monthlyAnalysis: { used, limit: null, remaining: null },
+    };
+  }
+
+  if (isAnonymous) {
+    return {
+      isAuthenticated: false,
+      hasProAccess: false,
+      isMonitor: false,
+      monthlyAnalysis: { used, limit: 1, remaining: Math.max(0, 1 - used) },
+    };
+  }
+
+  if (isFree) {
+    const remaining = Math.max(0, 3 - used);
+    return {
+      isAuthenticated: true,
+      hasProAccess: false,
+      isMonitor: user.isMonitor,
+      monthlyAnalysis: { used, limit: 3, remaining },
+    };
+  }
+
+  return {
+    isAuthenticated: true,
+    hasProAccess: false,
+    isMonitor: user.isMonitor,
+    monthlyAnalysis: { used, limit: null, remaining: null },
+  };
 }
 
 function normalizeMime(mime?: string | null): string {
@@ -537,21 +625,11 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "file is required" }, { status: 400 });
     }
 
-    const userContext = await resolveUserContext(req, formData);
-    const limitCheck = await canCreateAnalysisForUser({
-      user: userContext.user,
-      anonymousUserId: userContext.anonymousUserId,
-    });
-
-    if (!limitCheck.allowed) {
-      return NextResponse.json(
-        {
-          error: "ANALYSIS_LIMIT_EXCEEDED",
-          message: "今月の無料診断回数を使い切りました",
-          userState: limitCheck.userState,
-        },
-        { status: 429 }
-      );
+    const { user, anonymousUserId } = await resolveUserContext(req, formData);
+    const permission = canAnalyzeNow(user);
+    // Quota tests: anonymous 1st OK, 2nd -> 429 anonymous_limit; free 3rd OK, 4th -> 429 free_limit; pro always OK.
+    if (!permission.allowed) {
+      return NextResponse.json({ error: permission.reason }, { status: 429 });
     }
 
     const normalizedHandedness: GolfAnalyzeMeta["handedness"] =
@@ -801,16 +879,24 @@ export async function POST(req: NextRequest) {
       result,
       meta,
       createdAt: timestamp,
-      userId: userContext.user?.userId ?? null,
-      anonymousUserId: userContext.anonymousUserId ?? null,
+      userId: user.plan === "anonymous" ? null : user.id,
+      anonymousUserId: user.plan === "anonymous" ? anonymousUserId : null,
     };
 
     await saveAnalysis(record);
 
-    const usageState = await buildUserUsageState({
-      user: userContext.user,
-      anonymousUserId: userContext.anonymousUserId,
-    });
+    let usedCount = user.freeAnalysisCount ?? 0;
+    if (!canPerform(user, "unlimited_analysis")) {
+      if (user.plan === "anonymous" && anonymousUserId) {
+        await incrementAnonymousQuotaCount(anonymousUserId);
+        usedCount += 1;
+      } else if (user.plan === "free") {
+        await incrementFreeAnalysisCount({ userId: user.id });
+        usedCount += 1;
+      }
+    }
+
+    const usageState = buildUsageStateFromUser(user, usedCount);
 
     return NextResponse.json({
       analysisId,

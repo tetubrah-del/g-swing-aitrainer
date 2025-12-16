@@ -80,24 +80,3 @@ export async function resolveGoogleUserFromHeaders(params: {
     proAccessExpiresAt: params.proAccessExpiresAt,
   });
 }
-
-export async function canCreateAnalysisForUser(params: {
-  user: UserAccount | null;
-  anonymousUserId: string | null;
-  now?: number;
-  freeLimit?: number;
-}): Promise<{ allowed: boolean; remaining: number; limit: number; used: number; userState: UserUsageState }> {
-  const usage = await buildUserUsageState({
-    user: params.user,
-    anonymousUserId: params.anonymousUserId,
-    now: params.now,
-    freeLimit: params.freeLimit,
-  });
-
-  const limit = usage.monthlyAnalysis?.limit ?? Number.POSITIVE_INFINITY;
-  const remaining = usage.monthlyAnalysis?.remaining ?? Number.POSITIVE_INFINITY;
-  const used = usage.monthlyAnalysis?.used ?? 0;
-  const allowed = usage.hasProAccess || remaining > 0;
-
-  return { allowed, remaining, limit, used, userState: usage };
-}

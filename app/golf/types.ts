@@ -100,6 +100,10 @@ export interface UserAccount {
   proAccessReason: ProAccessReason | null;
   proAccessExpiresAt: number | null;
   anonymousIds?: string[];
+  plan?: "anonymous" | "free" | "pro";
+  freeAnalysisCount?: number;
+  freeAnalysisResetAt?: number | null;
+  monitorExpiresAt?: number | null;
 }
 
 export type UserState = "anonymous" | "registered" | "pro";

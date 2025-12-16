@@ -18,15 +18,22 @@ async function loadFromDisk() {
         userId: value.userId || id,
         email: value.email ?? null,
         authProvider: value.authProvider ?? null,
-        createdAt: typeof value.createdAt === "number" ? value.createdAt : Date.now(),
-        updatedAt: typeof value.updatedAt === "number" ? value.updatedAt : Date.now(),
-        proAccess: value.proAccess === true,
-        proAccessReason: value.proAccessReason ?? null,
-        proAccessExpiresAt: typeof value.proAccessExpiresAt === "number" ? value.proAccessExpiresAt : null,
-        anonymousIds: Array.isArray(value.anonymousIds) ? value.anonymousIds.filter((v) => typeof v === "string") : [],
-      };
-      users.set(normalized.userId, normalized);
-    });
+      createdAt: typeof value.createdAt === "number" ? value.createdAt : Date.now(),
+      updatedAt: typeof value.updatedAt === "number" ? value.updatedAt : Date.now(),
+      proAccess: value.proAccess === true,
+      proAccessReason: value.proAccessReason ?? null,
+      proAccessExpiresAt: typeof value.proAccessExpiresAt === "number" ? value.proAccessExpiresAt : null,
+      plan: value.plan ?? (value.proAccess ? "pro" : value.email ? "free" : "anonymous"),
+      freeAnalysisCount: typeof value.freeAnalysisCount === "number" ? value.freeAnalysisCount : 0,
+      freeAnalysisResetAt:
+        value.freeAnalysisResetAt === null || typeof value.freeAnalysisResetAt === "number"
+          ? value.freeAnalysisResetAt
+          : null,
+      monitorExpiresAt: typeof value.monitorExpiresAt === "number" ? value.monitorExpiresAt : null,
+      anonymousIds: Array.isArray(value.anonymousIds) ? value.anonymousIds.filter((v) => typeof v === "string") : [],
+    };
+    users.set(normalized.userId, normalized);
+  });
   } catch {
     // missing file is fine for first run
   }
@@ -89,6 +96,10 @@ export async function upsertGoogleUser(params: {
       proAccess: false,
       proAccessReason: null,
       proAccessExpiresAt: null,
+      plan: params.email ? "free" : "anonymous",
+      freeAnalysisCount: 0,
+      freeAnalysisResetAt: null,
+      monitorExpiresAt: null,
       anonymousIds: [],
     } satisfies UserAccount);
 
@@ -96,6 +107,13 @@ export async function upsertGoogleUser(params: {
   if (params.anonymousUserId) {
     anonymousIds.add(params.anonymousUserId);
   }
+
+  const nextPlan =
+    params.proAccess ?? base.proAccess
+      ? "pro"
+      : (params.email ?? base.email)
+        ? "free"
+        : "anonymous";
 
   const user: UserAccount = {
     ...base,
@@ -106,6 +124,13 @@ export async function upsertGoogleUser(params: {
     proAccessReason: params.proAccessReason ?? base.proAccessReason ?? null,
     proAccessExpiresAt:
       typeof params.proAccessExpiresAt === "number" ? params.proAccessExpiresAt : base.proAccessExpiresAt ?? null,
+    plan: nextPlan,
+    freeAnalysisCount: base.freeAnalysisCount ?? 0,
+    freeAnalysisResetAt: base.freeAnalysisResetAt ?? null,
+    monitorExpiresAt:
+      params.proAccessReason === "monitor" && typeof params.proAccessExpiresAt === "number"
+        ? params.proAccessExpiresAt
+        : base.monitorExpiresAt ?? null,
     anonymousIds: Array.from(anonymousIds),
   };
 
@@ -130,7 +155,20 @@ export async function grantMonitorAccess(userId: string, expiresAt: number | nul
     proAccess: true,
     proAccessReason: "monitor",
     proAccessExpiresAt: expiresAt,
+    plan: "pro",
+    monitorExpiresAt: expiresAt,
     updatedAt: now,
   };
   await saveUser(updated);
+}
+
+export async function incrementFreeAnalysisCount(params: { userId: string }) {
+  const user = await getUserById(params.userId);
+  if (!user) return;
+  const next: UserAccount = {
+    ...user,
+    freeAnalysisCount: (user.freeAnalysisCount ?? 0) + 1,
+    updatedAt: Date.now(),
+  };
+  await saveUser(next);
 }
