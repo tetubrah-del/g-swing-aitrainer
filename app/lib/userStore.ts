@@ -144,6 +144,55 @@ export async function upsertGoogleUser(params: {
   return user;
 }
 
+export async function registerEmailUser(params: { email: string; anonymousUserId?: string | null }): Promise<UserAccount> {
+  await loadPromise;
+  const now = Date.now();
+  const normalizedEmail = params.email.trim().toLowerCase();
+  const existing = await findUserByEmail(normalizedEmail);
+
+  const base: UserAccount =
+    existing ??
+    ({
+      userId: crypto.randomUUID(),
+      email: normalizedEmail,
+      authProvider: "email",
+      createdAt: now,
+      updatedAt: now,
+      proAccess: false,
+      proAccessReason: null,
+      proAccessExpiresAt: null,
+      plan: "free",
+      freeAnalysisCount: 0,
+      freeAnalysisResetAt: null,
+      monitorExpiresAt: null,
+      anonymousIds: [],
+    } satisfies UserAccount);
+
+  const anonymousIds = new Set(base.anonymousIds ?? []);
+  if (params.anonymousUserId) {
+    anonymousIds.add(params.anonymousUserId);
+  }
+
+  const nextPlan = base.plan === "anonymous" ? "free" : base.plan ?? "free";
+  const user: UserAccount = {
+    ...base,
+    email: normalizedEmail,
+    authProvider: base.authProvider ?? "email",
+    updatedAt: now,
+    plan: nextPlan,
+    anonymousIds: Array.from(anonymousIds),
+  };
+
+  users.set(user.userId, user);
+  await persistToDisk();
+
+  if (params.anonymousUserId) {
+    await attachUserToAnonymousAnalyses(params.anonymousUserId, user.userId);
+  }
+
+  return user;
+}
+
 export async function grantMonitorAccess(userId: string, expiresAt: number | null) {
   const user = await getUserById(userId);
   if (!user) {
@@ -160,6 +209,22 @@ export async function grantMonitorAccess(userId: string, expiresAt: number | nul
     updatedAt: now,
   };
   await saveUser(updated);
+}
+
+export async function linkAnonymousIdToUser(userId: string, anonymousUserId: string): Promise<UserAccount | null> {
+  const user = await getUserById(userId);
+  if (!user) return null;
+  const set = new Set(user.anonymousIds ?? []);
+  if (set.has(anonymousUserId)) return user;
+  set.add(anonymousUserId);
+  const next: UserAccount = {
+    ...user,
+    anonymousIds: Array.from(set),
+    updatedAt: Date.now(),
+  };
+  await saveUser(next);
+  await attachUserToAnonymousAnalyses(anonymousUserId, userId);
+  return next;
 }
 
 export async function incrementFreeAnalysisCount(params: { userId: string }) {

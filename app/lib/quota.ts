@@ -1,4 +1,4 @@
-import { User } from "@/types/user";
+import { User } from "@/app/types/user";
 import { canPerform } from "./permissions";
 
 export type AnalyzePermission =

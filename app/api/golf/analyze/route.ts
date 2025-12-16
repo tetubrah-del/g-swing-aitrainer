@@ -20,13 +20,14 @@ import { askVisionAPI } from "@/app/lib/vision/askVisionAPI";
 import { extractPhaseFrames, PhaseFrame, PhaseKey, PhaseFrames } from "@/app/lib/vision/extractPhaseFrames";
 import { genPrompt } from "@/app/lib/vision/genPrompt";
 import { parseMultiPhaseResponse } from "@/app/lib/vision/parseMultiPhaseResponse";
-import { resolveGoogleUserFromHeaders } from "@/app/lib/membership";
+import { auth } from "@/auth";
+import { readAnonymousFromRequest, setAnonymousTokenOnResponse } from "@/app/lib/anonymousToken";
 import { canAnalyzeNow } from "@/app/lib/quota";
 import { getAnalysis, saveAnalysis } from "@/app/lib/store";
 import { incrementAnonymousQuotaCount, getAnonymousQuotaCount } from "@/app/lib/quotaStore";
-import { incrementFreeAnalysisCount } from "@/app/lib/userStore";
+import { findUserByEmail, getUserById, incrementFreeAnalysisCount, linkAnonymousIdToUser, upsertGoogleUser } from "@/app/lib/userStore";
 import { canPerform } from "@/app/lib/permissions";
-import { User, UserPlan } from "@/types/user";
+import { User, UserPlan } from "@/app/types/user";
 
 const execFileAsync = promisify(execFile);
 
@@ -42,46 +43,44 @@ const ALLOWED_IMAGE_MIME = new Set(["image/jpeg", "image/png", "image/gif", "ima
 type UserContext = {
   user: User;
   anonymousUserId: string | null;
+  mintedAnonymousUserId?: string | null;
 };
 
-function normalizeId(input: unknown): string | null {
-  if (typeof input !== "string") return null;
-  const trimmed = input.trim();
-  return trimmed.length ? trimmed : null;
+class HttpError extends Error {
+  status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.status = status;
+  }
 }
 
-async function resolveUserContext(req: NextRequest, formData?: FormData): Promise<UserContext> {
-  const providedFormData = formData ?? (await req.formData());
-  const anonymousFromForm = normalizeId(providedFormData.get("anonymousUserId"));
-  const anonymousFromHeader = normalizeId(req.headers.get("x-anonymous-id"));
-  const anonymousUserId = anonymousFromForm ?? anonymousFromHeader ?? null;
+async function resolveUserContext(req: NextRequest): Promise<UserContext> {
+  const { anonymousUserId: tokenAnonymous } = readAnonymousFromRequest(req);
+  const anonymousUserId = tokenAnonymous ?? null;
 
-  const googleSub = normalizeId(req.headers.get("x-user-id"));
-  const email = normalizeId(req.headers.get("x-user-email"));
-  const proAccessHeader = normalizeId(req.headers.get("x-pro-access"));
-  const proExpiresHeader = normalizeId(req.headers.get("x-pro-expires-at"));
-  const proReasonHeader = normalizeId(req.headers.get("x-pro-reason"));
+  const session = await auth();
+  const sessionUserId = session?.user?.id ?? null;
+  const sessionEmail = session?.user?.email ?? null;
 
-  const proAccess =
-    proAccessHeader === "true" || proAccessHeader === "1" ? true : proAccessHeader === "false" ? false : undefined;
-  const proAccessExpiresAt =
-    typeof proExpiresHeader === "string" && proExpiresHeader.length ? Number(proExpiresHeader) : undefined;
-  const proAccessReason = proReasonHeader === "monitor" ? "monitor" : proReasonHeader === "paid" ? "paid" : undefined;
-
-  const account =
-    (googleSub || email) &&
-    (await resolveGoogleUserFromHeaders({
-      googleSub,
-      email,
-      anonymousUserId,
-      proAccess,
-      proAccessExpiresAt: Number.isFinite(proAccessExpiresAt) ? Number(proAccessExpiresAt) : undefined,
-      proAccessReason,
-    }));
+  let account = sessionUserId ? await getUserById(sessionUserId) : null;
+  if (!account && sessionEmail) {
+    account = await findUserByEmail(sessionEmail);
+  }
+  if (sessionUserId && sessionEmail && !account) {
+    account = await upsertGoogleUser({ googleSub: sessionUserId, email: sessionEmail, anonymousUserId });
+  }
+  if (account && anonymousUserId && tokenAnonymous === anonymousUserId && !(account.anonymousIds ?? []).includes(anonymousUserId)) {
+    account = await linkAnonymousIdToUser(account.userId, anonymousUserId);
+  }
 
   const now = Date.now();
 
   if (account) {
+    if (anonymousUserId && Array.isArray(account.anonymousIds) && !account.anonymousIds.includes(anonymousUserId)) {
+      throw new HttpError("forbidden", 403);
+    }
+    const anonymousUsed = anonymousUserId ? await getAnonymousQuotaCount(anonymousUserId) : 0;
+    const effectiveFreeCount = Math.max(account.freeAnalysisCount ?? 0, anonymousUsed);
     const plan: UserPlan =
       account.proAccess === true && (account.proAccessExpiresAt == null || account.proAccessExpiresAt > now)
         ? "pro"
@@ -94,17 +93,20 @@ async function resolveUserContext(req: NextRequest, formData?: FormData): Promis
         id: account.userId,
         plan,
         email: account.email,
+        authProvider: account.authProvider ?? null,
         isMonitor: account.proAccessReason === "monitor",
         monitorExpiresAt: monitorExpiresAt ? new Date(monitorExpiresAt) : null,
-        freeAnalysisCount: account.freeAnalysisCount ?? 0,
+        freeAnalysisCount: effectiveFreeCount,
         freeAnalysisResetAt: account.freeAnalysisResetAt ? new Date(account.freeAnalysisResetAt) : new Date(0),
         createdAt: new Date(account.createdAt ?? now),
       },
       anonymousUserId,
+      mintedAnonymousUserId: null,
     };
   }
 
-  const anonymousId = anonymousUserId ?? crypto.randomUUID();
+  const mintedAnonymousUserId = anonymousUserId ? null : crypto.randomUUID();
+  const anonymousId = anonymousUserId ?? mintedAnonymousUserId!;
   const freeAnalysisCount = await getAnonymousQuotaCount(anonymousId);
 
   return {
@@ -112,6 +114,7 @@ async function resolveUserContext(req: NextRequest, formData?: FormData): Promis
       id: anonymousId,
       plan: "anonymous",
       email: null,
+      authProvider: null,
       isMonitor: false,
       monitorExpiresAt: null,
       freeAnalysisCount,
@@ -119,20 +122,30 @@ async function resolveUserContext(req: NextRequest, formData?: FormData): Promis
       createdAt: new Date(now),
     },
     anonymousUserId: anonymousId,
+    mintedAnonymousUserId,
   };
 }
 
-function buildUsageStateFromUser(user: User, usedOverride?: number): UserUsageState {
+function buildUsageStateFromUser(user: User, usedOverride?: number, anonymousId?: string | null): UserUsageState {
   const used = usedOverride ?? user.freeAnalysisCount ?? 0;
   const hasPro = canPerform(user, "unlimited_analysis");
   const isAnonymous = user.plan === "anonymous";
   const isFree = user.plan === "free";
+  const baseProfile = {
+    plan: user.plan,
+    email: user.email,
+    userId: isAnonymous ? null : user.id,
+    anonymousUserId: anonymousId ?? (isAnonymous ? user.id : null),
+    freeAnalysisCount: used,
+    authProvider: user.authProvider ?? null,
+  };
 
   if (hasPro) {
     return {
       isAuthenticated: !isAnonymous,
       hasProAccess: true,
       isMonitor: user.isMonitor,
+      ...baseProfile,
       monthlyAnalysis: { used, limit: null, remaining: null },
     };
   }
@@ -142,6 +155,7 @@ function buildUsageStateFromUser(user: User, usedOverride?: number): UserUsageSt
       isAuthenticated: false,
       hasProAccess: false,
       isMonitor: false,
+      ...baseProfile,
       monthlyAnalysis: { used, limit: 1, remaining: Math.max(0, 1 - used) },
     };
   }
@@ -152,6 +166,7 @@ function buildUsageStateFromUser(user: User, usedOverride?: number): UserUsageSt
       isAuthenticated: true,
       hasProAccess: false,
       isMonitor: user.isMonitor,
+      ...baseProfile,
       monthlyAnalysis: { used, limit: 3, remaining },
     };
   }
@@ -160,6 +175,7 @@ function buildUsageStateFromUser(user: User, usedOverride?: number): UserUsageSt
     isAuthenticated: true,
     hasProAccess: false,
     isMonitor: user.isMonitor,
+    ...baseProfile,
     monthlyAnalysis: { used, limit: null, remaining: null },
   };
 }
@@ -625,7 +641,16 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "file is required" }, { status: 400 });
     }
 
-    const { user, anonymousUserId } = await resolveUserContext(req, formData);
+    let userCtx: UserContext;
+    try {
+      userCtx = await resolveUserContext(req);
+    } catch (error) {
+      if (error instanceof HttpError) {
+        return NextResponse.json({ error: error.message }, { status: error.status });
+      }
+      throw error;
+    }
+    const { user, anonymousUserId, mintedAnonymousUserId } = userCtx;
     const permission = canAnalyzeNow(user);
     // Quota tests: anonymous 1st OK, 2nd -> 429 anonymous_limit; free 3rd OK, 4th -> 429 free_limit; pro always OK.
     if (!permission.allowed) {
@@ -656,9 +681,11 @@ export async function POST(req: NextRequest) {
 
     if (typeof phaseFramesJson === "string") {
       try {
-        const parsed = JSON.parse(phaseFramesJson) as Array<
-          Partial<PhaseFrame> & { phase?: PhaseKey; timestamp?: number }
-        >;
+        const parsed = JSON.parse(phaseFramesJson) as Array<{
+          phase?: PhaseKey;
+          timestamp?: number;
+          imageBase64?: string;
+        }>;
         if (Array.isArray(parsed)) {
           providedFrames = parsed.reduce((acc, frame) => {
             if (!frame || typeof frame !== "object" || !frame.phase || !frame.imageBase64) return acc;
@@ -765,15 +792,6 @@ export async function POST(req: NextRequest) {
     // Vision に渡すフレーム順は「必ずクライアントが決めた順序」を使う。
     // fallback で独自並び替えするとフェーズがズレる原因になる。
 
-    const PHASE_ORDER: PhaseKey[] = [
-      "address",
-      "backswing",
-      "top",
-      "downswing",
-      "impact",
-      "finish",
-    ];
-
     const sequenceFrameResults = sequenceFrames.slice(0, 16).map(async (input) => {
       const loaded = await fetchPhaseFrameFromUrl(input);
       return loaded ? { loaded, meta: input } : null;
@@ -841,6 +859,25 @@ export async function POST(req: NextRequest) {
       typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `golf-${Date.now()}`;
 
     const timestamp = Date.now();
+    const resolvedSequenceFrames: Array<{ url: string; timestampSec?: number } | null> = resolvedSequence.length
+      ? await Promise.all(
+          resolvedSequence.map(async ({ loaded, meta }) => {
+            const normalized = await normalizePhaseFrame(loaded, req.url).catch((err) => {
+              console.warn("[golf/analyze] drop sequence frame (normalize failed)", err);
+              return null;
+            });
+            if (!normalized) return null;
+            const mime = normalizeMime(normalized.mimeType);
+            return {
+              url: `data:${mime};base64,${normalized.base64Image}`,
+              timestampSec: meta.timestampSec ?? normalized.timestampSec,
+            };
+          })
+        )
+      : [];
+    const cleanedSequenceFrames = resolvedSequenceFrames.filter(
+      (i): i is { url: string; timestampSec?: number } => !!i
+    );
     const result: SwingAnalysis = {
       analysisId,
       createdAt: new Date(timestamp).toISOString(),
@@ -851,20 +888,7 @@ export async function POST(req: NextRequest) {
       comparison: parsed.comparison,
       sequence: resolvedSequence.length
         ? {
-            frames: await Promise.all(
-              resolvedSequence.map(async ({ loaded, meta }) => {
-                const normalized = await normalizePhaseFrame(loaded, req.url).catch((err) => {
-                  console.warn("[golf/analyze] drop sequence frame (normalize failed)", err);
-                  return null;
-                });
-                if (!normalized) return null;
-                const mime = normalizeMime(normalized.mimeType);
-                return {
-                  url: `data:${mime};base64,${normalized.base64Image}`,
-                  timestampSec: meta.timestampSec ?? normalized.timestampSec,
-                };
-              })
-            ).then((items) => items.filter((i): i is { url: string; timestampSec?: number } => !!i)),
+            frames: cleanedSequenceFrames,
             stages: parsed.sequenceStages,
           }
         : parsed.sequenceStages
@@ -880,12 +904,13 @@ export async function POST(req: NextRequest) {
       meta,
       createdAt: timestamp,
       userId: user.plan === "anonymous" ? null : user.id,
-      anonymousUserId: user.plan === "anonymous" ? anonymousUserId : null,
+      anonymousUserId: anonymousUserId ?? (user.plan === "anonymous" ? user.id : null),
     };
 
     await saveAnalysis(record);
 
-    let usedCount = user.freeAnalysisCount ?? 0;
+    const anonymousUsage = anonymousUserId ? await getAnonymousQuotaCount(anonymousUserId) : 0;
+    let usedCount = Math.max(user.freeAnalysisCount ?? 0, anonymousUsage);
     if (!canPerform(user, "unlimited_analysis")) {
       if (user.plan === "anonymous" && anonymousUserId) {
         await incrementAnonymousQuotaCount(anonymousUserId);
@@ -896,13 +921,20 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    const usageState = buildUsageStateFromUser(user, usedCount);
-
-    return NextResponse.json({
+    const usageState = buildUsageStateFromUser(user, usedCount, anonymousUserId);
+    const res = NextResponse.json({
       analysisId,
       note,
       userState: usageState,
     });
+
+    if (mintedAnonymousUserId) {
+      setAnonymousTokenOnResponse(res, mintedAnonymousUserId);
+    } else if (anonymousUserId) {
+      setAnonymousTokenOnResponse(res, anonymousUserId);
+    }
+
+    return res;
   } catch (error) {
     console.error("[golf/analyze] error:", error);
     const message = error instanceof Error ? error.message : "internal server error";

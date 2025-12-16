@@ -118,14 +118,14 @@ export async function POST(req: Request) {
 
     const messages = [
       {
-        role: "user",
-        content: contentBlocks,
+        role: "user" as const,
+        content: contentBlocks as unknown,
       },
-    ];
+    ] as const;
 
     const result = await client.chat.completions.create({
       model: "gpt-4o-mini",
-      messages,
+      messages: messages as any,
       max_tokens: 800,
       temperature: 0.0,
       response_format: { type: "json_object" },
@@ -139,9 +139,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ keypoints: json });
   } catch (err) {
     console.error("[vision extract]", err);
-    return NextResponse.json(
-      { error: "vision processing failed", detail: err?.message },
-      { status: 500 }
-    );
+    const detail = err instanceof Error ? err.message : typeof err === "string" ? err : "unknown error";
+    return NextResponse.json({ error: "vision processing failed", detail }, { status: 500 });
   }
 }

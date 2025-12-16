@@ -2,9 +2,10 @@
 
 import Link from 'next/link';
 import { useEffect, useMemo, useState } from 'react';
-import { useParams, useRouter } from 'next/navigation';
+import { useParams, usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { buildCoachContext } from '@/app/coach/utils/context';
 import { saveBootstrapContext } from '@/app/coach/utils/storage';
+import { useMeUserState } from '@/app/golf/hooks/useMeUserState';
 import type {
   CausalImpactExplanation,
   GolfAnalysisResponse,
@@ -344,8 +345,13 @@ const deriveSwingTypeResult = (
 const GolfResultPage = () => {
   const params = useParams();
   const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+  useMeUserState();
   const id = (params?.id ?? '') as string;
   const { state: userState } = useUserState();
+  const [showToast, setShowToast] = useState(false);
+  const registerUrl = `/golf/register?next=${encodeURIComponent(pathname ?? '/golf/history')}`;
 
   const [data, setData] = useState<GolfAnalysisResponse | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -371,6 +377,18 @@ const GolfResultPage = () => {
   }, []);
 
   useEffect(() => {
+    const registered = searchParams.get('registered');
+    if (!registered) return;
+    setShowToast(true);
+    const timer = setTimeout(() => setShowToast(false), 3500);
+    const params = new URLSearchParams(searchParams.toString());
+    params.delete('registered');
+    const nextUrl = params.toString() ? `${pathname}?${params.toString()}` : pathname;
+    router.replace(nextUrl);
+    return () => clearTimeout(timer);
+  }, [pathname, router, searchParams]);
+
+  useEffect(() => {
     if (!id) return;
     setHasSavedHistory(false);
     setPreviousHistory(null);
@@ -381,7 +399,7 @@ const GolfResultPage = () => {
       setData(local);
       setSwingTypes(deriveSwingTypes(local.result));
       setSwingTypeResult(deriveSwingTypeResult(local.result));
-      setCausalImpact(local.result.causalImpact ?? null);
+      setCausalImpact(local.causalImpact ?? null);
       setFallbackNote(null);
       setIsLoading(false);
       return;
@@ -420,8 +438,8 @@ const GolfResultPage = () => {
           setSwingTypes(deriveSwingTypes(resolved.result));
           setSwingTypeResult(deriveSwingTypeResult(resolved.result));
         }
-        if (resolved.result?.causalImpact) {
-          setCausalImpact(resolved.result.causalImpact);
+        if (resolved.causalImpact) {
+          setCausalImpact(resolved.causalImpact);
         }
       } catch (err: unknown) {
         console.error(err);
@@ -432,7 +450,7 @@ const GolfResultPage = () => {
             setData(stored);
             setSwingTypes(deriveSwingTypes(stored.result));
             setSwingTypeResult(deriveSwingTypeResult(stored.result));
-            setCausalImpact(stored.result.causalImpact ?? null);
+            setCausalImpact(stored.causalImpact ?? null);
             return;
           }
         }
@@ -795,8 +813,9 @@ const GolfResultPage = () => {
   }, [swingTypeMatches]);
 
   useEffect(() => {
+    const ownerId = userState.userId ?? anonymousUserId;
     if (
-      !anonymousUserId ||
+      !ownerId ||
       !data?.analysisId ||
       !data.result ||
       !causalImpact ||
@@ -814,7 +833,7 @@ const GolfResultPage = () => {
 
     const history: SwingAnalysisHistory = {
       analysisId: data.analysisId,
-      userId: anonymousUserId,
+      userId: ownerId,
       createdAt: createdAtIso,
       swingScore: data.result.totalScore,
       estimatedOnCourseScore: roundEstimates.strokeRange,
@@ -824,12 +843,13 @@ const GolfResultPage = () => {
     };
 
     saveSwingHistory(history);
-    const histories = getSwingHistories(anonymousUserId);
+    const histories = getSwingHistories(ownerId);
     const prev = histories.find((item) => item.analysisId !== history.analysisId) ?? null;
     setPreviousHistory(prev);
     setHasSavedHistory(true);
   }, [
     anonymousUserId,
+    userState.userId,
     bestType?.label,
     causalImpact,
     data?.analysisId,
@@ -916,6 +936,13 @@ const GolfResultPage = () => {
   return (
     <main className="min-h-screen bg-slate-950 text-slate-50 flex justify-center">
       <div className="w-full max-w-3xl px-4 py-8 space-y-6">
+        {showToast && (
+          <div className="fixed top-4 inset-x-0 flex justify-center px-4">
+            <div className="max-w-lg w-full rounded-lg border border-emerald-400/60 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-100 shadow-lg shadow-emerald-900/30">
+              登録が完了しました。履歴が保存されました。
+            </div>
+          </div>
+        )}
         <header className="flex items-baseline justify-between gap-4">
           <div>
             <h1 className="text-2xl font-semibold">AIゴルフスイング診断 – 結果</h1>
@@ -944,6 +971,32 @@ const GolfResultPage = () => {
             これまでの診断履歴を見る
           </Link>
         </header>
+
+        {!userState.isAuthenticated && (
+          <div className="rounded-lg border border-emerald-500/40 bg-emerald-900/20 px-4 py-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+            <div className="space-y-1 text-sm">
+              <p className="font-semibold text-emerald-100">履歴を保存してスコア推移を確認しましょう</p>
+              <p className="text-xs text-emerald-200">
+                メール登録で無料診断が合計3回利用でき、履歴とスコア推移グラフが解放されます。
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => router.push(registerUrl)}
+                className="rounded-md bg-emerald-500 hover:bg-emerald-400 px-3 py-2 text-xs font-semibold text-slate-900"
+              >
+                メールアドレスを登録する
+              </button>
+              <Link
+                href="/golf/history"
+                className="rounded-md border border-emerald-400/60 px-3 py-2 text-xs font-semibold text-emerald-100 hover:border-emerald-300"
+              >
+                履歴を確認する
+              </Link>
+            </div>
+          </div>
+        )}
 
         {usageBanner && (
           <div className="rounded-lg border border-amber-300/60 bg-amber-500/10 px-4 py-3 text-sm text-amber-50 space-y-1">

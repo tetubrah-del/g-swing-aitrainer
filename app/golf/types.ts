@@ -83,6 +83,12 @@ export type UserUsageState = {
   isAuthenticated: boolean;
   hasProAccess: boolean;
   isMonitor?: boolean;
+  plan?: "anonymous" | "free" | "pro";
+  email?: string | null;
+  userId?: string | null;
+  anonymousUserId?: string | null;
+  freeAnalysisCount?: number;
+  authProvider?: AuthProvider | "email" | null;
   monthlyAnalysis?: {
     used: number;
     limit: number | null;

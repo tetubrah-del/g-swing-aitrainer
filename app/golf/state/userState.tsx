@@ -1,6 +1,6 @@
 'use client';
 
-import { createContext, ReactNode, useContext, useEffect, useMemo, useState } from "react";
+import { createContext, ReactNode, useContext, useMemo, useState } from "react";
 import { UserUsageState } from "@/app/golf/types";
 
 type UserStateContextValue = {
@@ -12,6 +12,12 @@ const DEFAULT_STATE: UserUsageState = {
   isAuthenticated: false,
   hasProAccess: false,
   isMonitor: false,
+  plan: "anonymous",
+  email: null,
+  userId: null,
+  anonymousUserId: null,
+  freeAnalysisCount: 0,
+  authProvider: null,
   monthlyAnalysis: undefined,
 };
 
@@ -25,10 +31,25 @@ const UserStateContext = createContext<UserStateContextValue>({
 const normalizeState = (value: UserUsageState | null | undefined): UserUsageState => {
   if (!value || typeof value !== "object") return DEFAULT_STATE;
   const monthly = value.monthlyAnalysis;
+  const normalizedProvider =
+    value.authProvider === "google" || value.authProvider === "email" ? value.authProvider : null;
   return {
     isAuthenticated: !!value.isAuthenticated,
     hasProAccess: !!value.hasProAccess,
     isMonitor: value.hasProAccess ? value.isMonitor === true : false,
+    plan:
+      value.plan === "pro" || value.plan === "free" || value.plan === "anonymous"
+        ? value.plan
+      : value.hasProAccess
+        ? "pro"
+        : value.isAuthenticated
+          ? "free"
+          : "anonymous",
+    email: typeof value.email === "string" ? value.email : null,
+    userId: typeof value.userId === "string" ? value.userId : null,
+    anonymousUserId: typeof value.anonymousUserId === "string" ? value.anonymousUserId : null,
+    freeAnalysisCount: Number.isFinite(value.freeAnalysisCount) ? Number(value.freeAnalysisCount) : 0,
+    authProvider: normalizedProvider,
     monthlyAnalysis:
       monthly && typeof monthly === "object"
         ? {
@@ -63,12 +84,7 @@ const persistState = (state: UserUsageState) => {
 };
 
 export const UserStateProvider = ({ children }: { children: ReactNode }) => {
-  const [state, setState] = useState<UserUsageState>(DEFAULT_STATE);
-
-  useEffect(() => {
-    const initial = loadState();
-    setState(initial);
-  }, []);
+  const [state, setState] = useState<UserUsageState>(() => loadState());
 
   const value = useMemo<UserStateContextValue>(
     () => ({

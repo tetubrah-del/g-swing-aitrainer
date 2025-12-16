@@ -1,4 +1,4 @@
-import { User, UserAction, UserPlan } from '@/types/user';
+import { User, UserAction, UserPlan } from '@/app/types/user';
 
 const getEffectivePlan = (user: User): UserPlan => {
   const monitorActive =
@@ -21,7 +21,7 @@ export const canPerform = (user: User, action: UserAction): boolean => {
     case 'view_history_list':
       return plan === 'free' || plan === 'pro';
     case 'view_history_graph':
-      return plan === 'pro';
+      return plan === 'free' || plan === 'pro';
     default: {
       const exhaustiveCheck: never = action;
       return exhaustiveCheck;

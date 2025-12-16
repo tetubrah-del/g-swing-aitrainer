@@ -12,6 +12,7 @@ export interface User {
   plan: UserPlan;
   email: string | null;
   isMonitor: boolean;
+  authProvider?: 'google' | 'email' | null;
   monitorExpiresAt?: Date | null; // 有効期限必須（null/undefined は無効）
   freeAnalysisCount: number;
   freeAnalysisResetAt: Date;
