@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import { useEffect, useMemo, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { buildCoachContext } from '@/app/coach/utils/context';
@@ -936,6 +937,12 @@ const GolfResultPage = () => {
           >
             再診断する
           </button>
+          <Link
+            href="/golf/history"
+            className="text-xs text-emerald-300 underline underline-offset-4"
+          >
+            これまでの診断履歴を見る
+          </Link>
         </header>
 
         {usageBanner && (

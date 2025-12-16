@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import { FormEvent, useEffect, useState } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
 import { GolfAnalysisResponse, UserUsageState } from '@/app/golf/types';
@@ -941,6 +942,12 @@ const GolfUploadPage = () => {
             {isSubmitting ? '診断中…' : 'このフレームで診断する'}
           </button>
         </form>
+
+        <div className="flex justify-end">
+          <Link href="/golf/history" className="text-emerald-300 text-sm underline underline-offset-4">
+            過去の診断履歴を見る →
+          </Link>
+        </div>
       </div>
     </main>
   );

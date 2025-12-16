@@ -48,6 +48,31 @@ export async function getAnalysis(id: string) {
   return analyses.get(id) ?? null;
 }
 
+export async function listAnalyses(
+  identifiers: { userId?: string | null; anonymousUserId?: string | null },
+  options?: { limit?: number; order?: "asc" | "desc" }
+): Promise<GolfAnalysisRecord[]> {
+  await loadPromise;
+
+  const { userId, anonymousUserId } = identifiers;
+  const limit = options?.limit ?? 50;
+  const order = options?.order ?? "desc";
+
+  const filtered = Array.from(analyses.values()).filter((record) => {
+    const belongsToUser =
+      (userId && record.userId === userId) || (anonymousUserId && record.anonymousUserId === anonymousUserId);
+    return belongsToUser;
+  });
+
+  filtered.sort((a, b) => {
+    const aTime = typeof a.createdAt === "number" ? a.createdAt : 0;
+    const bTime = typeof b.createdAt === "number" ? b.createdAt : 0;
+    return order === "asc" ? aTime - bTime : bTime - aTime;
+  });
+
+  return filtered.slice(0, limit);
+}
+
 export async function countMonthlyAnalyses(
   identifiers: { userId?: string | null; anonymousUserId?: string | null },
   now: number = Date.now()
