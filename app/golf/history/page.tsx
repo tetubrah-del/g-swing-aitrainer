@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { ResponsiveContainer, LineChart, Line, XAxis, YAxis, Tooltip, CartesianGrid } from "recharts";
 import { getAnonymousUserId } from "@/app/golf/utils/historyStorage";
+import { useUserState } from "@/app/golf/state/userState";
 
 type HistoryItem = {
   id: string;
@@ -27,6 +28,7 @@ export default function HistoryPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [data, setData] = useState<HistoryResponse | null>(null);
+  const { state: userState } = useUserState();
 
   useEffect(() => {
     const load = async () => {
@@ -81,7 +83,8 @@ export default function HistoryPage() {
     );
   }
 
-  const isAnonymous = data?.access === "anonymous";
+  const isMember = userState.isAuthenticated || data?.access === "member";
+  const isAnonymous = !isMember;
   const hasHistories = (data?.items.length ?? 0) > 0;
 
   return (

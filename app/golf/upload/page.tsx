@@ -792,16 +792,22 @@ const GolfUploadPage = () => {
       const data = (await res.json().catch(() => ({}))) as AnalyzeResponse & { error?: string; message?: string };
 
       if (!res.ok) {
-        if (res.status === 429 && data?.userState) {
-          setUserState(data.userState);
-          if (data.userState.monthlyAnalysis) {
-            setLimitInfo(data.userState.monthlyAnalysis ?? null);
+        if (res.status === 429) {
+          if (data?.userState) {
+            setUserState(data.userState);
+            if (data.userState.monthlyAnalysis) {
+              setLimitInfo(data.userState.monthlyAnalysis ?? null);
+            }
           }
+          const reason = data?.error;
+          const quotaMessage =
+            reason === 'free_limit' || reason === 'anonymous_limit'
+              ? '利用回数超過により利用できません。利用いただくにはメール会員もしくはPRO会員への登録をお願いします。'
+              : data?.message ||
+                data?.error ||
+                '利用回数超過により利用できません。利用いただくにはメール会員もしくはPRO会員への登録をお願いします。';
           setQuotaExceeded(true);
-          setError(
-            data.message ||
-              '利用回数超過により利用できません。利用いただくにはメール会員もしくはPRO会員への登録をお願いします。'
-          );
+          setError(quotaMessage);
           return;
         }
         setError(data?.message || data?.error || '診断APIの呼び出しに失敗しました。');
