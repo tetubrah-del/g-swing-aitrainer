@@ -44,6 +44,8 @@ export type CoachQuickReply = {
 export type CoachChatRequest = {
   mode?: "initial" | "chat";
   systemPersona: string;
+  detailMode?: boolean;
+  visionFrames?: Array<{ url: string; timestampSec?: number; label?: string; frameIndex?: number }>;
   userProfileSummary?: string;
   analysisContext?: CoachCausalImpactExplanation | null;
   summaryText?: string | null;

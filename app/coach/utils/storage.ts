@@ -7,6 +7,9 @@ const SUMMARY_KEY = (threadId: string) => `coach_summary_${threadId}`;
 const CONTEXT_KEY = (threadId: string) => `coach_context_${threadId}`;
 const BOOTSTRAP_KEY = (userId: string) => `coach_bootstrap_${userId}`;
 const QUICK_REPLY_KEY = (threadId: string) => `coach_quickreply_${threadId}`;
+const CONTEXT_DISABLED_KEY = (threadId: string) => `coach_context_disabled_${threadId}`;
+const DETAIL_MODE_KEY = (threadId: string) => `coach_detail_mode_${threadId}`;
+const VISION_MODE_KEY = (threadId: string) => `coach_vision_mode_${threadId}`;
 
 const MAX_MESSAGES = 200;
 
@@ -130,6 +133,15 @@ export const loadCausalContext = (threadId: string | null): CoachCausalImpactExp
   return safeParse<CoachCausalImpactExplanation>(window.localStorage.getItem(CONTEXT_KEY(threadId)));
 };
 
+export const clearCausalContext = (threadId: string | null) => {
+  if (!threadId || typeof window === "undefined") return;
+  try {
+    window.localStorage.removeItem(CONTEXT_KEY(threadId));
+  } catch {
+    // ignore
+  }
+};
+
 export const saveBootstrapContext = (userId: string, context: CoachCausalImpactExplanation) => {
   if (!userId || typeof window === "undefined") return;
   saveJson(BOOTSTRAP_KEY(userId), context);
@@ -138,6 +150,26 @@ export const saveBootstrapContext = (userId: string, context: CoachCausalImpactE
 export const loadBootstrapContext = (userId: string): CoachCausalImpactExplanation | null => {
   if (!userId || typeof window === "undefined") return null;
   return safeParse<CoachCausalImpactExplanation>(window.localStorage.getItem(BOOTSTRAP_KEY(userId)));
+};
+
+export const clearBootstrapContext = (userId: string) => {
+  if (!userId || typeof window === "undefined") return;
+  try {
+    window.localStorage.removeItem(BOOTSTRAP_KEY(userId));
+  } catch {
+    // ignore
+  }
+};
+
+export const isContextDisabled = (threadId: string | null): boolean => {
+  if (!threadId || typeof window === "undefined") return false;
+  const parsed = safeParse<{ disabled?: boolean }>(window.localStorage.getItem(CONTEXT_DISABLED_KEY(threadId)));
+  return !!parsed?.disabled;
+};
+
+export const setContextDisabled = (threadId: string | null, disabled: boolean) => {
+  if (!threadId || typeof window === "undefined") return;
+  saveJson(CONTEXT_DISABLED_KEY(threadId), { disabled });
 };
 
 export const markQuickRepliesDismissed = (threadId: string | null) => {
@@ -149,4 +181,26 @@ export const hasDismissedQuickReplies = (threadId: string | null): boolean => {
   if (!threadId || typeof window === "undefined") return false;
   const parsed = safeParse<{ dismissed?: boolean }>(window.localStorage.getItem(QUICK_REPLY_KEY(threadId)));
   return !!parsed?.dismissed;
+};
+
+export const loadDetailMode = (threadId: string | null): boolean => {
+  if (!threadId || typeof window === "undefined") return false;
+  const parsed = safeParse<{ enabled?: boolean }>(window.localStorage.getItem(DETAIL_MODE_KEY(threadId)));
+  return !!parsed?.enabled;
+};
+
+export const saveDetailMode = (threadId: string | null, enabled: boolean) => {
+  if (!threadId || typeof window === "undefined") return;
+  saveJson(DETAIL_MODE_KEY(threadId), { enabled });
+};
+
+export const loadVisionMode = (threadId: string | null): boolean => {
+  if (!threadId || typeof window === "undefined") return false;
+  const parsed = safeParse<{ enabled?: boolean }>(window.localStorage.getItem(VISION_MODE_KEY(threadId)));
+  return !!parsed?.enabled;
+};
+
+export const saveVisionMode = (threadId: string | null, enabled: boolean) => {
+  if (!threadId || typeof window === "undefined") return;
+  saveJson(VISION_MODE_KEY(threadId), { enabled });
 };

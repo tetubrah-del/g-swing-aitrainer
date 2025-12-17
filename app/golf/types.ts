@@ -76,7 +76,7 @@ export interface GolfAnalyzeMeta {
   previousAnalysisId?: AnalysisId | null;
 }
 
-export type AuthProvider = "google";
+export type AuthProvider = "google" | "email";
 export type ProAccessReason = "paid" | "monitor";
 
 export type UserUsageState = {
@@ -88,7 +88,7 @@ export type UserUsageState = {
   userId?: string | null;
   anonymousUserId?: string | null;
   freeAnalysisCount?: number;
-  authProvider?: AuthProvider | "email" | null;
+  authProvider?: AuthProvider | null;
   monthlyAnalysis?: {
     used: number;
     limit: number | null;
@@ -100,6 +100,7 @@ export interface UserAccount {
   userId: string;
   email: string | null;
   authProvider: AuthProvider | null;
+  emailVerifiedAt?: number | null;
   createdAt: number;
   updatedAt: number;
   proAccess: boolean;

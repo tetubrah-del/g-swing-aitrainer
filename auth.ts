@@ -3,6 +3,14 @@ import Google from "next-auth/providers/google";
 import { findUserByEmail, getUserById, upsertGoogleUser } from "@/app/lib/userStore";
 import { buildUserUsageState } from "@/app/lib/membership";
 
+const getAuthSecret = () => {
+  const secret = process.env.NEXTAUTH_SECRET ?? process.env.AUTH_SECRET ?? "dev-nextauth-secret";
+  if (!process.env.NEXTAUTH_SECRET && !process.env.AUTH_SECRET) {
+    console.warn("[auth] Using fallback dev secret; set NEXTAUTH_SECRET in production.");
+  }
+  return secret;
+};
+
 // NextAuth v5 style exports
 export const { handlers, auth, signIn, signOut } = NextAuth({
   providers: [
@@ -78,6 +86,5 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
       return true;
     },
   },
-  // 環境変数は利用者が設定する前提
-  secret: process.env.NEXTAUTH_SECRET,
+  secret: getAuthSecret(),
 });

@@ -2,11 +2,9 @@
 
 import { FormEvent, useMemo, useState } from "react";
 import Link from "next/link";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useSearchParams } from "next/navigation";
 import { signIn } from "next-auth/react";
-import { useUserState } from "@/app/golf/state/userState";
 import { getAnonymousUserId } from "@/app/golf/utils/historyStorage";
-import type { UserUsageState } from "@/app/golf/types";
 import { resetMeUserStateCache } from "@/app/golf/hooks/useMeUserState";
 
 const sanitizeNext = (next: string | null, fallback: string): string => {
@@ -22,39 +20,40 @@ const buildRedirectTarget = (next: string | null, fallback: string): string => {
 };
 
 export default function RegisterPage() {
-  const router = useRouter();
   const searchParams = useSearchParams();
   const next = searchParams.get("next");
-  const { setUserState } = useUserState();
   const [email, setEmail] = useState("");
   const [status, setStatus] = useState<"idle" | "email" | "google">("idle");
   const [error, setError] = useState<string | null>(null);
+  const [sent, setSent] = useState(false);
+  const [devLink, setDevLink] = useState<string | null>(null);
   const anonymousUserId = useMemo(() => getAnonymousUserId(), []);
-
-  const redirectBack = () => {
-    const target = buildRedirectTarget(next, "/golf/history");
-    router.push(target);
-  };
 
   const handleEmailRegister = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     if (status !== "idle") return;
     setStatus("email");
     setError(null);
+    setDevLink(null);
     try {
-      const res = await fetch("/api/golf/register/email", {
+      await fetch("/api/golf/active-auth", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, anonymousUserId }),
+        body: JSON.stringify({ provider: "email" }),
       });
-      const data = (await res.json().catch(() => ({}))) as { userState?: unknown; error?: string };
-      if (!res.ok || !data?.userState || typeof data.userState !== "object") {
-        throw new Error(data?.error || "登録に失敗しました。");
+      const res = await fetch("/api/golf/register/email/request", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, anonymousUserId, next }),
+      });
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; devLink?: string; error?: string };
+      if (!res.ok || !data?.ok) {
+        throw new Error(data?.error || "メール送信に失敗しました。");
       }
-      setUserState(data.userState as UserUsageState);
-      redirectBack();
+      setSent(true);
+      if (typeof data.devLink === "string") setDevLink(data.devLink);
     } catch (err) {
-      const message = err instanceof Error ? err.message : "登録に失敗しました。";
+      const message = err instanceof Error ? err.message : "メール送信に失敗しました。";
       setError(message);
     } finally {
       setStatus("idle");
@@ -66,6 +65,11 @@ export default function RegisterPage() {
     setStatus("google");
     setError(null);
     try {
+      await fetch("/api/golf/active-auth", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider: "google" }),
+      });
       const callbackUrl = buildRedirectTarget(next, "/golf/history");
       const url = new URL(callbackUrl, window.location.origin);
       if (anonymousUserId) {
@@ -113,7 +117,24 @@ export default function RegisterPage() {
             </div>
           </div>
 
-          {error && <p className="text-sm text-rose-300 bg-rose-900/30 border border-rose-700/60 rounded-lg px-3 py-2">{error}</p>}
+          {error && (
+            <p className="text-sm text-rose-300 bg-rose-900/30 border border-rose-700/60 rounded-lg px-3 py-2">
+              {error}
+            </p>
+          )}
+          {sent && !error && (
+            <div className="text-sm text-emerald-200 bg-emerald-900/20 border border-emerald-700/40 rounded-lg px-3 py-2 space-y-2">
+              <p>確認メールを送信しました。メール内のリンクをクリックして登録を完了してください。</p>
+              {devLink && (
+                <p className="break-all text-xs text-emerald-200/90">
+                  開発用リンク:{" "}
+                  <a className="underline underline-offset-4" href={devLink}>
+                    {devLink}
+                  </a>
+                </p>
+              )}
+            </div>
+          )}
 
           <div className="space-y-3">
             <button
@@ -142,7 +163,7 @@ export default function RegisterPage() {
                 disabled={isBusy || !email}
                 className="w-full rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 disabled:bg-slate-800/50 px-4 py-3 font-semibold text-slate-50 transition-colors"
               >
-                {status === "email" ? "登録中…" : "メールアドレスで登録"}
+                {status === "email" ? "送信中…" : sent ? "もう一度送信する" : "認証メールを送信"}
               </button>
             </form>
           </div>

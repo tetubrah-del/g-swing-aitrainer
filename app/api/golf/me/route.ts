@@ -4,19 +4,47 @@ import { auth } from "@/auth";
 import { buildUserUsageState } from "@/app/lib/membership";
 import { findUserByEmail, getUserById, upsertGoogleUser } from "@/app/lib/userStore";
 import { readAnonymousFromRequest, setAnonymousTokenOnResponse } from "@/app/lib/anonymousToken";
+import { readEmailSessionFromRequest } from "@/app/lib/emailSession";
+import { readActiveAuthFromRequest, setActiveAuthOnResponse } from "@/app/lib/activeAuth";
 
 export async function GET(request: NextRequest) {
-  const session = await auth();
-  const sessionUserId = session?.user?.id ?? null;
-  const sessionEmail = session?.user?.email ?? null;
   const { anonymousUserId: tokenAnonymous } = readAnonymousFromRequest(request);
+  const emailSession = readEmailSessionFromRequest(request);
+  // If both Google and Email sessions exist but active_auth is missing, default to email to avoid cross-account mixing.
+  const activeAuth = readActiveAuthFromRequest(request) ?? (emailSession ? "email" : null);
 
-  let account = sessionUserId ? await getUserById(sessionUserId) : null;
-  if (!account && sessionEmail) {
-    account = await findUserByEmail(sessionEmail);
+  let account = null;
+
+  if (activeAuth !== "email") {
+    const session = await auth();
+    const sessionUserId = session?.user?.id ?? null;
+    const sessionEmail = session?.user?.email ?? null;
+
+    account = sessionUserId ? await getUserById(sessionUserId) : null;
+    if (!account && sessionEmail) {
+      account = await findUserByEmail(sessionEmail);
+    }
+    if (!account && sessionUserId && sessionEmail) {
+      account = await upsertGoogleUser({ googleSub: sessionUserId, email: sessionEmail, anonymousUserId: tokenAnonymous });
+    }
   }
-  if (!account && sessionUserId && sessionEmail) {
-    account = await upsertGoogleUser({ googleSub: sessionUserId, email: sessionEmail, anonymousUserId: tokenAnonymous });
+
+  if (!account && activeAuth !== "google" && emailSession) {
+    const byId = await getUserById(emailSession.userId);
+    if (
+      byId &&
+      byId.authProvider === "email" &&
+      byId.emailVerifiedAt != null &&
+      typeof byId.email === "string" &&
+      byId.email.toLowerCase() === emailSession.email.toLowerCase()
+    ) {
+      account = byId;
+    } else {
+      const byEmail = await findUserByEmail(emailSession.email);
+      if (byEmail && byEmail.authProvider === "email" && byEmail.emailVerifiedAt != null) {
+        account = byEmail;
+      }
+    }
   }
 
   const anonId = tokenAnonymous ?? null;
@@ -26,6 +54,8 @@ export async function GET(request: NextRequest) {
   });
 
   const res = NextResponse.json({ userState });
+  if (account?.authProvider === "google") setActiveAuthOnResponse(res, "google");
+  if (account?.authProvider === "email") setActiveAuthOnResponse(res, "email");
 
   if (anonId) {
     setAnonymousTokenOnResponse(res, anonId);

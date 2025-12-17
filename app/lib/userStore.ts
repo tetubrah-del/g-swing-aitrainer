@@ -18,6 +18,8 @@ async function loadFromDisk() {
         userId: value.userId || id,
         email: value.email ?? null,
         authProvider: value.authProvider ?? null,
+        emailVerifiedAt:
+          value.emailVerifiedAt === null || typeof value.emailVerifiedAt === "number" ? value.emailVerifiedAt : null,
       createdAt: typeof value.createdAt === "number" ? value.createdAt : Date.now(),
       updatedAt: typeof value.updatedAt === "number" ? value.updatedAt : Date.now(),
       proAccess: value.proAccess === true,
@@ -41,6 +43,12 @@ async function loadFromDisk() {
 
 const loadPromise = loadFromDisk();
 
+export async function resetUserStore() {
+  await loadPromise;
+  users.clear();
+  await persistToDisk();
+}
+
 async function persistToDisk() {
   const obj = Object.fromEntries(users.entries());
   try {
@@ -61,6 +69,15 @@ export async function findUserByEmail(email: string | null | undefined): Promise
   const lower = email.toLowerCase();
   for (const user of users.values()) {
     if (user.email && user.email.toLowerCase() === lower) return user;
+  }
+  return null;
+}
+
+export async function findUserByAnonymousId(anonymousUserId: string | null | undefined): Promise<UserAccount | null> {
+  await loadPromise;
+  if (!anonymousUserId) return null;
+  for (const user of users.values()) {
+    if (Array.isArray(user.anonymousIds) && user.anonymousIds.includes(anonymousUserId)) return user;
   }
   return null;
 }
@@ -87,13 +104,14 @@ export async function upsertGoogleUser(params: {
 
   const base: UserAccount =
     existing ??
-    ({
-      userId,
-      email: params.email ?? null,
-      authProvider: "google",
-      createdAt: now,
-      updatedAt: now,
-      proAccess: false,
+	    ({
+	      userId,
+	      email: params.email ?? null,
+	      authProvider: "google",
+	      emailVerifiedAt: now,
+	      createdAt: now,
+	      updatedAt: now,
+	      proAccess: false,
       proAccessReason: null,
       proAccessExpiresAt: null,
       plan: params.email ? "free" : "anonymous",
@@ -105,7 +123,10 @@ export async function upsertGoogleUser(params: {
 
   const anonymousIds = new Set(base.anonymousIds ?? []);
   if (params.anonymousUserId) {
-    anonymousIds.add(params.anonymousUserId);
+    const owner = await findUserByAnonymousId(params.anonymousUserId);
+    if (!owner || owner.userId === base.userId) {
+      anonymousIds.add(params.anonymousUserId);
+    }
   }
 
   const nextPlan =
@@ -115,12 +136,13 @@ export async function upsertGoogleUser(params: {
         ? "free"
         : "anonymous";
 
-  const user: UserAccount = {
-    ...base,
-    email: params.email ?? base.email,
-    authProvider: "google",
-    updatedAt: now,
-    proAccess: params.proAccess ?? base.proAccess ?? false,
+	  const user: UserAccount = {
+	    ...base,
+	    email: params.email ?? base.email,
+	    authProvider: "google",
+	    emailVerifiedAt: base.emailVerifiedAt ?? now,
+	    updatedAt: now,
+	    proAccess: params.proAccess ?? base.proAccess ?? false,
     proAccessReason: params.proAccessReason ?? base.proAccessReason ?? null,
     proAccessExpiresAt:
       typeof params.proAccessExpiresAt === "number" ? params.proAccessExpiresAt : base.proAccessExpiresAt ?? null,
@@ -156,6 +178,7 @@ export async function registerEmailUser(params: { email: string; anonymousUserId
       userId: crypto.randomUUID(),
       email: normalizedEmail,
       authProvider: "email",
+      emailVerifiedAt: now,
       createdAt: now,
       updatedAt: now,
       proAccess: false,
@@ -170,7 +193,10 @@ export async function registerEmailUser(params: { email: string; anonymousUserId
 
   const anonymousIds = new Set(base.anonymousIds ?? []);
   if (params.anonymousUserId) {
-    anonymousIds.add(params.anonymousUserId);
+    const owner = await findUserByAnonymousId(params.anonymousUserId);
+    if (!owner || owner.userId === base.userId) {
+      anonymousIds.add(params.anonymousUserId);
+    }
   }
 
   const nextPlan = base.plan === "anonymous" ? "free" : base.plan ?? "free";
@@ -178,6 +204,7 @@ export async function registerEmailUser(params: { email: string; anonymousUserId
     ...base,
     email: normalizedEmail,
     authProvider: base.authProvider ?? "email",
+    emailVerifiedAt: base.emailVerifiedAt ?? now,
     updatedAt: now,
     plan: nextPlan,
     anonymousIds: Array.from(anonymousIds),
@@ -216,6 +243,11 @@ export async function linkAnonymousIdToUser(userId: string, anonymousUserId: str
   if (!user) return null;
   const set = new Set(user.anonymousIds ?? []);
   if (set.has(anonymousUserId)) return user;
+  const owner = await findUserByAnonymousId(anonymousUserId);
+  if (owner && owner.userId !== user.userId) {
+    // Don't allow one device anonymousId to be linked to multiple accounts.
+    return user;
+  }
   set.add(anonymousUserId);
   const next: UserAccount = {
     ...user,

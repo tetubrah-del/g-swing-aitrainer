@@ -44,3 +44,9 @@ export const resetMeUserStateCache = () => {
   cachedUserState = null;
   pendingMePromise = null;
 };
+
+// utility to prime cache with a fresh value (e.g., after analyze)
+export const primeMeUserStateCache = (state: UserUsageState | null) => {
+  cachedUserState = state;
+  pendingMePromise = null;
+};

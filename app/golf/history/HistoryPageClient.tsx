@@ -4,7 +4,6 @@ import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { ResponsiveContainer, LineChart, Line, XAxis, YAxis, Tooltip, CartesianGrid } from "recharts";
-import { getAnonymousUserId } from "@/app/golf/utils/historyStorage";
 import { useUserState } from "@/app/golf/state/userState";
 import { useMeUserState } from "@/app/golf/hooks/useMeUserState";
 
@@ -36,19 +35,11 @@ export default function HistoryPage() {
   const pathname = usePathname();
   const searchParams = useSearchParams();
   const [showToast, setShowToast] = useState(false);
-  const [anonymousId] = useState<string>(() => getAnonymousUserId());
 
   useEffect(() => {
     const load = async () => {
       try {
-        const search = new URLSearchParams();
-        if (anonymousId) search.set("anonymousUserId", anonymousId);
-        if (userState.userId) search.set("userId", userState.userId);
-        const headers: Record<string, string> = {};
-        if (userState.userId) headers["x-user-id"] = userState.userId;
-        if (userState.email) headers["x-user-email"] = userState.email;
-        if (userState.authProvider) headers["x-auth-provider"] = userState.authProvider;
-        const res = await fetch(`/api/golf/history?${search.toString()}`, { headers });
+        const res = await fetch("/api/golf/history", { cache: "no-store" });
         const json = (await res.json()) as HistoryResponse & { error?: string };
         if (!res.ok) {
           throw new Error(json.error || "履歴の取得に失敗しました");
@@ -62,7 +53,7 @@ export default function HistoryPage() {
       }
     };
     load();
-  }, [anonymousId, userState.authProvider, userState.email, userState.userId]);
+  }, [userState.userId, userState.email, userState.isAuthenticated]);
 
   useEffect(() => {
     const registered = searchParams.get("registered");
@@ -209,6 +200,12 @@ export default function HistoryPage() {
                       className="rounded-md border border-slate-700 px-3 py-2 text-sm text-slate-100 hover:border-emerald-400 hover:text-emerald-200"
                     >
                       結果を見る
+                    </Link>
+                    <Link
+                      href={`/coach?analysisId=${encodeURIComponent(item.id)}`}
+                      className="rounded-md border border-emerald-500/50 bg-emerald-900/20 px-3 py-2 text-sm font-semibold text-emerald-100 hover:bg-emerald-900/35"
+                    >
+                      AIコーチ
                     </Link>
                   </div>
                 </div>

@@ -22,10 +22,12 @@ import { genPrompt } from "@/app/lib/vision/genPrompt";
 import { parseMultiPhaseResponse } from "@/app/lib/vision/parseMultiPhaseResponse";
 import { auth } from "@/auth";
 import { readAnonymousFromRequest, setAnonymousTokenOnResponse } from "@/app/lib/anonymousToken";
+import { readEmailSessionFromRequest } from "@/app/lib/emailSession";
+import { readActiveAuthFromRequest } from "@/app/lib/activeAuth";
 import { canAnalyzeNow } from "@/app/lib/quota";
 import { getAnalysis, saveAnalysis } from "@/app/lib/store";
 import { incrementAnonymousQuotaCount, getAnonymousQuotaCount } from "@/app/lib/quotaStore";
-import { findUserByEmail, getUserById, incrementFreeAnalysisCount, linkAnonymousIdToUser, upsertGoogleUser } from "@/app/lib/userStore";
+import { findUserByEmail, getUserById, incrementFreeAnalysisCount, upsertGoogleUser } from "@/app/lib/userStore";
 import { canPerform } from "@/app/lib/permissions";
 import { User, UserPlan } from "@/app/types/user";
 
@@ -57,10 +59,17 @@ class HttpError extends Error {
 async function resolveUserContext(req: NextRequest): Promise<UserContext> {
   const { anonymousUserId: tokenAnonymous } = readAnonymousFromRequest(req);
   const anonymousUserId = tokenAnonymous ?? null;
+  const emailSession = readEmailSessionFromRequest(req);
+  // If both Google and Email sessions exist but active_auth is missing, default to email to avoid cross-account mixing.
+  const activeAuth = readActiveAuthFromRequest(req) ?? (emailSession ? "email" : null);
 
-  const session = await auth();
-  const sessionUserId = session?.user?.id ?? null;
-  const sessionEmail = session?.user?.email ?? null;
+  let sessionUserId: string | null = null;
+  let sessionEmail: string | null = null;
+  if (activeAuth !== "email") {
+    const session = await auth();
+    sessionUserId = session?.user?.id ?? null;
+    sessionEmail = session?.user?.email ?? null;
+  }
 
   let account = sessionUserId ? await getUserById(sessionUserId) : null;
   if (!account && sessionEmail) {
@@ -69,8 +78,22 @@ async function resolveUserContext(req: NextRequest): Promise<UserContext> {
   if (sessionUserId && sessionEmail && !account) {
     account = await upsertGoogleUser({ googleSub: sessionUserId, email: sessionEmail, anonymousUserId });
   }
-  if (account && anonymousUserId && tokenAnonymous === anonymousUserId && !(account.anonymousIds ?? []).includes(anonymousUserId)) {
-    account = await linkAnonymousIdToUser(account.userId, anonymousUserId);
+  if (!account && activeAuth !== "google" && emailSession) {
+    const byId = await getUserById(emailSession.userId);
+    if (
+      byId &&
+      byId.authProvider === "email" &&
+      byId.emailVerifiedAt != null &&
+      typeof byId.email === "string" &&
+      byId.email.toLowerCase() === emailSession.email.toLowerCase()
+    ) {
+      account = byId;
+    } else {
+      const byEmail = await findUserByEmail(emailSession.email);
+      if (byEmail && byEmail.authProvider === "email" && byEmail.emailVerifiedAt != null) {
+        account = byEmail;
+      }
+    }
   }
 
   const now = Date.now();
@@ -904,7 +927,9 @@ export async function POST(req: NextRequest) {
       meta,
       createdAt: timestamp,
       userId: user.plan === "anonymous" ? null : user.id,
-      anonymousUserId: anonymousUserId ?? (user.plan === "anonymous" ? user.id : null),
+      // Prevent cross-account leakage via shared device anonymous token:
+      // authenticated analyses are always owned by the account only.
+      anonymousUserId: user.plan === "anonymous" ? (anonymousUserId ?? user.id) : null,
     };
 
     await saveAnalysis(record);

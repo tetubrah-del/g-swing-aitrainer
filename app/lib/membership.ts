@@ -3,6 +3,7 @@ import { findUserByEmail, getUserById, upsertGoogleUser } from "@/app/lib/userSt
 import { getAnonymousQuotaCount } from "@/app/lib/quotaStore";
 
 export const FREE_MONTHLY_ANALYSIS_LIMIT = 3;
+export const ANONYMOUS_ANALYSIS_LIMIT = 1;
 
 export function hasProAccess(user: UserAccount | null, now: number = Date.now()): boolean {
   if (!user) return false;
@@ -56,7 +57,8 @@ export async function buildUserUsageState(params: {
     };
   }
 
-  const remaining = Math.max(0, limit - used);
+  const effectiveLimit = baseProfile.plan === "anonymous" ? ANONYMOUS_ANALYSIS_LIMIT : limit;
+  const remaining = Math.max(0, effectiveLimit - used);
   return {
     isAuthenticated: !!params.user,
     hasProAccess: false,
@@ -64,7 +66,7 @@ export async function buildUserUsageState(params: {
     ...baseProfile,
     monthlyAnalysis: {
       used,
-      limit,
+      limit: effectiveLimit,
       remaining,
     },
   };

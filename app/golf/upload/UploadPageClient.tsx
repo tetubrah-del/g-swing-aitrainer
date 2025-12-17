@@ -8,7 +8,7 @@ import { getAnonymousUserId } from '@/app/golf/utils/historyStorage';
 import { getLatestReport } from '@/app/golf/utils/reportStorage';
 import { computePhaseIndices, type FramePose } from '@/app/lib/swing/phases';
 import { useUserState } from '@/app/golf/state/userState';
-import { useMeUserState } from '@/app/golf/hooks/useMeUserState';
+import { primeMeUserStateCache, resetMeUserStateCache, useMeUserState } from '@/app/golf/hooks/useMeUserState';
 
 const PHASE_ORDER = [
   'address',
@@ -818,6 +818,7 @@ const GolfUploadPage = () => {
         if (res.status === 429) {
           if (data?.userState) {
             setUserState(data.userState);
+            primeMeUserStateCache(data.userState);
             if (data.userState.monthlyAnalysis) {
               setLimitInfo(data.userState.monthlyAnalysis ?? null);
             }
@@ -838,7 +839,9 @@ const GolfUploadPage = () => {
       }
 
       if (data.userState) {
+        resetMeUserStateCache();
         setUserState(data.userState);
+        primeMeUserStateCache(data.userState);
         if (!data.userState.hasProAccess && data.userState.monthlyAnalysis) {
           setLimitInfo(data.userState.monthlyAnalysis ?? null);
         }

@@ -8,9 +8,17 @@ const TOKEN_VERSION = "v1";
 const DEFAULT_TTL_MS = 1000 * 60 * 60 * 24 * 180; // 180 days
 
 const getSecret = (): string => {
-  const secret = process.env.ANONYMOUS_TOKEN_SECRET;
-  if (!secret) {
-    throw new Error("ANONYMOUS_TOKEN_SECRET is required");
+  const secret =
+    process.env.ANONYMOUS_TOKEN_SECRET ??
+    process.env.NEXTAUTH_SECRET ??
+    process.env.AUTH_SECRET ??
+    "dev-anonymous-secret";
+  if (
+    !process.env.ANONYMOUS_TOKEN_SECRET &&
+    !process.env.NEXTAUTH_SECRET &&
+    !process.env.AUTH_SECRET
+  ) {
+    console.warn("[anonymous-token] Using fallback dev secret; set ANONYMOUS_TOKEN_SECRET in production.");
   }
   return secret;
 };

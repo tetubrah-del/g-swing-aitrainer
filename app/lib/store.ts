@@ -28,6 +28,12 @@ async function loadFromDisk() {
 
 const loadPromise = loadFromDisk();
 
+export async function resetAnalysisStore() {
+  await loadPromise;
+  analyses.clear();
+  await persistToDisk();
+}
+
 async function persistToDisk() {
   const obj = Object.fromEntries(analyses.entries());
   try {
@@ -124,7 +130,8 @@ export async function attachUserToAnonymousAnalyses(anonymousUserId: string, use
   let updated = false;
 
   analyses.forEach((record, id) => {
-    if (record.anonymousUserId === anonymousUserId && record.userId !== userId) {
+    // Only attach truly-anonymous records; never steal records already owned by another user.
+    if (record.anonymousUserId === anonymousUserId && record.userId == null) {
       analyses.set(id, { ...record, userId });
       updated = true;
     }

@@ -1,6 +1,6 @@
 'use client';
 
-import { createContext, ReactNode, useContext, useMemo, useState } from "react";
+import { createContext, ReactNode, useCallback, useContext, useMemo, useState } from "react";
 import { UserUsageState } from "@/app/golf/types";
 
 type UserStateContextValue = {
@@ -20,6 +20,8 @@ const DEFAULT_STATE: UserUsageState = {
   authProvider: null,
   monthlyAnalysis: undefined,
 };
+
+export const DEFAULT_USER_USAGE_STATE: UserUsageState = DEFAULT_STATE;
 
 const STORAGE_KEY = "golf_user_state";
 
@@ -86,17 +88,13 @@ const persistState = (state: UserUsageState) => {
 export const UserStateProvider = ({ children }: { children: ReactNode }) => {
   const [state, setState] = useState<UserUsageState>(() => loadState());
 
-  const value = useMemo<UserStateContextValue>(
-    () => ({
-      state,
-      setUserState: (next) => {
-        const normalized = normalizeState(next);
-        setState(normalized);
-        persistState(normalized);
-      },
-    }),
-    [state]
-  );
+  const setUserState = useCallback((next: UserUsageState) => {
+    const normalized = normalizeState(next);
+    setState(normalized);
+    persistState(normalized);
+  }, []);
+
+  const value = useMemo<UserStateContextValue>(() => ({ state, setUserState }), [state, setUserState]);
 
   return <UserStateContext.Provider value={value}>{children}</UserStateContext.Provider>;
 };

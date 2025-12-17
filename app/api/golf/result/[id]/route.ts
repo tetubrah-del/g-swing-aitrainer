@@ -3,9 +3,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { AnalysisId, GolfAnalysisResponse, MOCK_GOLF_ANALYSIS_RESULT } from "@/app/golf/types";
 import { getAnalysis } from "@/app/lib/store";
-import { getUserById, linkAnonymousIdToUser } from "@/app/lib/userStore";
+import { findUserByEmail, getUserById, linkAnonymousIdToUser } from "@/app/lib/userStore";
 import { readAnonymousFromRequest } from "@/app/lib/anonymousToken";
 import { auth } from "@/auth";
+import { readEmailSessionFromRequest } from "@/app/lib/emailSession";
+import { readActiveAuthFromRequest, setActiveAuthOnResponse } from "@/app/lib/activeAuth";
 
 export const runtime = "nodejs";
 
@@ -23,20 +25,46 @@ function isValidAnalysisId(id: string | null | undefined): id is AnalysisId {
 
 export async function GET(
   req: NextRequest,
-  context: { params: { id: string } }
+  context: { params: Promise<{ id: string }> }
 ): Promise<NextResponse<GolfAnalysisResponse | { error: string }>> {
-  const { id } = context.params;
+  const { id } = await context.params;
   if (!isValidAnalysisId(id)) {
     return json({ error: "invalid id" }, { status: 400 });
   }
   const analysisId = id as AnalysisId;
 
   const { anonymousUserId: tokenAnonymous } = readAnonymousFromRequest(req);
-  const session = await auth();
-  const sessionUserId = session?.user?.id ?? null;
+  const emailSession = readEmailSessionFromRequest(req);
+  // If both Google and Email sessions exist but active_auth is missing, default to email to avoid cross-account mixing.
+  const activeAuth = readActiveAuthFromRequest(req) ?? (emailSession ? "email" : null);
+
+  let account = null;
+  if (activeAuth !== "email") {
+    const session = await auth();
+    const sessionUserId = session?.user?.id ?? null;
+    account = sessionUserId ? await getUserById(sessionUserId) : null;
+  }
+  if (!account && activeAuth !== "google" && emailSession) {
+    const byId = await getUserById(emailSession.userId);
+    if (
+      byId &&
+      byId.authProvider === "email" &&
+      byId.emailVerifiedAt != null &&
+      typeof byId.email === "string" &&
+      byId.email.toLowerCase() === emailSession.email.toLowerCase()
+    ) {
+      account = byId;
+    } else {
+      const byEmail = await findUserByEmail(emailSession.email);
+      if (byEmail && byEmail.authProvider === "email" && byEmail.emailVerifiedAt != null) {
+        account = byEmail;
+      }
+    }
+  }
+  const effectiveUserId = account?.userId ?? null;
 
   // Existence-hiding: if caller has neither auth nor token-backed anonymous id, always return 404.
-  if (!sessionUserId && !tokenAnonymous) {
+  if (!effectiveUserId && !tokenAnonymous) {
     return json({ error: "not found" }, { status: 404 });
   }
 
@@ -56,8 +84,8 @@ export async function GET(
     return json({ error: "not found" }, { status: 404 });
   }
 
-  if (sessionUserId) {
-    const user = await getUserById(sessionUserId);
+  if (effectiveUserId) {
+    const user = await getUserById(effectiveUserId);
     if (!user) {
       return json({ error: "not found" }, { status: 404 });
     }
@@ -68,21 +96,13 @@ export async function GET(
       !!stored.anonymousUserId &&
       Array.isArray(user.anonymousIds) &&
       user.anonymousIds.includes(stored.anonymousUserId);
-    const ownsByTokenAnonymous =
-      !recordHasUser && !!tokenAnonymous && !!stored.anonymousUserId && stored.anonymousUserId === tokenAnonymous;
 
-    if (!ownsByUser && !ownsByLinkedAnonymous && !ownsByTokenAnonymous) {
+    // When logged-in, never allow access just because the device anonymous token matches.
+    // Access to anonymous-only records requires an explicit link (user.anonymousIds).
+    if (!ownsByUser && !ownsByLinkedAnonymous) {
       return json({ error: "not found" }, { status: 404 });
     }
 
-    // Link missing anonymousId -> user when token matches the record
-    if (
-      ownsByTokenAnonymous &&
-      stored.anonymousUserId &&
-      (!user.anonymousIds || !user.anonymousIds.includes(stored.anonymousUserId))
-    ) {
-      await linkAnonymousIdToUser(user.userId, stored.anonymousUserId);
-    }
   } else {
     // Anonymous caller: only allow token-backed anonymous access, and only for records not already owned by a user.
     if (stored.userId != null || !stored.anonymousUserId || stored.anonymousUserId !== tokenAnonymous) {
@@ -90,7 +110,7 @@ export async function GET(
     }
   }
 
-  return json(
+  const res = json(
     {
       analysisId,
       result: stored.result,
@@ -99,4 +119,7 @@ export async function GET(
     },
     { status: 200 }
   );
+  if (account?.authProvider === "google") setActiveAuthOnResponse(res, "google");
+  if (account?.authProvider === "email") setActiveAuthOnResponse(res, "email");
+  return res;
 }

@@ -33,9 +33,14 @@ export async function POST(req: NextRequest) {
 
     const delivery = await sendVerificationEmail({ to: email, verifyUrl: verifyUrl.toString(), expiresAt });
 
-    return NextResponse.json({ ok: true, delivered: delivery.delivered, devLink: delivery.delivered ? undefined : verifyUrl.toString() });
+    return NextResponse.json({
+      ok: true,
+      delivered: delivery.delivered,
+      devLink: delivery.delivered ? undefined : verifyUrl.toString(),
+    });
   } catch (error) {
-    console.error("[register/email] failed", error);
+    console.error("[register/email/request] failed", error);
     return NextResponse.json({ error: "failed to send verification" }, { status: 500 });
   }
 }
+

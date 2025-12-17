@@ -12,20 +12,30 @@ import type {
 import { buildCoachContext } from '@/app/coach/utils/context';
 import {
   appendMessages,
+  clearBootstrapContext,
+  clearCausalContext,
   getOrCreateActiveThread,
   hasDismissedQuickReplies,
+  isContextDisabled,
+  loadDetailMode,
   loadBootstrapContext,
   loadCausalContext,
   loadMessages,
   loadThreadSummary,
+  loadVisionMode,
   markQuickRepliesDismissed,
+  saveDetailMode,
   saveCausalContext,
   saveThreadSummary,
+  saveVisionMode,
+  setContextDisabled,
   updateThreadMetadata,
 } from '@/app/coach/utils/storage';
 import { getAnonymousUserId } from '@/app/golf/utils/historyStorage';
 import { getLatestReport, getMostRecentReportWithSequence, getReportById, saveReport } from '@/app/golf/utils/reportStorage';
 import type { GolfAnalysisResponse } from '@/app/golf/types';
+import { useMeUserState } from '@/app/golf/hooks/useMeUserState';
+import { useUserState } from '@/app/golf/state/userState';
 
 const QUICK_REPLIES: CoachQuickReply[] = [
   { key: 'cause-detail', label: '原因を詳しく知りたい', value: 'この原因がスコアにどう響くか、もう少し詳しく教えて。' },
@@ -35,7 +45,7 @@ const QUICK_REPLIES: CoachQuickReply[] = [
 ];
 
 const SYSTEM_PERSONA =
-  'あなたは専属のAIゴルフコーチです。診断結果を踏まえ、常に1つの改善テーマに絞って、次の練習・次回動画撮影で確認できる行動を具体的に提示します。';
+  'あなたはPGAティーチングプロ相当の専属AIゴルフコーチです。常に前向きで「褒めて伸ばす」スタンスで、まず良い点を1つ短く認めたうえで、改善テーマを1つに絞って指導してください。診断結果を踏まえ、専門用語（フェースtoパス、ダイナミックロフト、アタックアングル、シャローイング、Pポジション等）を積極的に使い、再現性の根拠（クラブパス/フェース/体の回旋/地面反力/リリース機序）まで踏み込んで説明してください。メインの改善テーマは1つに絞るが、そのテーマを深掘りして「なぜ起きるか」「どう確認するか」「どう矯正するか」を具体的に示します。';
 
 const confidenceLabel = (value?: number) => {
   if (typeof value !== 'number') return 'medium';
@@ -54,6 +64,83 @@ const confidenceDisplay = (value?: number) => {
 const chainSummary = (chain?: string[]) => {
   if (!chain || !chain.length) return '因果チェーンを準備中';
   return chain.join(' → ');
+};
+
+const compactTheme = (value: string) => {
+  const raw = (value || '').trim();
+  if (!raw) return 'スイング全般の改善';
+  const firstSentence = raw.split('。')[0] || raw;
+  const trimmed = firstSentence.replace(/\s+/g, ' ').trim();
+  if (trimmed.length <= 44) return trimmed;
+  return `${trimmed.slice(0, 44)}…`;
+};
+
+const pickVisionFrames = (
+  report: GolfAnalysisResponse | null,
+  max: number
+): Array<{ url: string; timestampSec?: number; label?: string; frameIndex?: number }> => {
+  const frames = report?.result?.sequence?.frames ?? [];
+  if (!frames.length || max <= 0) return [];
+
+  const stageByIndex = new Map<number, string>();
+  const preferredOrder = [
+    "downswing_to_impact",
+    "top_to_downswing",
+    "impact",
+    "finish",
+    "backswing_to_top",
+    "address",
+  ];
+
+  const stages = report?.result?.sequence?.stages ?? [];
+  const keyIdx: number[] = [];
+  stages.forEach((s) => {
+    (s.keyFrameIndices ?? []).forEach((i) => {
+      if (!Number.isFinite(i)) return;
+      const idx = Number(i);
+      if (idx < 0 || idx >= frames.length) return;
+      keyIdx.push(idx);
+      if (!stageByIndex.has(idx)) stageByIndex.set(idx, s.stage);
+    });
+  });
+
+  const unique = Array.from(new Set(keyIdx));
+  const byStage: Record<string, number[]> = {};
+  unique.forEach((i) => {
+    const stage = stageByIndex.get(i) ?? "unknown";
+    byStage[stage] = byStage[stage] ?? [];
+    byStage[stage]!.push(i);
+  });
+
+  const picked: number[] = [];
+  preferredOrder.forEach((stage) => {
+    const candidates = (byStage[stage] ?? []).sort((a, b) => a - b);
+    for (const idx of candidates) {
+      if (picked.length >= max) break;
+      if (!picked.includes(idx)) picked.push(idx);
+    }
+  });
+
+  // Fill remaining with evenly spaced frames
+  const remainingSlots = Math.max(Math.min(max, frames.length) - picked.length, 0);
+  if (remainingSlots > 0) {
+    const stride = frames.length <= 1 ? 1 : (frames.length - 1) / Math.max(remainingSlots - 1, 1);
+    for (let i = 0; i < remainingSlots; i += 1) {
+      const idx = Math.round(i * stride);
+      if (picked.length >= max) break;
+      if (!picked.includes(idx)) picked.push(idx);
+    }
+  }
+
+  return picked
+    .slice(0, max)
+    .sort((a, b) => a - b)
+    .map((i) => ({
+      ...(frames[i] as { url: string; timestampSec?: number }),
+      frameIndex: i,
+      label: stageByIndex.get(i) ?? undefined,
+    }))
+    .filter((f) => typeof f?.url === 'string' && f.url.startsWith('data:image/'));
 };
 
 const resolveAnalysisIdFromMessages = (messages: CoachMessage[]): string | null => {
@@ -76,17 +163,27 @@ const buildSummaryText = (context: CoachCausalImpactExplanation | null, messages
 };
 
 const CoachPage = () => {
+  useMeUserState();
+  const { state: userState } = useUserState();
   const router = useRouter();
   const searchParams = useSearchParams();
   const chatRef = useRef<HTMLDivElement | null>(null);
   const seededContextRef = useRef(false);
 
-const swingTypeFromQuery = searchParams?.get('swingType') || '';
-const analysisIdFromQuery = searchParams?.get('analysisId') || '';
+  const swingTypeFromQuery = searchParams?.get('swingType') || '';
+  const analysisIdFromQuery = searchParams?.get('analysisId') || '';
 
   const [userId, setUserId] = useState('');
   const [thread, setThread] = useState<CoachThread | null>(null);
   const [analysisContext, setAnalysisContext] = useState<CoachCausalImpactExplanation | null>(null);
+  const [contextDisabled, setContextDisabledState] = useState(false);
+  const [contextReport, setContextReport] = useState<GolfAnalysisResponse | null>(null);
+  const [detailMode, setDetailMode] = useState(false);
+  const [visionMode, setVisionMode] = useState(false);
+  const [lastDebug, setLastDebug] = useState<{ model?: string; framesSent?: number; detailMode?: boolean } | null>(null);
+  const [lastVisionFrames, setLastVisionFrames] = useState<Array<{ label?: string; timestampSec?: number; frameIndex?: number }>>(
+    []
+  );
   const [messages, setMessages] = useState<CoachMessage[]>([]);
   const [summary, setSummary] = useState<ThreadSummary | null>(null);
   const [input, setInput] = useState('');
@@ -131,18 +228,38 @@ const analysisIdFromQuery = searchParams?.get('analysisId') || '';
   }, [collapsedState]);
 
   useEffect(() => {
-    const id = getAnonymousUserId();
-    setUserId(id || '');
-    const activeThread = getOrCreateActiveThread(id);
+    const identityKey = userState.userId ? `user:${userState.userId}` : `anon:${getAnonymousUserId() || ''}`;
+    const resolvedUserId = identityKey;
+    if (!resolvedUserId) return;
+    setUserId(resolvedUserId);
+    const activeThread = getOrCreateActiveThread(resolvedUserId);
     setThread(activeThread);
     const storedMessages = loadMessages(activeThread?.threadId ?? null);
     setMessages(storedMessages);
     setSummary(loadThreadSummary(activeThread?.threadId ?? null));
     setShowQuickReplies(!hasDismissedQuickReplies(activeThread?.threadId ?? null));
-  }, []);
+    setDetailMode(loadDetailMode(activeThread?.threadId ?? null));
+    setVisionMode(loadVisionMode(activeThread?.threadId ?? null));
+  }, [userState.userId]);
 
   useEffect(() => {
     if (!thread || !userId) return;
+
+    const disabled = isContextDisabled(thread.threadId);
+    setContextDisabledState(disabled);
+
+    // If query explicitly requests a context, always enable context.
+    if (analysisIdFromQuery) {
+      setContextDisabled(thread.threadId, false);
+      setContextDisabledState(false);
+    }
+
+    if (disabled && !analysisIdFromQuery) {
+      setAnalysisContext(null);
+      setContextReport(null);
+      setIsLoading(false);
+      return;
+    }
 
     const storedContext = loadCausalContext(thread.threadId);
     const bootstrap = loadBootstrapContext(userId);
@@ -155,6 +272,8 @@ const analysisIdFromQuery = searchParams?.get('analysisId') || '';
       updateThreadMetadata(thread, { lastAnalysisId: bootstrap.analysisId });
       const ctx = swingTypeFromQuery ? { ...bootstrap, swingTypeHeadline: swingTypeFromQuery } : bootstrap;
       setAnalysisContext(ctx);
+      setContextDisabled(thread.threadId, false);
+      setContextDisabledState(false);
       seededContextRef.current = true;
       setIsLoading(false);
       return;
@@ -163,6 +282,8 @@ const analysisIdFromQuery = searchParams?.get('analysisId') || '';
     if (storedContext) {
       const ctx = swingTypeFromQuery ? { ...storedContext, swingTypeHeadline: swingTypeFromQuery } : storedContext;
       setAnalysisContext(ctx);
+      setContextDisabled(thread.threadId, false);
+      setContextDisabledState(false);
       seededContextRef.current = true;
       setIsLoading(false);
       return;
@@ -177,9 +298,14 @@ const analysisIdFromQuery = searchParams?.get('analysisId') || '';
     const targetReport = queryReport || bootstrapReport || threadReport || recentReport || latest || null;
 
     if (targetReport?.result) {
+      const displayIssue =
+        targetReport.causalImpact?.primaryIssue ||
+        targetReport.causalImpact?.issue ||
+        targetReport.causalImpact?.relatedMiss ||
+        targetReport.result.summary;
       const context = buildCoachContext({
         causal: targetReport.causalImpact,
-        displayIssue: targetReport.result.summary,
+        displayIssue,
         chain: targetReport.causalImpact?.chain,
         nextAction: targetReport.causalImpact?.nextAction?.content,
         analysisId: targetReport.analysisId,
@@ -192,17 +318,21 @@ const analysisIdFromQuery = searchParams?.get('analysisId') || '';
         updateThreadMetadata(thread, { lastAnalysisId: context.analysisId });
       }
       setAnalysisContext(context);
+      setContextReport(targetReport);
+      setContextDisabled(thread.threadId, false);
+      setContextDisabledState(false);
       seededContextRef.current = true;
     }
 
     setIsLoading(false);
-  }, [messages, swingTypeFromQuery, thread, userId]);
+  }, [analysisIdFromQuery, messages, swingTypeFromQuery, thread, userId]);
 
   useEffect(() => {
     const analysisId = analysisContext?.analysisId || thread?.lastAnalysisId;
     if (!analysisId || ensureReportSavedRef.current) return;
     const local = getReportById(analysisId);
     if (local?.result) {
+      setContextReport(local);
       ensureReportSavedRef.current = true;
       return;
     }
@@ -213,6 +343,7 @@ const analysisIdFromQuery = searchParams?.get('analysisId') || '';
         const json = (await res.json()) as GolfAnalysisResponse;
         if (json?.result) {
           saveReport(json);
+          setContextReport(json);
           ensureReportSavedRef.current = true;
         }
       } catch {
@@ -220,7 +351,7 @@ const analysisIdFromQuery = searchParams?.get('analysisId') || '';
       }
     };
     void save();
-  }, [analysisContext?.analysisId]);
+  }, [analysisContext?.analysisId, thread?.lastAnalysisId]);
 
   useEffect(() => {
     if (!chatRef.current) return;
@@ -258,7 +389,7 @@ const analysisIdFromQuery = searchParams?.get('analysisId') || '';
 
   const handleSend = useCallback(
     async (text: string, mode: 'chat' | 'initial' = 'chat', quickKey?: string) => {
-      if (!thread || !analysisContext || sendingRef.current) return;
+      if (!thread || sendingRef.current) return;
       const content = text.trim();
       const showUserMessage = mode === 'chat' && content.length > 0;
 
@@ -273,7 +404,7 @@ const analysisIdFromQuery = searchParams?.get('analysisId') || '';
           role: 'user',
           content,
           createdAt: new Date().toISOString(),
-          analysisId: analysisContext.analysisId,
+          analysisId: analysisContext?.analysisId,
         };
         baseMessages = appendMessages(thread.threadId, [userMessage]);
         setMessages(baseMessages);
@@ -285,29 +416,60 @@ const analysisIdFromQuery = searchParams?.get('analysisId') || '';
 
       try {
         const recent = baseMessages.slice(-12);
+        let reportForVision = contextReport;
+        if (visionMode) {
+          const existing = pickVisionFrames(reportForVision, 6);
+          if (!existing.length) {
+            const analysisId = analysisContext?.analysisId || thread.lastAnalysisId;
+            if (analysisId) {
+              try {
+                const res = await fetch(`/api/golf/result/${analysisId}`, { method: 'GET', cache: 'no-store' });
+                if (res.ok) {
+                  const json = (await res.json()) as GolfAnalysisResponse;
+                  if (json?.result) {
+                    reportForVision = json;
+                    setContextReport(json);
+                    ensureReportSavedRef.current = true;
+                  }
+                }
+              } catch {
+                // ignore
+              }
+            }
+          }
+        }
+        const visionFrames = visionMode ? pickVisionFrames(reportForVision, 6) : [];
+        if (visionMode) {
+          setLastVisionFrames(
+            visionFrames.map((f) => ({ label: f.label, timestampSec: f.timestampSec, frameIndex: f.frameIndex }))
+          );
+        }
         const res = await fetch('/api/coach/chat', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             mode,
             systemPersona: SYSTEM_PERSONA,
-            userProfileSummary: analysisContext.summary
+            detailMode,
+            visionFrames,
+            userProfileSummary: analysisContext?.summary
               ? `最新診断の要約: ${analysisContext.summary}`
-              : '診断サマリ未設定',
-            analysisContext,
+              : '診断コンテキストなし（一般相談モード）',
+            analysisContext: analysisContext ?? null,
             summaryText: summary?.summaryText ?? null,
             recentMessages: recent,
             userMessage: showUserMessage ? content : undefined,
             quickKey,
           }),
         });
-        const data = (await res.json()) as { message?: string };
+        const data = (await res.json()) as { message?: string; debug?: { model?: string; framesSent?: number; detailMode?: boolean } };
+        if (data?.debug) setLastDebug(data.debug);
         const assistantMessage: CoachMessage = {
           threadId: thread.threadId,
           role: 'assistant',
           content: data?.message || '次のステップを準備中です。',
           createdAt: new Date().toISOString(),
-          analysisId: analysisContext.analysisId,
+          analysisId: analysisContext?.analysisId,
         };
         const merged = appendMessages(thread.threadId, [assistantMessage]);
         setMessages(merged);
@@ -323,16 +485,16 @@ const analysisIdFromQuery = searchParams?.get('analysisId') || '';
         setInput('');
       }
     },
-    [analysisContext, summary?.summaryText, thread, updateSummary]
+    [analysisContext, contextReport, detailMode, summary?.summaryText, thread, updateSummary, visionMode]
   );
 
   useEffect(() => {
-    if (!thread || !analysisContext) return;
+    if (!thread) return;
     const hasAssistant = messages.some((m) => m.role === 'assistant');
     if (messages.length === 0 && !hasAssistant && !sendingRef.current) {
       void handleSend('', 'initial');
     }
-  }, [analysisContext, handleSend, messages, thread]);
+  }, [handleSend, messages, thread]);
 
   const latestAssistantExists = messages.some((m) => m.role === 'assistant');
   const hasUserMessage = messages.some((m) => m.role === 'user');
@@ -346,10 +508,10 @@ const analysisIdFromQuery = searchParams?.get('analysisId') || '';
     );
   }
 
-  if (!analysisContext || !thread) {
+  if (!thread) {
     return (
       <main className="min-h-screen bg-slate-950 text-slate-50 flex flex-col items-center justify-center space-y-4 px-4">
-        <p className="text-sm text-slate-200">診断コンテキストが見つかりませんでした。最新の診断結果からアクセスしてください。</p>
+        <p className="text-sm text-slate-200">AIコーチのスレッドを準備できませんでした。ページを再読み込みしてください。</p>
         <div className="flex gap-2">
           <button
             onClick={() => router.push('/golf/upload')}
@@ -375,6 +537,15 @@ const analysisIdFromQuery = searchParams?.get('analysisId') || '';
     );
   }
 
+  const primaryFactor = analysisContext?.primaryFactor ?? 'スイング全般の改善';
+  const primaryFactorDisplay = compactTheme(primaryFactor);
+  const nextAction = analysisContext?.nextAction ?? '直近の動画で一番気になる点を1つ教えてください。';
+  const chain = analysisContext?.chain ?? [];
+  const meta = contextReport?.meta ?? null;
+  const metaHandedness = meta?.handedness === 'right' ? '右打ち' : meta?.handedness === 'left' ? '左打ち' : null;
+  const metaClub = meta?.clubType ?? null;
+  const metaLevel = meta?.level ?? null;
+
   return (
     <main className="min-h-screen bg-slate-950 text-slate-50">
       <div className="mx-auto w-full max-w-4xl px-4 py-6 space-y-4">
@@ -382,10 +553,21 @@ const analysisIdFromQuery = searchParams?.get('analysisId') || '';
           <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
             <div className="space-y-1">
               <p className="text-xs text-slate-400">🎯 現在の最重要テーマ</p>
-              <p className="text-lg font-semibold text-emerald-100">{analysisContext.primaryFactor}</p>
+              <p
+                className="text-lg font-semibold text-emerald-100"
+                title={primaryFactor}
+                style={{
+                  display: '-webkit-box',
+                  WebkitLineClamp: 2,
+                  WebkitBoxOrient: 'vertical',
+                  overflow: 'hidden',
+                }}
+              >
+                {primaryFactorDisplay}
+              </p>
               <div className="flex flex-wrap items-center gap-2 text-[11px] text-slate-400 mt-1">
                 <span className="px-2 py-1 rounded-full border border-slate-700 bg-slate-800/60">
-                  🧠 推定信頼度: {confidenceDisplay(analysisContext.confidence)}
+                  🧠 推定信頼度: {confidenceDisplay(analysisContext?.confidence)}
                 </span>
                 <span className="px-2 py-1 rounded-full border border-slate-700 bg-slate-800/60">
                   スレッドID: {thread.threadId.slice(0, 8)}
@@ -396,15 +578,48 @@ const analysisIdFromQuery = searchParams?.get('analysisId') || '';
               <button
                 type="button"
                 onClick={() => {
+                  const next = !detailMode;
+                  setDetailMode(next);
+                  saveDetailMode(thread.threadId, next);
+                }}
+                className={`flex items-center gap-1 rounded-lg border px-3 py-2 text-xs transition-colors ${
+                  detailMode
+                    ? 'border-emerald-500/60 bg-emerald-900/25 text-emerald-100 hover:bg-emerald-900/35'
+                    : 'border-slate-700 bg-slate-900/70 text-slate-200 hover:border-emerald-400/60 hover:text-emerald-100'
+                }`}
+              >
+                <span>{detailMode ? '🧠' : '💸'}</span>
+                <span>{detailMode ? '詳細モード（高精度/コスト↑）' : '通常モード（コスパ）'}</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const next = !visionMode;
+                  setVisionMode(next);
+                  saveVisionMode(thread.threadId, next);
+                }}
+                className={`flex items-center gap-1 rounded-lg border px-3 py-2 text-xs transition-colors ${
+                  visionMode
+                    ? 'border-emerald-500/60 bg-emerald-900/25 text-emerald-100 hover:bg-emerald-900/35'
+                    : 'border-slate-700 bg-slate-900/70 text-slate-200 hover:border-emerald-400/60 hover:text-emerald-100'
+                }`}
+                title="診断のフレーム（最大4枚）をコーチに渡して回答精度を上げます（コスト増）"
+              >
+                <span>{visionMode ? '🖼️' : '🖼️'}</span>
+                <span>{visionMode ? 'フレーム参照ON（コスト↑）' : 'フレーム参照OFF'}</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
                   const recentId = resolveAnalysisIdFromMessages(messages);
                   const latestSeqId = getMostRecentReportWithSequence()?.analysisId;
                   const latestId = latestSeqId || getLatestReport()?.analysisId;
-                  const navId = analysisContext.analysisId || thread.lastAnalysisId || recentId || latestSeqId || latestId;
+                  const navId = analysisContext?.analysisId || thread.lastAnalysisId || recentId || latestSeqId || latestId;
                   if (navId) router.push(`/golf/result/${navId}`);
                 }}
                 className="flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-900/70 px-3 py-2 text-xs text-slate-200 hover:border-emerald-400/60 hover:text-emerald-100 transition-colors disabled:opacity-50"
                 disabled={
-                  !analysisContext.analysisId &&
+                  !analysisContext?.analysisId &&
                   !thread.lastAnalysisId &&
                   !resolveAnalysisIdFromMessages(messages) &&
                   !getMostRecentReportWithSequence()?.analysisId &&
@@ -424,14 +639,21 @@ const analysisIdFromQuery = searchParams?.get('analysisId') || '';
               </button>
             </div>
           </div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-3 text-sm">
-            <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-3 space-y-1">
-              <p className="text-xs text-slate-400">📉 スコアへの影響</p>
-              <p className="text-slate-100 leading-relaxed">{chainSummary(analysisContext.chain)}</p>
-            </div>
-            <div className="rounded-xl border border-emerald-700/50 bg-emerald-900/20 p-3 space-y-1">
-              <p className="text-xs text-emerald-200">▶ 次の練習で意識</p>
-              <p className="text-slate-50 leading-relaxed">{analysisContext.nextAction}</p>
+          <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-400">
+            <div className="flex flex-wrap items-center gap-2">
+              <span>
+                現在のコンテキスト:{' '}
+                {analysisContext?.analysisId
+                  ? `${analysisContext.analysisId}${analysisContext.analyzedAt ? ` / ${new Date(analysisContext.analyzedAt).toLocaleString('ja-JP')}` : ''}`
+                  : 'なし（一般相談モード）'}
+              </span>
+              {(metaHandedness || metaClub || metaLevel) && (
+                <span className="text-slate-500">
+                  {metaHandedness ? `${metaHandedness}` : ''}
+                  {metaClub ? `${metaHandedness ? ' / ' : ''}${metaClub}` : ''}
+                  {metaLevel ? `${metaHandedness || metaClub ? ' / ' : ''}${metaLevel}` : ''}
+                </span>
+              )}
             </div>
           </div>
         </header>
@@ -442,7 +664,7 @@ const analysisIdFromQuery = searchParams?.get('analysisId') || '';
               <span>専属AIコーチとのスレッド</span>
               {summary?.updatedAt && <span>要約更新: {new Date(summary.updatedAt).toLocaleString('ja-JP')}</span>}
             </div>
-            {analysisContext.swingTypeHeadline && (
+            {analysisContext?.swingTypeHeadline && (
               <p className="mt-1 text-[11px] text-emerald-200">狙うスイングタイプ: {analysisContext.swingTypeHeadline}</p>
             )}
             {quickReplyVisible && (
@@ -465,7 +687,7 @@ const analysisIdFromQuery = searchParams?.get('analysisId') || '';
               const key = section.analysisId || `section-${idx}`;
               const isCollapsed = collapsed[key] ?? false;
               const headline =
-                section.analysisId && section.analysisId !== analysisContext.analysisId
+                section.analysisId && section.analysisId !== analysisContext?.analysisId
                   ? `過去の診断 (${section.analysisId})`
                   : idx === groupedSections.length - 1
                     ? '現在の診断セクション'
@@ -493,7 +715,7 @@ const analysisIdFromQuery = searchParams?.get('analysisId') || '';
           </div>
 
           <div className="border-t border-slate-800 bg-slate-900/80 px-4 py-3 rounded-b-2xl">
-            {analysisContext.analysisId && (
+            {analysisContext?.analysisId && (
               <p className="mb-2 text-[11px] text-slate-400">
                 この相談は「
                 {analysisContext.analyzedAt
@@ -535,6 +757,24 @@ const analysisIdFromQuery = searchParams?.get('analysisId') || '';
             <p className="mt-2 text-[11px] text-slate-500">
               1テーマに絞って相談すると精度が上がります。低信頼度の場合は「参考推定」として次回動画で再確認します。
             </p>
+            {visionMode && lastVisionFrames.length > 0 && (
+              <p className="mt-1 text-[11px] text-slate-500">
+                送信フレーム:{' '}
+                {lastVisionFrames
+                  .map((f) => {
+                    const ts = typeof f.timestampSec === 'number' ? `${f.timestampSec.toFixed(2)}s` : 'ts:N/A';
+                    const stage = f.label ? `${f.label}` : 'stage:N/A';
+                    const idx = typeof f.frameIndex === 'number' ? `#${f.frameIndex}` : '';
+                    return `${stage}${idx}@${ts}`;
+                  })
+                  .join(' / ')}
+              </p>
+            )}
+            {process.env.NODE_ENV !== 'production' && lastDebug && (
+              <p className="mt-1 text-[10px] text-slate-600">
+                debug: model={lastDebug.model ?? 'n/a'} framesSent={String(lastDebug.framesSent ?? 'n/a')} detailMode={String(lastDebug.detailMode ?? 'n/a')}
+              </p>
+            )}
           </div>
         </section>
       </div>
