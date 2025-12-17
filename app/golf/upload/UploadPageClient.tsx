@@ -5,7 +5,7 @@ import { FormEvent, useEffect, useState } from 'react';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { GolfAnalysisResponse, UserUsageState } from '@/app/golf/types';
 import { getAnonymousUserId } from '@/app/golf/utils/historyStorage';
-import { getLatestReport } from '@/app/golf/utils/reportStorage';
+import { getLatestReport, setActiveAnalysisPointer } from '@/app/golf/utils/reportStorage';
 import { computePhaseIndices, type FramePose } from '@/app/lib/swing/phases';
 import { useUserState } from '@/app/golf/state/userState';
 import { primeMeUserStateCache, resetMeUserStateCache, useMeUserState } from '@/app/golf/hooks/useMeUserState';
@@ -851,6 +851,7 @@ const GolfUploadPage = () => {
         throw new Error('analysisId がレスポンスに含まれていません。');
       }
 
+      setActiveAnalysisPointer(data.analysisId, Date.now());
       router.push(isBeta ? `/golf/result-beta/${data.analysisId}` : `/golf/result/${data.analysisId}`);
     } catch (err: unknown) {
       console.error(err);

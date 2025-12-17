@@ -54,6 +54,7 @@ export interface SwingAnalysis {
   totalScore: number; // 0-100
   phases: {
     address: SwingPhase;
+    backswing: SwingPhase;
     top: SwingPhase;
     downswing: SwingPhase;
     impact: SwingPhase;
@@ -197,6 +198,12 @@ export const MOCK_GOLF_ANALYSIS_RESULT: SwingAnalysis = {
   totalScore: 72,
   phases: {
     address: { score: 15, good: ["安定した前傾角"], issues: ["グリップが弱い"], advice: ["前傾を保ちつつグリッププレッシャーを均等に。"] },
+    backswing: {
+      score: 14,
+      good: ["テークバックが滑らか"],
+      issues: ["手元が早く上がりやすい"],
+      advice: ["テークバックは肩で始動し、手元は低く長く引く意識で。"],
+    },
     top: { score: 14, good: ["コンパクトなトップ"], issues: ["リストが硬い"], advice: ["トップでリストを柔らかく使い、捻転差を感じましょう。"] },
     downswing: {
       score: 13,

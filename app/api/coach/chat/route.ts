@@ -39,6 +39,14 @@ const formatVisionFramesMeta = (frames?: Array<{ url: string; timestampSec?: num
     .join(", ");
 };
 
+const isDiagnosticQuestion = (text?: string | null): boolean => {
+  const t = (text || "").trim();
+  if (!t) return false;
+  return /できますか|できてる|できていますか|できてない|でしょうか|ですか|判定|判断|見て|確認|解析|分析|教えて|原因|なぜ|どうして|どこまで|どこから|低い|高い|早い|遅い|開く|閉じる|入る|外れる|シャロー|shallow|オンプレーン|プレーン|インサイド|アウトサイド|フェース|パス|ハンドファースト|リリース|タメ|体の開き/i.test(
+    t
+  );
+};
+
 const buildPrompt = (payload: CoachChatRequest) => {
   const confidence = confidenceFromNumber(payload.analysisContext?.confidence);
   const chain = payload.analysisContext?.chain?.join(" → ") || "未設定";
@@ -49,6 +57,10 @@ const buildPrompt = (payload: CoachChatRequest) => {
   const recent = formatRecentMessages(payload.recentMessages);
   const framesMeta = formatVisionFramesMeta(payload.visionFrames);
   const latestUserMessage = payload.userMessage?.slice(0, 400) || "";
+  const focusPhase = payload.focusPhase || null;
+  const phaseContextText = payload.phaseContextText?.slice(0, 1200) || "N/A";
+  const hasVision = !!payload.visionFrames?.length;
+  const wantsGranularBreakdown = (payload.mode !== "initial" && !!payload.userMessage?.trim()) || isDiagnosticQuestion(payload.userMessage);
   const toneInstruction =
     confidence === "high"
       ? "断定的かつ行動重視で提示する。"
@@ -62,10 +74,47 @@ const buildPrompt = (payload: CoachChatRequest) => {
 confidence: ${confidence} (${payload.analysisContext?.confidence ?? "N/A"})
 診断サマリ: ${payload.analysisContext?.summary || "N/A"}
 スイング型: ${payload.analysisContext?.swingTypeHeadline || "N/A"}
+フェーズ指定: ${focusPhase ?? "なし"}
 フレーム参照: ${payload.visionFrames?.length ? `ON (${framesMeta})` : "OFF"}`;
 
-  const visionRule = payload.visionFrames?.length
-    ? "重要: このリクエストにはスイングのフレーム画像が含まれます。画像が与えられているのに『画像を確認できない』と言うのは禁止。冒頭に必ず「画像参照ログ」を置き、各フレームについて(1)何のフレームか(ラベル/時刻) (2)手元が見えるか(見える/一部隠れ/ブレ/画角外) (3)判断可否(可/不可)と理由 を1行で列挙する。そのうえで、見える範囲で結論を出す。判断できない場合は『何が見えないか』と『必要な撮影条件（正面/後方/高さ/インパクト周辺のフレームが手元を含む等）』を具体的に述べる。"
+  const phaseSection = focusPhase
+    ? `
+【PhaseFocus（ユーザー質問の対象フェーズ）】
+${focusPhase}
+
+【PhaseEvaluationContext（そのフェーズの評価抜粋）】
+${phaseContextText}
+`
+    : "";
+
+  const granularBreakdownRule = wantsGranularBreakdown
+    ? `
+追加ルール（切り分け回答）:
+- 「ある程度できている」で終わるのは禁止。必ず「どこまでOKで、どこからNGか」を切り分ける。
+- 形式を固定する（この順番・この見出しを崩さない）:
+  1) 判定（4段階: OK / ほぼOK / 一部NG / NG）＋confidence（high/medium/low）＋その理由（1行）
+  2) できている範囲（通常:最大2点 / 詳細:最大3点）
+  3) できていない範囲（通常:最大2点 / 詳細:最大3点）
+  4) 境界（どこから崩れ始めるか）: OK→NGに切り替わる「変化点」を特定する（例: Top→Downの序盤/中盤/終盤、または address→top→downswing→impact→finish のどこで崩れるか）。必ず frameIndex(#) を添える
+  5) なぜNGか（メカニズム）: 「なぜそうなるか」を専門用語込みで2〜4行で説明（例: 体の開き/骨盤-胸郭の同期/手元の上昇=アウトサイド/シャフトのピッチ変化/手首の背屈・掌屈/アーリーリリース等）
+  6) 修正ドリル（通常:1個 / 詳細:2個）: 「できていない範囲」を改善するための最短手段に直結させる（メカニズムと対応づける）
+  7) 切り分けチェック（次回動画で確認する1点）: 何を見れば「OK側/NG側」を判別できるかを1つだけ具体化
+- 判定ラベルの定義（必ずこの意味で使う）:
+  ・OK: 対象の動きが全区間で再現できている（致命的な崩れなし）
+  ・ほぼOK: 大半はOKだが、終盤/一部フレームで軽微な崩れがある（プレー影響は小〜中）
+  ・一部NG: フェーズ内に「OK区間」と「NG区間」が混在し、ミスにつながる崩れが観察できる（プレー影響は中）
+  ・NG: フェーズ全体で狙いの動きが作れておらず、ミスの主因になっている可能性が高い
+- 根拠の書き方:
+  ・画像あり: 各指摘に必ず frameIndex(#) を付け、観察した事実（手元高さ/シャフト角/フェース向き/体の開き等）を書く
+  ・画像なし: PhaseEvaluationContext または ユーザー申告（ボール傾向/違和感/ミス）を根拠にし、「仮説/要確認」を明示する
+`
+    : "";
+
+  const visionRule = hasVision
+    ? `重要: このリクエストにはスイングのフレーム画像が含まれます。画像が与えられているのに『画像を確認できない』と言うのは禁止。冒頭に必ず「画像参照ログ」を置き、各フレームについて(1) frameIndex（#番号）とラベル/時刻 (2)手元が見えるか(見える/一部隠れ/ブレ/画角外) (3)判断可否(可/不可)と理由 を1行で列挙する。そのうえで、見える範囲で結論を出す。
+注意: 「フレーム1/2/3」は送付画像の順番で、元動画の番号ではありません。元動画の番号は frameIndex（#）に従ってください。
+判断できない場合は『何が見えないか』と『必要な撮影条件（正面/後方/高さ/該当フェーズ周辺のフレームが手元を含む等）』を具体的に述べる。
+${focusPhase ? "追加制約: PhaseFocus が指定されている場合、回答の根拠は PhaseEvaluationContext と該当フェーズのフレーム観察を最優先にする。別フェーズの断定はしない（必要なら「別フェーズの可能性」として短く補足）。" : ""}`
     : "画像は与えられていないので、一般論に寄りすぎない範囲で仮説として回答し、不足情報があれば質問する。";
 
   const ask = (() => {
@@ -89,6 +138,8 @@ ${profile}
 【CurrentAnalysisContext】
 ${analysisContext}
 
+${phaseSection}
+
 【ThreadSummary（要約のみ）】
 ${summary}
 
@@ -101,10 +152,12 @@ ${latestUserMessage || "（直近の質問なし）"}
 ${toneInstruction}
 ${ask}
 ${visionRule}
+${granularBreakdownRule}
 
 制約:
 - まずユーザー質問に1文で直接答える。答えられない場合はその旨を簡潔に伝える。
-- メインの改善テーマは1つに絞り、primaryFactorから逸脱しない（ただし深掘りは歓迎）。
+- メインの改善テーマは必ず「最新のユーザー質問」に合わせて1つに絞る（primaryFactorは文脈として参照してよい）。
+- PhaseFocusが指定されている場合、必ずそのフェーズに寄せて説明する（別フェーズへ話題が飛ばない）。
 - confidenceがlowの場合は「参考推定」「次回動画で確認」を必ず含める。
 - 返答は日本語。見出し＋箇条書きで読みやすく。
 - 通常モード: 目安 120〜700文字、ドリル1つ＋チェックポイント1つ。

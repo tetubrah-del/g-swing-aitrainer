@@ -14,7 +14,7 @@ import type {
   SwingTypeKey,
   SwingTypeLLMResult,
 } from '@/app/golf/types';
-import { getLatestReport, getReportById, saveReport } from '@/app/golf/utils/reportStorage';
+import { getLatestReport, getReportById, saveReport, setActiveAnalysisPointer } from '@/app/golf/utils/reportStorage';
 import { getAnonymousUserId, getSwingHistories, saveSwingHistory } from '@/app/golf/utils/historyStorage';
 import { buildRuleBasedCausalImpact } from '@/app/golf/utils/causalImpact';
 import { saveSwingTypeResult } from '@/app/golf/utils/swingTypeStorage';
@@ -37,6 +37,7 @@ type SwingTypeResult = {
 
 const PHASE_FRAME_MAP: Record<string, [number, number]> = {
   address: [1, 2],
+  backswing: [2, 4],
   address_to_backswing: [2, 4],
   top: [4, 6],
   backswing_to_top: [4, 6],
@@ -49,6 +50,7 @@ const PHASE_FRAME_MAP: Record<string, [number, number]> = {
 
 const phaseOrder: Array<keyof GolfAnalysisResponse['result']['phases']> = [
   'address',
+  'backswing',
   'top',
   'downswing',
   'impact',
@@ -471,6 +473,7 @@ const GolfResultPage = () => {
       createdAt: data.createdAt ?? Date.now(),
     };
     saveReport(record);
+    setActiveAnalysisPointer(record.analysisId, record.createdAt);
   }, [data]);
 
   useEffect(() => {
@@ -481,6 +484,7 @@ const GolfResultPage = () => {
   }, [anonymousUserId, data?.analysisId]);
 
   const handleRetry = () => {
+    clearActiveAnalysisPointer();
     router.push('/golf/upload');
   };
 
@@ -498,6 +502,8 @@ const GolfResultPage = () => {
       label:
         key === 'address'
           ? 'アドレス'
+          : key === 'backswing'
+            ? 'バックスイング'
           : key === 'top'
             ? 'トップ'
             : key === 'downswing'
@@ -863,7 +869,10 @@ const GolfResultPage = () => {
   ]);
 
   useEffect(() => {
-    if (!anonymousUserId || !data?.analysisId || !causalImpact || hasSeededCoachContext) return;
+    const identityKeys: string[] = [];
+    if (userState.userId) identityKeys.push(`user:${userState.userId}`);
+    if (anonymousUserId) identityKeys.push(`anon:${anonymousUserId}`);
+    if (!identityKeys.length || !data?.analysisId || !causalImpact || hasSeededCoachContext) return;
     const swingTypeTitle = bestTypeDetail?.title || bestType?.label || swingTypeSummary?.label || null;
     const analyzedAtIso = data.createdAt ? new Date(data.createdAt).toISOString() : null;
     const context = buildCoachContext({
@@ -876,20 +885,22 @@ const GolfResultPage = () => {
       swingTypeHeadline: swingTypeTitle,
       analyzedAt: analyzedAtIso,
     });
-    saveBootstrapContext(anonymousUserId, context);
+    identityKeys.forEach((key) => saveBootstrapContext(key, context));
     setHasSeededCoachContext(true);
   }, [
-    anonymousUserId,
     bestType?.label,
     bestTypeDetail?.title,
     causalChain,
     causalImpact,
     data?.analysisId,
+    data?.createdAt,
     displayIssueInfo.label,
     extendedSummary,
     hasSeededCoachContext,
     nextActionText,
     swingTypeSummary?.label,
+    userState.userId,
+    anonymousUserId,
   ]);
 
   useEffect(() => {

@@ -144,18 +144,43 @@ export const clearCausalContext = (threadId: string | null) => {
 
 export const saveBootstrapContext = (userId: string, context: CoachCausalImpactExplanation) => {
   if (!userId || typeof window === "undefined") return;
+  // Backward/forward compatible keys:
+  // - Older code used raw anonymous id (e.g. "abc123").
+  // - Newer code may use a prefixed identity key (e.g. "anon:abc123" / "user:xxx").
   saveJson(BOOTSTRAP_KEY(userId), context);
+  if (userId.startsWith("anon:")) {
+    const raw = userId.slice("anon:".length);
+    if (raw) saveJson(BOOTSTRAP_KEY(raw), context);
+  } else if (!userId.includes(":")) {
+    saveJson(BOOTSTRAP_KEY(`anon:${userId}`), context);
+  }
 };
 
 export const loadBootstrapContext = (userId: string): CoachCausalImpactExplanation | null => {
   if (!userId || typeof window === "undefined") return null;
-  return safeParse<CoachCausalImpactExplanation>(window.localStorage.getItem(BOOTSTRAP_KEY(userId)));
+  const direct = safeParse<CoachCausalImpactExplanation>(window.localStorage.getItem(BOOTSTRAP_KEY(userId)));
+  if (direct) return direct;
+  if (userId.startsWith("anon:")) {
+    const raw = userId.slice("anon:".length);
+    if (!raw) return null;
+    return safeParse<CoachCausalImpactExplanation>(window.localStorage.getItem(BOOTSTRAP_KEY(raw)));
+  }
+  if (!userId.includes(":")) {
+    return safeParse<CoachCausalImpactExplanation>(window.localStorage.getItem(BOOTSTRAP_KEY(`anon:${userId}`)));
+  }
+  return null;
 };
 
 export const clearBootstrapContext = (userId: string) => {
   if (!userId || typeof window === "undefined") return;
   try {
     window.localStorage.removeItem(BOOTSTRAP_KEY(userId));
+    if (userId.startsWith("anon:")) {
+      const raw = userId.slice("anon:".length);
+      if (raw) window.localStorage.removeItem(BOOTSTRAP_KEY(raw));
+    } else if (!userId.includes(":")) {
+      window.localStorage.removeItem(BOOTSTRAP_KEY(`anon:${userId}`));
+    }
   } catch {
     // ignore
   }

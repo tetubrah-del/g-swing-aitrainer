@@ -1,7 +1,7 @@
 import { SequenceStageFeedback, SequenceStageKey, SwingPhase } from "@/app/golf/types";
 import { PhaseKey } from "./extractPhaseFrames";
 
-const phaseKeys: PhaseKey[] = ["address", "top", "downswing", "impact", "finish"];
+const phaseKeys: PhaseKey[] = ["address", "backswing", "top", "downswing", "impact", "finish"];
 const sequenceStageKeys: SequenceStageKey[] = [
   "address",
   "address_to_backswing",
@@ -130,9 +130,13 @@ export function parseMultiPhaseResponse(input: unknown): {
   const phaseSource = parsed.phases && typeof parsed.phases === "object" ? parsed.phases : parsed;
 
   const phases = phaseKeys.reduce((acc, key) => {
-    const rawPhase = (phaseSource as RawResponse)[key];
+    let rawPhase = (phaseSource as RawResponse)[key];
     if (!rawPhase) {
-      throw new Error(`Missing phase: ${key}`);
+      // Backward-compat: older models/responses may omit backswing; approximate using top.
+      if (key === "backswing") {
+        rawPhase = (phaseSource as RawResponse).top;
+      }
+      if (!rawPhase) throw new Error(`Missing phase: ${key}`);
     }
     acc[key] = parsePhase(rawPhase, key);
     return acc;

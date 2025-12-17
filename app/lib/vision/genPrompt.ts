@@ -37,7 +37,7 @@ function toJapaneseLevel(level: GolfAnalyzeMeta["level"]): string {
 export function genPrompt(meta?: GolfAnalyzeMeta, previousReport?: SwingAnalysis | null): string {
   const systemPrompt = [
     "あなたはプロのゴルフスイングコーチです。",
-    "ユーザーがアップロードしたスイング画像・動画をもとに、5つのフェーズごとに日本語でスイング分析を行ってください。",
+    "ユーザーがアップロードしたスイング画像・動画をもとに、6つのフェーズごとに日本語でスイング分析を行ってください。",
     "さらに、連続する14〜16枚のフレームを使ってステージ遷移（Address→Finish）の診断も行ってください。",
     "",
     "必ず下記の構造でJSONを返してください（余計な文章は禁止）：",
@@ -52,6 +52,7 @@ export function genPrompt(meta?: GolfAnalyzeMeta, previousReport?: SwingAnalysis
     '      "issues": ["改善点1", "改善点2"],',
     '      "advice": ["アドバイス1", "アドバイス2"]',
     "    },",
+    '    "backswing": {... 同様 ...},',
     '    "top": {... 同様 ...},',
     '    "downswing": {...},',
     '    "impact": {...},',

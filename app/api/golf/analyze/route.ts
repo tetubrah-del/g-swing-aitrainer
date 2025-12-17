@@ -27,7 +27,13 @@ import { readActiveAuthFromRequest } from "@/app/lib/activeAuth";
 import { canAnalyzeNow } from "@/app/lib/quota";
 import { getAnalysis, saveAnalysis } from "@/app/lib/store";
 import { incrementAnonymousQuotaCount, getAnonymousQuotaCount } from "@/app/lib/quotaStore";
-import { findUserByEmail, getUserById, incrementFreeAnalysisCount, upsertGoogleUser } from "@/app/lib/userStore";
+import {
+  findUserByEmail,
+  getUserById,
+  incrementFreeAnalysisCount,
+  linkAnonymousIdToUser,
+  upsertGoogleUser,
+} from "@/app/lib/userStore";
 import { canPerform } from "@/app/lib/permissions";
 import { User, UserPlan } from "@/app/types/user";
 
@@ -36,7 +42,7 @@ const execFileAsync = promisify(execFile);
 // Node.js ランタイムで動かしたい場合は明示（必須ではないが念のため）
 export const runtime = "nodejs";
 
-const phaseOrder: PhaseKey[] = ["address", "top", "downswing", "impact", "finish"];
+const phaseOrder: PhaseKey[] = ["address", "backswing", "top", "downswing", "impact", "finish"];
 const clientPhaseOrder: PhaseKey[] = ["address", "backswing", "top", "downswing", "impact", "finish"];
 const PHASE_ORDER: PhaseKey[] = ["address", "backswing", "top", "downswing", "impact", "finish"];
 
@@ -99,10 +105,24 @@ async function resolveUserContext(req: NextRequest): Promise<UserContext> {
   const now = Date.now();
 
   if (account) {
-    if (anonymousUserId && Array.isArray(account.anonymousIds) && !account.anonymousIds.includes(anonymousUserId)) {
-      throw new HttpError("forbidden", 403);
+    // If a device anonymous token exists but isn't linked to this account, do not hard-fail.
+    // Try to link it; if it's owned by another account, mint a fresh anonymous token to avoid cross-account mixing.
+    let effectiveAnonymousUserId = anonymousUserId;
+    let mintedAnonymousUserId: string | null = null;
+    if (
+      anonymousUserId &&
+      (!Array.isArray(account.anonymousIds) || !account.anonymousIds.includes(anonymousUserId))
+    ) {
+      const updated = await linkAnonymousIdToUser(account.userId, anonymousUserId);
+      if (updated) account = updated;
+      const linkedNow = Array.isArray(account.anonymousIds) && account.anonymousIds.includes(anonymousUserId);
+      if (!linkedNow) {
+        mintedAnonymousUserId = crypto.randomUUID();
+        effectiveAnonymousUserId = mintedAnonymousUserId;
+      }
     }
-    const anonymousUsed = anonymousUserId ? await getAnonymousQuotaCount(anonymousUserId) : 0;
+
+    const anonymousUsed = effectiveAnonymousUserId ? await getAnonymousQuotaCount(effectiveAnonymousUserId) : 0;
     const effectiveFreeCount = Math.max(account.freeAnalysisCount ?? 0, anonymousUsed);
     const plan: UserPlan =
       account.proAccess === true && (account.proAccessExpiresAt == null || account.proAccessExpiresAt > now)
@@ -123,8 +143,8 @@ async function resolveUserContext(req: NextRequest): Promise<UserContext> {
         freeAnalysisResetAt: account.freeAnalysisResetAt ? new Date(account.freeAnalysisResetAt) : new Date(0),
         createdAt: new Date(account.createdAt ?? now),
       },
-      anonymousUserId,
-      mintedAnonymousUserId: null,
+      anonymousUserId: effectiveAnonymousUserId,
+      mintedAnonymousUserId,
     };
   }
 
