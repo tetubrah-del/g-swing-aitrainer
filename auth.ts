@@ -51,6 +51,7 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
           session.user.hasProAccess = usage.hasProAccess;
           session.user.freeAnalysisCount = usage.freeAnalysisCount;
           session.user.anonymousUserId = usage.anonymousUserId;
+          session.user.entitlements = usage.entitlements;
         } else if (email) {
           // 未保存なら最小限で upsert
           const created = await upsertGoogleUser({ googleSub: sub, email, anonymousUserId: null });
@@ -62,6 +63,7 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
           session.user.hasProAccess = usage.hasProAccess;
           session.user.freeAnalysisCount = usage.freeAnalysisCount;
           session.user.anonymousUserId = usage.anonymousUserId;
+          session.user.entitlements = usage.entitlements;
         }
       }
       return session;

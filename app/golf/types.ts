@@ -85,6 +85,7 @@ export type UserUsageState = {
   hasProAccess: boolean;
   isMonitor?: boolean;
   plan?: "anonymous" | "free" | "pro";
+  entitlements?: import("@/app/types/entitlements").Entitlements;
   email?: string | null;
   userId?: string | null;
   anonymousUserId?: string | null;
@@ -107,6 +108,13 @@ export interface UserAccount {
   proAccess: boolean;
   proAccessReason: ProAccessReason | null;
   proAccessExpiresAt: number | null;
+  billingProvider?: "none" | "stripe" | "apple" | "google" | "revenuecat" | null;
+  stripeCustomerId?: string | null;
+  stripeSubscriptionId?: string | null;
+  subscriptionStatus?: string | null;
+  currentPeriodEnd?: number | null;
+  cancelAtPeriodEnd?: boolean | null;
+  trialEnd?: number | null;
   anonymousIds?: string[];
   plan?: "anonymous" | "free" | "pro";
   freeAnalysisCount?: number;

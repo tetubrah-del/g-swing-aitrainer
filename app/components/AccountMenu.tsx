@@ -68,6 +68,13 @@ function AccountMenuInner() {
             <Link onClick={close} href="/coach" className="px-3 py-2 text-sm text-slate-100 hover:bg-slate-900/60">
               AIコーチ
             </Link>
+            <Link
+              onClick={close}
+              href="/account/billing"
+              className="px-3 py-2 text-sm text-slate-100 hover:bg-slate-900/60"
+            >
+              お支払い・プラン
+            </Link>
             {!showLogout ? (
               <Link
                 onClick={close}

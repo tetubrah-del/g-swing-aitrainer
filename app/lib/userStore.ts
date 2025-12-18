@@ -20,22 +20,29 @@ async function loadFromDisk() {
         authProvider: value.authProvider ?? null,
         emailVerifiedAt:
           value.emailVerifiedAt === null || typeof value.emailVerifiedAt === "number" ? value.emailVerifiedAt : null,
-      createdAt: typeof value.createdAt === "number" ? value.createdAt : Date.now(),
-      updatedAt: typeof value.updatedAt === "number" ? value.updatedAt : Date.now(),
-      proAccess: value.proAccess === true,
-      proAccessReason: value.proAccessReason ?? null,
-      proAccessExpiresAt: typeof value.proAccessExpiresAt === "number" ? value.proAccessExpiresAt : null,
-      plan: value.plan ?? (value.proAccess ? "pro" : value.email ? "free" : "anonymous"),
-      freeAnalysisCount: typeof value.freeAnalysisCount === "number" ? value.freeAnalysisCount : 0,
-      freeAnalysisResetAt:
-        value.freeAnalysisResetAt === null || typeof value.freeAnalysisResetAt === "number"
-          ? value.freeAnalysisResetAt
-          : null,
-      monitorExpiresAt: typeof value.monitorExpiresAt === "number" ? value.monitorExpiresAt : null,
-      anonymousIds: Array.isArray(value.anonymousIds) ? value.anonymousIds.filter((v) => typeof v === "string") : [],
-    };
-    users.set(normalized.userId, normalized);
-  });
+        createdAt: typeof value.createdAt === "number" ? value.createdAt : Date.now(),
+        updatedAt: typeof value.updatedAt === "number" ? value.updatedAt : Date.now(),
+        proAccess: value.proAccess === true,
+        proAccessReason: value.proAccessReason ?? null,
+        proAccessExpiresAt: typeof value.proAccessExpiresAt === "number" ? value.proAccessExpiresAt : null,
+        billingProvider: value.billingProvider ?? null,
+        stripeCustomerId: value.stripeCustomerId ?? null,
+        stripeSubscriptionId: value.stripeSubscriptionId ?? null,
+        subscriptionStatus: value.subscriptionStatus ?? null,
+        currentPeriodEnd: typeof value.currentPeriodEnd === "number" ? value.currentPeriodEnd : null,
+        cancelAtPeriodEnd: typeof value.cancelAtPeriodEnd === "boolean" ? value.cancelAtPeriodEnd : null,
+        trialEnd: typeof value.trialEnd === "number" ? value.trialEnd : null,
+        plan: value.plan ?? (value.proAccess ? "pro" : value.email ? "free" : "anonymous"),
+        freeAnalysisCount: typeof value.freeAnalysisCount === "number" ? value.freeAnalysisCount : 0,
+        freeAnalysisResetAt:
+          value.freeAnalysisResetAt === null || typeof value.freeAnalysisResetAt === "number"
+            ? value.freeAnalysisResetAt
+            : null,
+        monitorExpiresAt: typeof value.monitorExpiresAt === "number" ? value.monitorExpiresAt : null,
+        anonymousIds: Array.isArray(value.anonymousIds) ? value.anonymousIds.filter((v) => typeof v === "string") : [],
+      };
+      users.set(normalized.userId, normalized);
+    });
   } catch {
     // missing file is fine for first run
   }
@@ -104,16 +111,23 @@ export async function upsertGoogleUser(params: {
 
   const base: UserAccount =
     existing ??
-	    ({
-	      userId,
-	      email: params.email ?? null,
-	      authProvider: "google",
-	      emailVerifiedAt: now,
-	      createdAt: now,
-	      updatedAt: now,
-	      proAccess: false,
+    ({
+      userId,
+      email: params.email ?? null,
+      authProvider: "google",
+      emailVerifiedAt: now,
+      createdAt: now,
+      updatedAt: now,
+      proAccess: false,
       proAccessReason: null,
       proAccessExpiresAt: null,
+      billingProvider: null,
+      stripeCustomerId: null,
+      stripeSubscriptionId: null,
+      subscriptionStatus: null,
+      currentPeriodEnd: null,
+      cancelAtPeriodEnd: null,
+      trialEnd: null,
       plan: params.email ? "free" : "anonymous",
       freeAnalysisCount: 0,
       freeAnalysisResetAt: null,
@@ -136,13 +150,13 @@ export async function upsertGoogleUser(params: {
         ? "free"
         : "anonymous";
 
-	  const user: UserAccount = {
-	    ...base,
-	    email: params.email ?? base.email,
-	    authProvider: "google",
-	    emailVerifiedAt: base.emailVerifiedAt ?? now,
-	    updatedAt: now,
-	    proAccess: params.proAccess ?? base.proAccess ?? false,
+  const user: UserAccount = {
+    ...base,
+    email: params.email ?? base.email,
+    authProvider: "google",
+    emailVerifiedAt: base.emailVerifiedAt ?? now,
+    updatedAt: now,
+    proAccess: params.proAccess ?? base.proAccess ?? false,
     proAccessReason: params.proAccessReason ?? base.proAccessReason ?? null,
     proAccessExpiresAt:
       typeof params.proAccessExpiresAt === "number" ? params.proAccessExpiresAt : base.proAccessExpiresAt ?? null,
@@ -184,6 +198,13 @@ export async function registerEmailUser(params: { email: string; anonymousUserId
       proAccess: false,
       proAccessReason: null,
       proAccessExpiresAt: null,
+      billingProvider: null,
+      stripeCustomerId: null,
+      stripeSubscriptionId: null,
+      subscriptionStatus: null,
+      currentPeriodEnd: null,
+      cancelAtPeriodEnd: null,
+      trialEnd: null,
       plan: "free",
       freeAnalysisCount: 0,
       freeAnalysisResetAt: null,
@@ -268,4 +289,53 @@ export async function incrementFreeAnalysisCount(params: { userId: string }) {
     updatedAt: Date.now(),
   };
   await saveUser(next);
+}
+
+export async function updateStripeCustomerForUser(params: { userId: string; stripeCustomerId: string }) {
+  const user = await getUserById(params.userId);
+  if (!user) return null;
+  const next: UserAccount = {
+    ...user,
+    billingProvider: "stripe",
+    stripeCustomerId: params.stripeCustomerId,
+    updatedAt: Date.now(),
+  };
+  await saveUser(next);
+  return next;
+}
+
+export async function updateStripeSubscriptionForUser(params: {
+  userId: string;
+  stripeSubscriptionId: string | null;
+  subscriptionStatus: string | null;
+  currentPeriodEnd: number | null;
+  cancelAtPeriodEnd: boolean | null;
+  trialEnd: number | null;
+  stripeCustomerId?: string | null;
+}) {
+  const user = await getUserById(params.userId);
+  if (!user) return null;
+
+  const status = params.subscriptionStatus;
+  const proActive = status === "active" || status === "trialing" || status === "past_due";
+  const proAccessExpiresAt = proActive ? params.currentPeriodEnd : null;
+
+  const next: UserAccount = {
+    ...user,
+    billingProvider: "stripe",
+    stripeCustomerId: params.stripeCustomerId ?? user.stripeCustomerId ?? null,
+    stripeSubscriptionId: params.stripeSubscriptionId,
+    subscriptionStatus: status,
+    currentPeriodEnd: params.currentPeriodEnd,
+    cancelAtPeriodEnd: params.cancelAtPeriodEnd,
+    trialEnd: params.trialEnd,
+    proAccess: proActive,
+    proAccessReason: proActive ? "paid" : null,
+    proAccessExpiresAt,
+    plan: proActive ? "pro" : user.email ? "free" : "anonymous",
+    updatedAt: Date.now(),
+  };
+
+  await saveUser(next);
+  return next;
 }

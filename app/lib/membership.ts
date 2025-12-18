@@ -1,9 +1,8 @@
 import { ProAccessReason, UserAccount, UserState, UserUsageState } from "@/app/golf/types";
 import { findUserByEmail, getUserById, upsertGoogleUser } from "@/app/lib/userStore";
 import { getAnonymousQuotaCount } from "@/app/lib/quotaStore";
-
-export const FREE_MONTHLY_ANALYSIS_LIMIT = 3;
-export const ANONYMOUS_ANALYSIS_LIMIT = 1;
+import { ANONYMOUS_ANALYSIS_LIMIT, FREE_MONTHLY_ANALYSIS_LIMIT } from "@/app/lib/limits";
+import { buildEntitlements } from "@/app/lib/entitlements";
 
 export function hasProAccess(user: UserAccount | null, now: number = Date.now()): boolean {
   if (!user) return false;
@@ -49,6 +48,10 @@ export async function buildUserUsageState(params: {
       hasProAccess: true,
       isMonitor: params.user?.proAccessReason === "monitor",
       ...baseProfile,
+      entitlements: buildEntitlements({
+        tier: "pro",
+        hasProAccess: true,
+      }),
       monthlyAnalysis: {
         used,
         limit: null,
@@ -64,6 +67,10 @@ export async function buildUserUsageState(params: {
     hasProAccess: false,
     isMonitor: false,
     ...baseProfile,
+    entitlements: buildEntitlements({
+      tier: baseProfile.plan === "anonymous" ? "anonymous" : "free",
+      hasProAccess: false,
+    }),
     monthlyAnalysis: {
       used,
       limit: effectiveLimit,
