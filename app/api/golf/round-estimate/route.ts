@@ -120,7 +120,9 @@ export async function POST(req: Request) {
     return NextResponse.json(result, { status: 200 });
   } catch (err: unknown) {
     console.error("[round-estimate]", err);
-    const totalScore = Number.isFinite((err as any)?.totalScore) ? (err as any).totalScore : 0;
+    const totalScore = (err && typeof err === "object" && "totalScore" in err && Number.isFinite(err.totalScore))
+      ? Number(err.totalScore)
+      : 0;
     const fallback = computeFallback(totalScore);
     return NextResponse.json(
       { ...fallback, note: "AI estimation failed; using fallback" },

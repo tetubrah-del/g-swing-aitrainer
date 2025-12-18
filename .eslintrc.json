@@ -1,0 +1,6 @@
+{
+  "root": true,
+  "extends": ["next/core-web-vitals", "next/typescript"],
+  "ignorePatterns": [".next/", "out/", "build/", "dist/", "coverage/", "node_modules/"]
+}
+

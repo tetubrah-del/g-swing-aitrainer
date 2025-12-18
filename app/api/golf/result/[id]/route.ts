@@ -3,7 +3,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { AnalysisId, GolfAnalysisResponse, MOCK_GOLF_ANALYSIS_RESULT } from "@/app/golf/types";
 import { getAnalysis } from "@/app/lib/store";
-import { findUserByEmail, getUserById, linkAnonymousIdToUser } from "@/app/lib/userStore";
+import { findUserByEmail, getUserById } from "@/app/lib/userStore";
 import { readAnonymousFromRequest } from "@/app/lib/anonymousToken";
 import { auth } from "@/auth";
 import { readEmailSessionFromRequest } from "@/app/lib/emailSession";

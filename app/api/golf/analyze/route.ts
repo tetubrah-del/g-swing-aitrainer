@@ -18,6 +18,7 @@ import {
 } from "@/app/golf/types";
 import { askVisionAPI } from "@/app/lib/vision/askVisionAPI";
 import { extractPhaseFrames, PhaseFrame, PhaseKey, PhaseFrames } from "@/app/lib/vision/extractPhaseFrames";
+import { detectPhases } from "@/app/lib/vision/detectPhases";
 import { genPrompt } from "@/app/lib/vision/genPrompt";
 import { parseMultiPhaseResponse } from "@/app/lib/vision/parseMultiPhaseResponse";
 import { auth } from "@/auth";
@@ -560,6 +561,67 @@ async function extractSequenceFramesFromBuffer(params: {
   }
 }
 
+const computeMotionEnergy = (frames: Array<PhaseFrame>): number[] => {
+  if (!frames.length) return [];
+  const energies: number[] = [0];
+  for (let i = 1; i < frames.length; i += 1) {
+    try {
+      const a = Buffer.from(frames[i - 1].base64Image, "base64");
+      const b = Buffer.from(frames[i].base64Image, "base64");
+      const len = Math.min(a.length, b.length);
+      if (!len) {
+        energies.push(0);
+        continue;
+      }
+      let diff = 0;
+      const stride = 32; // 粗いサンプリングで高速化
+      for (let j = 0; j < len; j += stride) {
+        diff += Math.abs(a[j] - b[j]);
+      }
+      energies.push(diff / Math.max(1, len / stride));
+    } catch {
+      energies.push(0);
+    }
+  }
+  return energies;
+};
+
+const detectMotionPhases = (
+  frames: Array<PhaseFrame>
+): { address: number; top: number; downswing: number; impact: number; finish: number } | null => {
+  if (!frames || frames.length < 4) return null;
+  const energy = computeMotionEnergy(frames);
+  if (!energy.length) return null;
+
+  // 独自ルール: インパクト = 最大エネルギー, トップ = インパクト前で最小エネルギー,
+  // ダウンスイング = トップ以降〜インパクト直前でエネルギー最大（なければ impact-1, さらに fallback で detectPhases）
+  try {
+    const impact = energy.indexOf(Math.max(...energy));
+    const topRange = energy.slice(0, Math.max(impact, 1));
+    const top = topRange.length ? topRange.indexOf(Math.min(...topRange)) : 0;
+
+    let downswing = Math.max(top + 1, impact - 1);
+    let maxDsEnergy = -Infinity;
+    for (let i = top + 1; i < impact; i += 1) {
+      if (energy[i] > maxDsEnergy) {
+        maxDsEnergy = energy[i];
+        downswing = i;
+      }
+    }
+
+    const finish = energy.length - 1;
+    return { address: 0, top, downswing, impact, finish };
+  } catch (err) {
+    console.warn("[analyze] custom detectMotionPhases failed; fallback to detectPhases", err);
+    try {
+      return detectPhases(energy);
+    } catch (err2) {
+      console.warn("[analyze] detectPhases failed", err2);
+      return null;
+    }
+  }
+};
+
 function parseDataUrl(input: string | null): { base64Image: string; mimeType: string } | null {
   if (!input) return null;
   const match = input.match(/^data:(.*?);base64,(.*)$/);
@@ -697,7 +759,14 @@ export async function POST(req: NextRequest) {
     const permission = canAnalyzeNow(user);
     // Quota tests: anonymous 1st OK, 2nd -> 429 anonymous_limit; free 3rd OK, 4th -> 429 free_limit; pro always OK.
     if (!permission.allowed) {
-      return NextResponse.json({ error: permission.reason }, { status: 429 });
+      const usageState = buildUsageStateFromUser(user, user.freeAnalysisCount ?? 0, anonymousUserId);
+      const res = NextResponse.json({ error: permission.reason, userState: usageState }, { status: 429 });
+      if (mintedAnonymousUserId) {
+        setAnonymousTokenOnResponse(res, mintedAnonymousUserId);
+      } else if (anonymousUserId) {
+        setAnonymousTokenOnResponse(res, anonymousUserId);
+      }
+      return res;
     }
 
     const normalizedHandedness: GolfAnalyzeMeta["handedness"] =
@@ -902,7 +971,7 @@ export async function POST(req: NextRequest) {
       typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `golf-${Date.now()}`;
 
     const timestamp = Date.now();
-    const resolvedSequenceFrames: Array<{ url: string; timestampSec?: number } | null> = resolvedSequence.length
+    const normalizedSequenceFrames: Array<(PhaseFrame & { timestampSec?: number }) | null> = resolvedSequence.length
       ? await Promise.all(
           resolvedSequence.map(async ({ loaded, meta }) => {
             const normalized = await normalizePhaseFrame(loaded, req.url).catch((err) => {
@@ -910,17 +979,67 @@ export async function POST(req: NextRequest) {
               return null;
             });
             if (!normalized) return null;
-            const mime = normalizeMime(normalized.mimeType);
-            return {
-              url: `data:${mime};base64,${normalized.base64Image}`,
-              timestampSec: meta.timestampSec ?? normalized.timestampSec,
-            };
+            return { ...normalized, timestampSec: meta.timestampSec ?? normalized.timestampSec };
           })
         )
       : [];
+
+    const motionPhases = detectMotionPhases(
+      normalizedSequenceFrames.filter((f): f is PhaseFrame => !!f && !!f.base64Image)
+    );
+
+    const resolvedSequenceFrames: Array<{ url: string; timestampSec?: number } | null> = normalizedSequenceFrames.map(
+      (frame) => {
+        if (!frame) return null;
+        const mime = normalizeMime(frame.mimeType);
+        return {
+          url: `data:${mime};base64,${frame.base64Image}`,
+          timestampSec: frame.timestampSec,
+        };
+      }
+    );
+
     const cleanedSequenceFrames = resolvedSequenceFrames.filter(
       (i): i is { url: string; timestampSec?: number } => !!i
     );
+    const phaseIndex1Based =
+      motionPhases && typeof motionPhases.address === "number" && typeof motionPhases.impact === "number"
+        ? {
+            address: motionPhases.address + 1,
+            top: motionPhases.top + 1,
+            downswing: motionPhases.downswing + 1,
+            impact: motionPhases.impact + 1,
+            finish: motionPhases.finish + 1,
+          }
+        : null;
+
+    const overrideStageIndex = (stage: string): number | null => {
+      if (!phaseIndex1Based) return null;
+      switch (stage) {
+        case "address":
+        case "address_to_backswing":
+          return phaseIndex1Based.address;
+        case "backswing_to_top":
+          return phaseIndex1Based.top;
+        case "top_to_downswing":
+          return phaseIndex1Based.downswing;
+        case "downswing_to_impact":
+        case "impact":
+          return phaseIndex1Based.impact;
+        case "finish":
+          return phaseIndex1Based.finish;
+        default:
+          return null;
+      }
+    };
+
+    const stagesWithMotion =
+      parsed.sequenceStages?.map((stage) => {
+        const idx = overrideStageIndex(stage.stage);
+        if (!idx) return stage;
+        return { ...stage, keyFrameIndices: [idx] };
+      }) ?? undefined;
+
     const result: SwingAnalysis = {
       analysisId,
       createdAt: new Date(timestamp).toISOString(),
@@ -932,10 +1051,10 @@ export async function POST(req: NextRequest) {
       sequence: resolvedSequence.length
         ? {
             frames: cleanedSequenceFrames,
-            stages: parsed.sequenceStages,
+            stages: stagesWithMotion ?? parsed.sequenceStages,
           }
         : parsed.sequenceStages
-          ? { frames: [], stages: parsed.sequenceStages }
+          ? { frames: [], stages: stagesWithMotion ?? parsed.sequenceStages }
           : undefined,
     };
 

@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import type { SwingTypeKey, SwingTypeLLMResult } from '@/app/golf/types';
 import { loadSwingTypeResult } from '@/app/golf/utils/swingTypeStorage';
@@ -11,12 +11,10 @@ const SwingTypeDetailPage = () => {
   const router = useRouter();
   const type = (params?.type as SwingTypeKey) || null;
 
-  const [data, setData] = useState<SwingTypeLLMResult | null>(null);
-
-  useEffect(() => {
-    const loaded = loadSwingTypeResult();
-    setData(loaded);
-  }, []);
+  const [data] = useState<SwingTypeLLMResult | null>(() => {
+    // Load swing type result on mount
+    return loadSwingTypeResult();
+  });
 
   const matchInfo = useMemo(() => {
     if (!data || !type) return null;

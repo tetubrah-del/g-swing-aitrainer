@@ -116,16 +116,23 @@ export async function POST(req: Request) {
       ]),
     ];
 
-    const messages = [
+    type OpenAIRequestMessageContent =
+      | { type: "text"; text: string }
+      | { type: "image_url"; image_url: { url: string; detail: "low" } };
+
+    const messages: Array<{
+      role: "user";
+      content: OpenAIRequestMessageContent[];
+    }> = [
       {
-        role: "user" as const,
-        content: contentBlocks as unknown,
+        role: "user",
+        content: contentBlocks as OpenAIRequestMessageContent[],
       },
-    ] as const;
+    ];
 
     const result = await client.chat.completions.create({
       model: "gpt-4o-mini",
-      messages: messages as any,
+      messages,
       max_tokens: 800,
       temperature: 0.0,
       response_format: { type: "json_object" },

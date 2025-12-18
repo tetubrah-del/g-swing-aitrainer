@@ -19,14 +19,6 @@ const PHASE_ORDER = [
   'finish',
 ] as const;
 
-const PHASE_LABELS: Record<PhaseKey, string> = {
-  address: 'Address',
-  backswing: 'Backswing',
-  top: 'Top',
-  downswing: 'Downswing',
-  impact: 'Impact',
-  finish: 'Finish',
-};
 
 type PhaseKey = (typeof PHASE_ORDER)[number];
 
@@ -163,7 +155,8 @@ function pickRepresentativeIndicesByBuckets(energies: number[], bucketCount: num
   return Array.from(indices).sort((a, b) => a - b);
 }
 
-async function selectRepresentativeFrames(urls: string[], maxFrames = 14, fps = 15): Promise<FrameMeta[]> {
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+async function _selectRepresentativeFrames(urls: string[], maxFrames = 14, fps = 15): Promise<FrameMeta[]> {
   if (urls.length <= maxFrames) {
     return urls.map((url, index) => ({ url, index, timestampSec: index / fps }));
   }
@@ -282,6 +275,28 @@ function computePhaseMappingFromKeypoints(data: { frames?: PhaseKeypoints[] } | 
   // normalize sorting by idx
   mapped.sort((a, b) => a.idx - b.idx);
   const indices = computePhaseIndices(mapped);
+
+  // Optional diagnostics: append `?debugPhases=1` to the URL and check DevTools console.
+  try {
+    if (typeof window !== 'undefined') {
+      const debug = new URLSearchParams(window.location.search).get('debugPhases');
+      if (debug === '1') {
+        const ySeries = mapped.map((f) => {
+          const wrists = [f.pose?.leftWrist, f.pose?.rightWrist].filter(Boolean) as Array<{ x: number; y: number }>;
+          if (wrists.length) return wrists.reduce((s, p) => s + p.y, 0) / wrists.length;
+          const shoulders = [f.pose?.leftShoulder, f.pose?.rightShoulder].filter(Boolean) as Array<{ x: number; y: number }>;
+          if (shoulders.length) return shoulders.reduce((s, p) => s + p.y, 0) / shoulders.length;
+          const hips = [f.pose?.leftHip, f.pose?.rightHip].filter(Boolean) as Array<{ x: number; y: number }>;
+          if (hips.length) return hips.reduce((s, p) => s + p.y, 0) / hips.length;
+          return null;
+        });
+        console.debug('[debugPhases] indices', indices, 'ySeries', ySeries);
+      }
+    }
+  } catch {
+    // ignore
+  }
+
   return {
     address: indices.address,
     backswing: indices.backswing,
@@ -361,7 +376,8 @@ async function computePhaseMappingFromEnergy(urls: string[]): Promise<VisionPhas
   };
 }
 
-async function runVisionPhaseSelection(frames: FrameMeta[]): Promise<VisionPhaseMapping> {
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+async function _runVisionPhaseSelection(frames: FrameMeta[]): Promise<VisionPhaseMapping> {
   const res = await fetch('/api/golf/extract/vision', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -695,7 +711,8 @@ async function detectPoseKeypoints(frame: RawFrame, detector: PosePipeline): Pro
   };
 }
 
-async function buildPhaseFrames(file: File): Promise<PhaseFrame[]> {
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+async function _buildPhaseFrames(file: File): Promise<PhaseFrame[]> {
   const raw = await extractFramesFromFile(file); // ← 6枚できている想定
 
   const PHASES: PhaseKey[] = [
@@ -825,11 +842,13 @@ const GolfUploadPage = () => {
           }
           const reason = data?.error;
           const quotaMessage =
-            reason === 'free_limit' || reason === 'anonymous_limit'
-              ? '利用回数超過により利用できません。利用いただくにはメール会員もしくはPRO会員への登録をお願いします。'
-              : data?.message ||
-                data?.error ||
-                '利用回数超過により利用できません。利用いただくにはメール会員もしくはPRO会員への登録をお願いします。';
+            reason === 'anonymous_limit'
+              ? '無料診断の利用回数（未登録）は上限に達しました。続けるにはメール会員登録（無料）またはPROをご利用ください。'
+              : reason === 'free_limit'
+                ? '無料診断の利用回数（メール会員）は上限に達しました。続けるにはPROをご利用ください。'
+                : data?.message ||
+                  data?.error ||
+                  '利用回数超過により利用できません。';
           setQuotaExceeded(true);
           setError(quotaMessage);
           return;

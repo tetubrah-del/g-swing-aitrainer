@@ -6,15 +6,21 @@ import { useParams, usePathname, useRouter, useSearchParams } from 'next/navigat
 import { buildCoachContext } from '@/app/coach/utils/context';
 import { saveBootstrapContext } from '@/app/coach/utils/storage';
 import { useMeUserState } from '@/app/golf/hooks/useMeUserState';
+import { clearPhaseOverride, loadPhaseOverride, savePhaseOverride } from '@/app/golf/utils/phaseOverrideStorage';
 import type {
   CausalImpactExplanation,
   GolfAnalysisResponse,
-  SequenceStageKey,
+  SequenceStageFeedback,
   SwingAnalysisHistory,
   SwingTypeKey,
   SwingTypeLLMResult,
 } from '@/app/golf/types';
-import { getLatestReport, getReportById, saveReport, setActiveAnalysisPointer } from '@/app/golf/utils/reportStorage';
+	import {
+	  clearActiveAnalysisPointer,
+	  getReportById,
+	  saveReport,
+	  setActiveAnalysisPointer,
+	} from '@/app/golf/utils/reportStorage';
 import { getAnonymousUserId, getSwingHistories, saveSwingHistory } from '@/app/golf/utils/historyStorage';
 import { buildRuleBasedCausalImpact } from '@/app/golf/utils/causalImpact';
 import { saveSwingTypeResult } from '@/app/golf/utils/swingTypeStorage';
@@ -41,11 +47,11 @@ const PHASE_FRAME_MAP: Record<string, [number, number]> = {
   address_to_backswing: [2, 4],
   top: [4, 6],
   backswing_to_top: [4, 6],
-  downswing: [7, 9],
-  top_to_downswing: [7, 9],
-  downswing_to_impact: [9, 11],
-  impact: [9, 11],
-  finish: [12, 16],
+  downswing: [8, 8],
+  top_to_downswing: [7, 7],
+  downswing_to_impact: [9, 9],
+  impact: [9, 9],
+  finish: [10, 16],
 };
 
 const phaseOrder: Array<keyof GolfAnalysisResponse['result']['phases']> = [
@@ -57,14 +63,6 @@ const phaseOrder: Array<keyof GolfAnalysisResponse['result']['phases']> = [
   'finish',
 ];
 
-const stageLabels: Record<SequenceStageKey, string> = {
-  address: 'Address',
-  address_to_backswing: 'Address → Backswing',
-  backswing_to_top: 'Backswing → Top',
-  top_to_downswing: 'Top → Downswing',
-  downswing_to_impact: 'Downswing → Impact',
-  finish: 'Finish',
-};
 
 type IssueRule = {
   key: string;
@@ -174,15 +172,89 @@ const getDisplayMiss = (text?: string | null): string => {
   return text ?? '打点と方向性が乱れやすい';
 };
 
-const getFrameRange = (phaseKey: string): [number, number] | null => {
-  return PHASE_FRAME_MAP[phaseKey] ?? null;
+const getFrameRange = (
+  phaseKey: string,
+  sequenceStages?: SequenceStageFeedback[],
+  manual?: { downswing?: number; impact?: number }
+): [number, number] | null => {
+  try {
+    const manualDownswing = typeof manual?.downswing === 'number' ? manual.downswing : undefined;
+    const manualImpact = typeof manual?.impact === 'number' ? manual.impact : undefined;
+    if (phaseKey === 'downswing' && manualDownswing) return [manualDownswing, manualDownswing];
+    if (phaseKey === 'impact' && manualImpact) return [manualImpact, manualImpact];
+
+    // sequenceStagesから実際のフェーズフレーム番号を取得
+    if (sequenceStages && Array.isArray(sequenceStages) && sequenceStages.length > 0) {
+      try {
+        const stageMap: Record<string, string[]> = {
+          address: ['address', 'address_to_backswing'],
+          backswing: ['address_to_backswing', 'backswing_to_top'],
+          top: ['backswing_to_top', 'top', 'top_to_downswing'],
+          downswing: ['top_to_downswing', 'downswing'],
+          top_to_downswing: ['top_to_downswing'],
+          downswing_to_impact: ['downswing_to_impact'],
+          impact: ['impact', 'downswing_to_impact'],
+          finish: ['finish'],
+        };
+        const relevantStages = stageMap[phaseKey] ?? [];
+        if (relevantStages.length === 0) {
+          // phaseKeyがstageMapにない場合はfallback
+          return PHASE_FRAME_MAP[phaseKey] ?? null;
+        }
+        const frameIndices: number[] = [];
+        sequenceStages.forEach((stage) => {
+          try {
+            if (stage && typeof stage === 'object' && 'stage' in stage) {
+              const stageStr = String(stage.stage);
+              if (relevantStages.includes(stageStr) && Array.isArray(stage.keyFrameIndices)) {
+                stage.keyFrameIndices.forEach((idx) => {
+                  if (typeof idx === 'number' && Number.isFinite(idx)) {
+                    // keyFrameIndicesは1-based（UI表示 #1..N）の可能性がある
+                    const normalizedIdx = idx >= 1 && idx <= 16 ? idx : idx >= 0 && idx < 16 ? idx + 1 : null;
+                    if (normalizedIdx != null && !frameIndices.includes(normalizedIdx)) {
+                      frameIndices.push(normalizedIdx);
+                    }
+                  }
+                });
+              }
+            }
+          } catch (stageErr) {
+            console.warn('[getFrameRange] error processing stage:', stageErr, { stage });
+          }
+        });
+        if (frameIndices.length > 0) {
+          frameIndices.sort((a, b) => a - b);
+          const start = frameIndices[0];
+          const end = frameIndices[frameIndices.length - 1];
+          return [start, end];
+        }
+      } catch (err) {
+        console.error('[getFrameRange] error processing sequenceStages:', err, { phaseKey, sequenceStages });
+      }
+    }
+    // fallback: 固定マッピングを使用
+    return PHASE_FRAME_MAP[phaseKey] ?? null;
+  } catch (err) {
+    console.error('[getFrameRange] unexpected error:', err, { phaseKey });
+    return PHASE_FRAME_MAP[phaseKey] ?? null;
+  }
 };
 
-const attachFrameRange = (comment: string, phaseKey: string): string => {
-  const range = getFrameRange(phaseKey);
-  if (!range) return comment;
-  const [start, end] = range;
-  return `${comment}（#${start}〜#${end}）`;
+const attachFrameRange = (
+  comment: string,
+  phaseKey: string,
+  sequenceStages?: SequenceStageFeedback[],
+  manual?: { downswing?: number; impact?: number }
+): string => {
+  try {
+    const range = getFrameRange(phaseKey, sequenceStages, manual);
+    if (!range) return comment;
+    const [start, end] = range;
+    return `${comment}（#${start}〜#${end}）`;
+  } catch (err) {
+    console.error('[attachFrameRange] error:', err, { comment, phaseKey });
+    return comment;
+  }
 };
 
 const normalizeTextPool = (result: GolfAnalysisResponse['result']) => {
@@ -200,13 +272,6 @@ const deriveSwingTypes = (result: GolfAnalysisResponse['result']): SwingTypeBadg
     typeof keyword === 'string' ? pool.includes(keyword) : keyword.test(pool);
   const downswingScore = result.phases.downswing?.score ?? 0;
   const impactScore = result.phases.impact?.score ?? 0;
-  const topScore = result.phases.top?.score ?? 0;
-  const phaseGoodText = Object.values(result.phases)
-    .map((p) => (p?.good || []).join(' '))
-    .join(' ');
-  const phaseIssueText = Object.values(result.phases)
-    .map((p) => (p?.issues || []).join(' '))
-    .join(' ');
 
   const badges: SwingTypeBadge[] = [];
 
@@ -233,6 +298,7 @@ const deriveSwingTypes = (result: GolfAnalysisResponse['result']): SwingTypeBadg
   }
 
   // ボディターン適性
+  const topScore = result.phases.top?.score ?? 0;
   const bodyTurnScore = (downswingScore + topScore) / 2;
   if (bodyTurnScore >= 10 || has(/ボディターン|体の回転/)) {
     const value = bodyTurnScore >= 14 ? '高' : bodyTurnScore >= 11 ? '中' : '低';
@@ -278,7 +344,6 @@ const deriveSwingTypeResult = (
     typeof keyword === 'string' ? pool.includes(keyword) : keyword.test(pool);
   const downswingScore = result.phases.downswing?.score ?? 0;
   const impactScore = result.phases.impact?.score ?? 0;
-  const topScore = result.phases.top?.score ?? 0;
   const causalIssue = causalImpact?.issue ?? '';
 
   // 初期値
@@ -364,9 +429,10 @@ const GolfResultPage = () => {
   const [swingTypeResult, setSwingTypeResult] = useState<SwingTypeResult | null>(null);
   const [swingTypeLLM, setSwingTypeLLM] = useState<SwingTypeLLMResult | null>(null);
   const [isSwingTypeLoading, setIsSwingTypeLoading] = useState(false);
-  const [selectedSwingType, setSelectedSwingType] = useState<SwingTypeKey | null>(null);
+  const [, setSelectedSwingType] = useState<SwingTypeKey | null>(null);
   const [expandedAlt, setExpandedAlt] = useState<SwingTypeKey | null>(null);
   const [highlightFrames, setHighlightFrames] = useState<number[]>([]);
+  const [manualPhase, setManualPhase] = useState<{ downswing?: number; impact?: number }>({});
   const [anonymousUserId, setAnonymousUserId] = useState<string | null>(null);
   const [previousHistory, setPreviousHistory] = useState<SwingAnalysisHistory | null>(null);
   const [hasSavedHistory, setHasSavedHistory] = useState(false);
@@ -497,22 +563,35 @@ const GolfResultPage = () => {
   const phaseList = useMemo(() => {
     if (!data?.result?.phases) return [];
 
-    return phaseOrder.map((key) => ({
-      key,
-      label:
-        key === 'address'
-          ? 'アドレス'
-          : key === 'backswing'
-            ? 'バックスイング'
-          : key === 'top'
-            ? 'トップ'
-            : key === 'downswing'
-              ? 'ダウンスイング'
-              : key === 'impact'
-                ? 'インパクト'
-                : 'フィニッシュ',
-      data: data.result.phases[key],
-    }));
+    return phaseOrder.map((key) => {
+      const phaseData = data.result.phases[key];
+      // データの安全性を確保
+      const safeData = phaseData
+        ? {
+            score: typeof phaseData.score === 'number' ? phaseData.score : 0,
+            good: Array.isArray(phaseData.good) ? phaseData.good : [],
+            issues: Array.isArray(phaseData.issues) ? phaseData.issues : [],
+            advice: Array.isArray(phaseData.advice) ? phaseData.advice : [],
+          }
+        : null;
+
+      return {
+        key,
+        label:
+          key === 'address'
+            ? 'アドレス'
+            : key === 'backswing'
+              ? 'バックスイング'
+            : key === 'top'
+              ? 'トップ'
+              : key === 'downswing'
+                ? 'ダウンスイング'
+                : key === 'impact'
+                  ? 'インパクト'
+                  : 'フィニッシュ',
+        data: safeData,
+      };
+    });
   }, [data?.result?.phases]);
 
   const levelEstimate = useMemo(() => {
@@ -671,7 +750,7 @@ const GolfResultPage = () => {
     return () => {
       cancelled = true;
     };
-  }, [data?.analysisId, data?.result, data?.meta, roundEstimates]);
+  }, [data?.analysisId, data?.result, data?.meta, data?.causalImpact, roundEstimates]);
 
   useEffect(() => {
     if (!data?.result) return;
@@ -912,6 +991,13 @@ const GolfResultPage = () => {
     }
   }, [highlightFrames]);
 
+  useEffect(() => {
+    if (!data?.analysisId) return;
+    const stored = loadPhaseOverride(data.analysisId);
+    if (!stored) return;
+    setManualPhase({ downswing: stored.downswing, impact: stored.impact });
+  }, [data?.analysisId]);
+
   // ▼ early return は Hooks の後に置く
   if (isLoading) {
     return (
@@ -936,8 +1022,21 @@ const GolfResultPage = () => {
   }
 
   const { result, note, meta } = data;
+  if (!result) {
+    return (
+      <main className="min-h-screen flex flex-col items-center justify-center bg-slate-950 text-slate-50 space-y-4">
+        <p className="text-red-400 text-sm">診断結果データが不正です。</p>
+        <button
+          onClick={handleRetry}
+          className="rounded-md bg-emerald-500 hover:bg-emerald-400 px-4 py-2 text-sm font-semibold text-slate-900"
+        >
+          再診断する
+        </button>
+      </main>
+    );
+  }
   const sequenceFrames = result.sequence?.frames ?? [];
-  const sequenceStages = result.sequence?.stages ?? [];
+  const sequenceStages = (result.sequence?.stages ?? []) as SequenceStageFeedback[];
   const comparison = result.comparison;
   const previousScoreDelta = previousHistory ? result.totalScore - previousHistory.swingScore : null;
   const previousAnalyzedAt =
@@ -1195,11 +1294,30 @@ const GolfResultPage = () => {
               </span>
             </div>
 
+            <div className="flex flex-wrap items-center gap-2 rounded-lg border border-slate-800 bg-slate-950/40 px-3 py-2 text-xs text-slate-300">
+              <span className="text-slate-400">手動指定:</span>
+              <span className="text-sky-200">ダウンスイング {manualPhase.downswing ? `#${manualPhase.downswing}` : '未設定'}</span>
+              <span className="text-rose-200">インパクト {manualPhase.impact ? `#${manualPhase.impact}` : '未設定'}</span>
+              <button
+                type="button"
+                className="ml-auto rounded-md border border-slate-700 bg-slate-900/40 px-2 py-1 text-[11px] text-slate-200 hover:bg-slate-900/70"
+                onClick={() => {
+                  if (!data?.analysisId) return;
+                  clearPhaseOverride(data.analysisId);
+                  setManualPhase({});
+                }}
+              >
+                リセット
+              </button>
+            </div>
+
             {sequenceFrames.length > 0 && (
               <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
                 {sequenceFrames.map((frame, idx) => {
                   const frameNumber = idx + 1;
                   const highlighted = highlightFrames.includes(frameNumber);
+                  const isManualDownswing = manualPhase.downswing === frameNumber;
+                  const isManualImpact = manualPhase.impact === frameNumber;
                   return (
                     <div
                       key={`${frame.url}-${idx}`}
@@ -1210,13 +1328,31 @@ const GolfResultPage = () => {
                           : 'border border-slate-800 bg-slate-950/50'
                       }`}
                     >
-                    <div className="flex items-center justify-between text-xs text-slate-300">
-                      <span className={`font-semibold ${highlighted ? 'text-emerald-200' : ''}`}>#{frameNumber}</span>
+                    <div className="flex items-center justify-between text-xs text-slate-300 gap-2">
+                      <div className="flex items-center gap-2">
+                        <span className={`font-semibold ${highlighted ? 'text-emerald-200' : ''}`}>#{frameNumber}</span>
+                        {isManualDownswing && (
+                          <span className="rounded px-1.5 py-0.5 text-[10px] border border-sky-500/60 text-sky-200 bg-sky-900/20">
+                            DS
+                          </span>
+                        )}
+                        {isManualImpact && (
+                          <span className="rounded px-1.5 py-0.5 text-[10px] border border-rose-500/60 text-rose-200 bg-rose-900/20">
+                            IMP
+                          </span>
+                        )}
+                      </div>
                       {typeof frame.timestampSec === 'number' && <span>{frame.timestampSec.toFixed(2)}s</span>}
                     </div>
                     <div
                       className={`aspect-video w-full overflow-hidden rounded-md bg-slate-900 ${
-                        highlighted ? 'border border-emerald-400' : 'border border-slate-800'
+                        isManualImpact
+                          ? 'border border-rose-500'
+                          : isManualDownswing
+                            ? 'border border-sky-500'
+                            : highlighted
+                              ? 'border border-emerald-400'
+                              : 'border border-slate-800'
                       }`}
                     >
                       {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -1225,6 +1361,30 @@ const GolfResultPage = () => {
                         alt={`sequence-frame-${frameNumber}`}
                         className="h-full w-full object-contain bg-slate-950"
                       />
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        className="flex-1 rounded-md border border-sky-600/50 bg-sky-950/40 px-2 py-1 text-[11px] text-sky-100 hover:bg-sky-900/30"
+                        onClick={() => {
+                          if (!data?.analysisId) return;
+                          const next = savePhaseOverride(data.analysisId, { downswing: frameNumber });
+                          setManualPhase({ downswing: next?.downswing, impact: next?.impact });
+                        }}
+                      >
+                        ダウンスイングにする
+                      </button>
+                      <button
+                        type="button"
+                        className="flex-1 rounded-md border border-rose-600/50 bg-rose-950/40 px-2 py-1 text-[11px] text-rose-100 hover:bg-rose-900/30"
+                        onClick={() => {
+                          if (!data?.analysisId) return;
+                          const next = savePhaseOverride(data.analysisId, { impact: frameNumber });
+                          setManualPhase({ downswing: next?.downswing, impact: next?.impact });
+                        }}
+                      >
+                        インパクトにする
+                      </button>
                     </div>
                   </div>
                   );
@@ -1290,6 +1450,11 @@ const GolfResultPage = () => {
                 );
               }
 
+              // データの安全性を再確認
+              const safeGood = Array.isArray(data.good) ? data.good : [];
+              const safeIssues = Array.isArray(data.issues) ? data.issues : [];
+              const safeAdvice = Array.isArray(data.advice) ? data.advice : [];
+
               return (
                 <div key={key} className="rounded-lg border border-slate-800 bg-slate-950/60 p-3 space-y-2">
                   <div className="flex items-center justify-between">
@@ -1299,54 +1464,77 @@ const GolfResultPage = () => {
                   <div>
                     <p className="text-xs text-slate-400">良い点</p>
                     <ul className="list-disc pl-4 text-sm space-y-1">
-                      {data.good.map((g, i) => (
-                        <li key={i}>{attachFrameRange(g, key)}</li>
-                      ))}
+                      {safeGood.map((g, i) => {
+                        try {
+                          return <li key={i}>{attachFrameRange(String(g || ''), key, sequenceStages, manualPhase)}</li>;
+                        } catch (err) {
+                          console.error('[phaseList] error rendering good item:', err, { key, i, g });
+                          return <li key={i}>{String(g || '')}</li>;
+                        }
+                      })}
                     </ul>
                   </div>
                   <div>
                     <p className="text-xs text-slate-400">改善点</p>
                     <ul className="list-disc pl-4 text-sm space-y-1">
-                      {data.issues.map((b, i) => {
-                        const text = attachFrameRange(b, key);
-                        return (
-                          <li
-                            key={i}
-                            className="cursor-pointer hover:text-emerald-200 transition-colors"
-                            onClick={() => {
-                              const range = getFrameRange(key);
-                              if (!range) return;
-                              const [start, end] = range;
-                              const arr = Array.from({ length: end - start + 1 }, (_, idx) => start + idx);
-                              setHighlightFrames(arr);
-                            }}
-                          >
-                            {text}
-                          </li>
-                        );
+                      {safeIssues.map((b, i) => {
+                        try {
+                          const text = attachFrameRange(String(b || ''), key, sequenceStages, manualPhase);
+                          return (
+                            <li
+                              key={i}
+                              className="cursor-pointer hover:text-emerald-200 transition-colors"
+                              onClick={() => {
+                                try {
+                                  const range = getFrameRange(key, sequenceStages, manualPhase);
+                                  if (!range) return;
+                                  const [start, end] = range;
+                                  const arr = Array.from({ length: end - start + 1 }, (_, idx) => start + idx);
+                                  setHighlightFrames(arr);
+                                } catch (err) {
+                                  console.error('[phaseList] error in onClick:', err);
+                                }
+                              }}
+                            >
+                              {text}
+                            </li>
+                          );
+                        } catch (err) {
+                          console.error('[phaseList] error rendering issues item:', err, { key, i, b });
+                          return <li key={i}>{String(b || '')}</li>;
+                        }
                       })}
                     </ul>
                   </div>
                   <div>
                     <p className="text-xs text-slate-400">アドバイス</p>
                     <ul className="list-disc pl-4 text-sm space-y-1">
-                      {data.advice.map((adv, i) => {
-                        const text = attachFrameRange(adv, key);
-                        return (
-                          <li
-                            key={i}
-                            className="cursor-pointer hover:text-emerald-200 transition-colors"
-                            onClick={() => {
-                              const range = getFrameRange(key);
-                              if (!range) return;
-                              const [start, end] = range;
-                              const arr = Array.from({ length: end - start + 1 }, (_, idx) => start + idx);
-                              setHighlightFrames(arr);
-                            }}
-                          >
-                            {text}
-                          </li>
-                        );
+                      {safeAdvice.map((adv, i) => {
+                        try {
+                          const text = attachFrameRange(String(adv || ''), key, sequenceStages, manualPhase);
+                          return (
+                            <li
+                              key={i}
+                              className="cursor-pointer hover:text-emerald-200 transition-colors"
+                              onClick={() => {
+                                try {
+                                  const range = getFrameRange(key, sequenceStages, manualPhase);
+                                  if (!range) return;
+                                  const [start, end] = range;
+                                  const arr = Array.from({ length: end - start + 1 }, (_, idx) => start + idx);
+                                  setHighlightFrames(arr);
+                                } catch (err) {
+                                  console.error('[phaseList] error in onClick:', err);
+                                }
+                              }}
+                            >
+                              {text}
+                            </li>
+                          );
+                        } catch (err) {
+                          console.error('[phaseList] error rendering advice item:', err, { key, i, adv });
+                          return <li key={i}>{String(adv || '')}</li>;
+                        }
                       })}
                     </ul>
                   </div>

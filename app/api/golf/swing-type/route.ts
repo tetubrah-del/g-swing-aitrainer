@@ -222,7 +222,8 @@ const STATIC_DETAILS: Record<SwingTypeKey, SwingTypeDetail> = {
   },
 };
 
-function buildFallbackResult(analysis?: SwingAnalysis | null, causalImpact?: CausalImpactExplanation | null): SwingTypeLLMResult {
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+function buildFallbackResult(analysis?: SwingAnalysis | null, _causalImpact?: CausalImpactExplanation | null): SwingTypeLLMResult {
   if (!analysis) {
     return {
       swingTypeMatch: [

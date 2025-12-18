@@ -1,22 +1,18 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { signOut } from "next-auth/react";
+import dynamic from "next/dynamic";
 import { useUserState, DEFAULT_USER_USAGE_STATE } from "@/app/golf/state/userState";
 import { resetMeUserStateCache } from "@/app/golf/hooks/useMeUserState";
 
-export default function AccountMenu() {
+function AccountMenuInner() {
   const router = useRouter();
   const pathname = usePathname();
   const { state: userState, setUserState } = useUserState();
   const [open, setOpen] = useState(false);
-  const [mounted, setMounted] = useState(false);
-
-  useEffect(() => {
-    setMounted(true);
-  }, []);
 
   const label = useMemo(() => {
     if (userState.email) return userState.email;
@@ -46,8 +42,6 @@ export default function AccountMenu() {
   }, [close, pathname, router, setUserState]);
 
   const showLogout = userState.isAuthenticated || userState.email || userState.userId;
-
-  if (!mounted) return null;
 
   return (
     <div className="fixed right-4 top-4 z-50">
@@ -97,3 +91,8 @@ export default function AccountMenu() {
     </div>
   );
 }
+
+// Disable SSR to avoid hydration mismatches caused by client-only state (open menu, user state)
+const AccountMenu = dynamic(() => Promise.resolve(AccountMenuInner), { ssr: false });
+
+export default AccountMenu;

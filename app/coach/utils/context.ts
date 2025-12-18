@@ -31,12 +31,12 @@ export const buildCoachContext = (params: {
     nextAction || causal?.nextAction?.content || causal?.nextAction?.title || "次の練習で同じリズムを10球繰り返す";
 
   return {
-    analysisId,
+    analysisId: analysisId || undefined,
     primaryFactor,
     chain: chainList.slice(0, 6),
     confidence: confidenceToNumber(causal?.confidence),
     nextAction: action,
-    summary: summary?.slice(0, 360),
+    summary: typeof summary === 'string' ? summary.slice(0, 360) : undefined,
     swingTypeHeadline: swingTypeHeadline || null,
     analyzedAt: analyzedAt || null,
   };

@@ -12,8 +12,6 @@ import type {
 import { buildCoachContext } from '@/app/coach/utils/context';
 import {
   appendMessages,
-  clearBootstrapContext,
-  clearCausalContext,
   getOrCreateActiveThread,
   hasDismissedQuickReplies,
   isContextDisabled,
@@ -22,7 +20,6 @@ import {
   loadCausalContext,
   loadMessages,
   loadThreadSummary,
-  loadVisionMode,
   markQuickRepliesDismissed,
   saveDetailMode,
   saveCausalContext,
@@ -39,11 +36,11 @@ import {
   getReportById,
   saveReport,
   setActiveAnalysisPointer,
-  clearActiveAnalysisPointer,
 } from '@/app/golf/utils/reportStorage';
 import type { GolfAnalysisResponse } from '@/app/golf/types';
 import { useMeUserState } from '@/app/golf/hooks/useMeUserState';
 import { useUserState } from '@/app/golf/state/userState';
+import { loadPhaseOverride } from '@/app/golf/utils/phaseOverrideStorage';
 
 const QUICK_REPLIES: CoachQuickReply[] = [
   { key: 'cause-detail', label: '原因を詳しく知りたい', value: 'この原因がスコアにどう響くか、もう少し詳しく教えて。' },
@@ -69,10 +66,6 @@ const confidenceDisplay = (value?: number) => {
   return 'low / 参考推定';
 };
 
-const chainSummary = (chain?: string[]) => {
-  if (!chain || !chain.length) return '因果チェーンを準備中';
-  return chain.join(' → ');
-};
 
 const compactTheme = (value: string) => {
   const raw = (value || '').trim();
@@ -91,14 +84,16 @@ const pickVisionFrames = (
   const frames = report?.result?.sequence?.frames ?? [];
   if (!frames.length || max <= 0) return [];
 
+  const manual = report?.analysisId ? loadPhaseOverride(report.analysisId) : null;
+
   const stageByIndex = new Map<number, string>();
   const phaseFrameRange1Based: Record<NonNullable<typeof focusPhase>, [number, number]> = {
     address: [1, 2],
     backswing: [2, 4],
     top: [4, 6],
-    downswing: [7, 9],
-    impact: [9, 11],
-    finish: [12, 16],
+    downswing: [8, 8],
+    impact: [9, 9],
+    finish: [10, 16],
   };
   const phaseStageMap: Record<NonNullable<typeof focusPhase>, string[]> = {
     address: ['address', 'address_to_backswing'],
@@ -162,6 +157,21 @@ const pickVisionFrames = (
 
   // When focusPhase is specified, never fill with unrelated stages.
   if (focusPhase) {
+    const manualIndex1Based =
+      focusPhase === 'downswing' ? manual?.downswing : focusPhase === 'impact' ? manual?.impact : undefined;
+    if (typeof manualIndex1Based === 'number') {
+      const idx = manualIndex1Based - 1;
+      if (idx >= 0 && idx < frames.length) {
+        return [
+          {
+            ...(frames[idx] as { url: string; timestampSec?: number }),
+            frameIndex: idx + 1,
+            label: `manual:${focusPhase}`,
+          },
+        ].filter((f) => typeof f?.url === 'string' && f.url.startsWith('data:image/'));
+      }
+    }
+
     const [start1, end1] = phaseFrameRange1Based[focusPhase] ?? [1, Math.min(2, frames.length)];
     const start = Math.max(0, start1 - 1);
     const end = Math.min(frames.length - 1, end1 - 1);
@@ -279,7 +289,8 @@ const buildPhaseContextText = (report: GolfAnalysisResponse | null, phase: Retur
       ? (phases as Record<string, { score?: number; good?: string[]; issues?: string[]; advice?: string[] } | undefined>).top
       : undefined);
   if (!p) return null;
-  const note = phase === 'backswing' && !(phases as any).backswing ? ' ※旧データのためトップ評価を参照' : '';
+  const note =
+    phase === 'backswing' && !(phases as Record<string, unknown>).backswing ? ' ※旧データのためトップ評価を参照' : '';
   const lines: string[] = [];
   lines.push(`フェーズ: ${phaseLabelJa(phase)}（score: ${p.score ?? 'N/A'}/20）${note}`);
   if (p.good?.length) lines.push(`良い点: ${(p.good ?? []).slice(0, 3).join(' / ')}`);
@@ -321,7 +332,7 @@ const CoachPage = () => {
   const [userId, setUserId] = useState('');
   const [thread, setThread] = useState<CoachThread | null>(null);
   const [analysisContext, setAnalysisContext] = useState<CoachCausalImpactExplanation | null>(null);
-  const [contextDisabled, setContextDisabledState] = useState(false);
+  const [, setContextDisabledState] = useState(false);
   const [contextReport, setContextReport] = useState<GolfAnalysisResponse | null>(null);
   const [detailMode, setDetailMode] = useState(false);
   const [visionMode, setVisionMode] = useState(false);
@@ -392,7 +403,9 @@ const CoachPage = () => {
     setSummary(loadThreadSummary(activeThread?.threadId ?? null));
     setShowQuickReplies(!hasDismissedQuickReplies(activeThread?.threadId ?? null));
     setDetailMode(loadDetailMode(activeThread?.threadId ?? null));
-    setVisionMode(loadVisionMode(activeThread?.threadId ?? null));
+    // Always keep vision mode ON for product behavior; images improve grounding and manual DS/IMP selection boosts trust.
+    setVisionMode(true);
+    if (activeThread?.threadId) saveVisionMode(activeThread.threadId, true);
   }, [userState.userId, analysisIdFromQuery]);
 
   useEffect(() => {
@@ -403,44 +416,77 @@ const CoachPage = () => {
       const disabled = isContextDisabled(thread.threadId);
       setContextDisabledState(disabled);
 
-      const applyContext = (ctx: CoachCausalImpactExplanation, report?: GolfAnalysisResponse | null) => {
-        const nextCtx = swingTypeFromQuery ? { ...ctx, swingTypeHeadline: swingTypeFromQuery } : ctx;
-        saveCausalContext(thread.threadId, nextCtx);
-        if (ctx.analysisId) {
-          const nextThread = updateThreadMetadata(thread, { lastAnalysisId: ctx.analysisId });
-          if (nextThread && nextThread.lastAnalysisId !== thread.lastAnalysisId) {
-            setThread((prev) => {
-              if (!prev) return prev;
-              if (prev.threadId !== nextThread.threadId) return prev;
-              if (prev.lastAnalysisId === nextThread.lastAnalysisId) return prev;
-              return nextThread;
-            });
-          }
+      const applyContext = (ctx: CoachCausalImpactExplanation | null, report?: GolfAnalysisResponse | null) => {
+        if (!ctx) {
+          console.warn('[applyContext] ctx is null or undefined');
+          if (!cancelled) setIsLoading(false);
+          return;
         }
-        if (cancelled) return;
-        setAnalysisContext(nextCtx);
-        if (report?.result) setContextReport(report);
-        setContextDisabled(thread.threadId, false);
-        setContextDisabledState(false);
-        seededContextRef.current = true;
+        try {
+          const nextCtx = swingTypeFromQuery ? { ...ctx, swingTypeHeadline: swingTypeFromQuery } : ctx;
+          saveCausalContext(thread.threadId, nextCtx);
+          if (ctx.analysisId) {
+            const nextThread = updateThreadMetadata(thread, { lastAnalysisId: ctx.analysisId });
+            if (nextThread && nextThread.lastAnalysisId !== thread.lastAnalysisId) {
+              setThread((prev) => {
+                if (!prev) return prev;
+                if (prev.threadId !== nextThread.threadId) return prev;
+                if (prev.lastAnalysisId === nextThread.lastAnalysisId) return prev;
+                return nextThread;
+              });
+            }
+          }
+          if (cancelled) return;
+          setAnalysisContext(nextCtx);
+          if (report?.result) setContextReport(report);
+          setContextDisabled(thread.threadId, false);
+          setContextDisabledState(false);
+          seededContextRef.current = true;
+        } catch (err) {
+          console.error('[applyContext] error:', err, { ctx, report });
+          if (!cancelled) setIsLoading(false);
+        }
       };
 
-      const buildContextFromReport = (report: GolfAnalysisResponse) => {
-        const displayIssue =
-          report.causalImpact?.primaryIssue ||
-          report.causalImpact?.issue ||
-          report.causalImpact?.relatedMiss ||
-          report.result?.summary;
-        return buildCoachContext({
-          causal: report.causalImpact,
-          displayIssue,
-          chain: report.causalImpact?.chain,
-          nextAction: report.causalImpact?.nextAction?.content,
-          analysisId: report.analysisId,
-          summary: report.result?.summary,
-          swingTypeHeadline: swingTypeFromQuery || null,
-          analyzedAt: report.createdAt ? new Date(report.createdAt).toISOString() : null,
-        });
+      const buildContextFromReport = (report: GolfAnalysisResponse | null | undefined): CoachCausalImpactExplanation | null => {
+        if (!report || !report.result) {
+          return null;
+        }
+        try {
+          const displayIssue =
+            report.causalImpact?.primaryIssue ||
+            report.causalImpact?.issue ||
+            report.causalImpact?.relatedMiss ||
+            report.result?.summary ||
+            'スイングの再現性を高めること';
+          
+          let analyzedAt: string | null = null;
+          if (report.createdAt) {
+            try {
+              if (typeof report.createdAt === 'number') {
+                analyzedAt = new Date(report.createdAt).toISOString();
+              } else if (typeof report.createdAt === 'string') {
+                analyzedAt = new Date(report.createdAt).toISOString();
+              }
+            } catch (dateErr) {
+              console.warn('[buildContextFromReport] date parsing error:', dateErr, { createdAt: report.createdAt });
+            }
+          }
+          
+          return buildCoachContext({
+            causal: report.causalImpact ?? null,
+            displayIssue,
+            chain: report.causalImpact?.chain ?? undefined,
+            nextAction: report.causalImpact?.nextAction?.content ?? undefined,
+            analysisId: report.analysisId ?? undefined,
+            summary: typeof report.result?.summary === 'string' ? report.result.summary : undefined,
+            swingTypeHeadline: swingTypeFromQuery || null,
+            analyzedAt,
+          });
+        } catch (err) {
+          console.error('[buildContextFromReport] error:', err, { report });
+          return null;
+        }
       };
 
       // Query explicitly requests a context: ALWAYS honor it (storedContext may be from another diagnosis).
@@ -467,9 +513,12 @@ const CoachPage = () => {
         }
 
         if (localQueryReport?.result) {
-          applyContext(buildContextFromReport(localQueryReport), localQueryReport);
-          setIsLoading(false);
-          return;
+          const ctx = buildContextFromReport(localQueryReport);
+          if (ctx) {
+            applyContext(ctx, localQueryReport);
+            setIsLoading(false);
+            return;
+          }
         }
 
         try {
@@ -478,9 +527,12 @@ const CoachPage = () => {
             const json = (await res.json()) as GolfAnalysisResponse;
             if (json?.result) {
               saveReport(json);
-              applyContext(buildContextFromReport(json), json);
-              setIsLoading(false);
-              return;
+              const ctx = buildContextFromReport(json);
+              if (ctx) {
+                applyContext(ctx, json);
+                setIsLoading(false);
+                return;
+              }
             }
           }
         } catch {
@@ -533,10 +585,15 @@ const CoachPage = () => {
         if (targetId) {
           const targetReport = await resolveReportById(targetId);
           if (targetReport?.result) {
-            applyContext(buildContextFromReport(targetReport), targetReport);
-            setActiveAnalysisPointer(targetReport.analysisId, targetReport.createdAt);
-            setIsLoading(false);
-            return;
+            const ctx = buildContextFromReport(targetReport);
+            if (ctx) {
+              applyContext(ctx, targetReport);
+              if (targetReport.analysisId && typeof targetReport.createdAt === 'number') {
+                setActiveAnalysisPointer(targetReport.analysisId, targetReport.createdAt);
+              }
+              setIsLoading(false);
+              return;
+            }
           }
         }
       }
@@ -551,8 +608,13 @@ const CoachPage = () => {
           typeof latestReport?.createdAt === 'number' && Number.isFinite(latestReport.createdAt) ? latestReport.createdAt : -Infinity;
 
         if (latestReport?.result && latestAt > storedAt) {
-          applyContext(buildContextFromReport(latestReport), latestReport);
-          setActiveAnalysisPointer(latestReport.analysisId, latestReport.createdAt);
+          const ctx = buildContextFromReport(latestReport);
+          if (ctx) {
+            applyContext(ctx, latestReport);
+            if (latestReport.analysisId && typeof latestReport.createdAt === 'number') {
+              setActiveAnalysisPointer(latestReport.analysisId, latestReport.createdAt);
+            }
+          }
         } else {
           applyContext(storedContext, storedReport);
           if (storedReport?.analysisId && typeof storedReport.createdAt === 'number') {
@@ -572,8 +634,13 @@ const CoachPage = () => {
       const targetReport = bootstrapReport || activeReport || threadReport || recentReport || latest || null;
 
       if (targetReport?.result) {
-        applyContext(buildContextFromReport(targetReport), targetReport);
-        if (typeof targetReport.createdAt === 'number') setActiveAnalysisPointer(targetReport.analysisId, targetReport.createdAt);
+        const ctx = buildContextFromReport(targetReport);
+        if (ctx) {
+          applyContext(ctx, targetReport);
+          if (targetReport.analysisId && typeof targetReport.createdAt === 'number') {
+            setActiveAnalysisPointer(targetReport.analysisId, targetReport.createdAt);
+          }
+        }
       }
 
       if (!cancelled) setIsLoading(false);
@@ -583,7 +650,7 @@ const CoachPage = () => {
     return () => {
       cancelled = true;
     };
-  }, [analysisIdFromQuery, messages, swingTypeFromQuery, thread?.threadId, thread?.lastAnalysisId, userId]);
+  }, [analysisIdFromQuery, messages, swingTypeFromQuery, thread, userId]);
 
   useEffect(() => {
     const analysisId = analysisContext?.analysisId || thread?.lastAnalysisId;
@@ -687,7 +754,9 @@ const CoachPage = () => {
             if (local?.result) {
               reportForVision = local;
               setContextReport(local);
-              setActiveAnalysisPointer(local.analysisId, local.createdAt);
+              if (local.analysisId) {
+                setActiveAnalysisPointer(local.analysisId, typeof local.createdAt === 'number' ? local.createdAt : undefined);
+              }
             } else {
               try {
                 const res = await fetch(`/api/golf/result/${desiredAnalysisId}`, { method: 'GET', cache: 'no-store' });
@@ -697,7 +766,9 @@ const CoachPage = () => {
                     reportForVision = json;
                     setContextReport(json);
                     saveReport(json);
-                    setActiveAnalysisPointer(json.analysisId, json.createdAt);
+                    if (json.analysisId) {
+                      setActiveAnalysisPointer(json.analysisId, typeof json.createdAt === 'number' ? json.createdAt : undefined);
+                    }
                   }
                 }
               } catch {
@@ -827,8 +898,6 @@ const CoachPage = () => {
 
   const primaryFactor = analysisContext?.primaryFactor ?? 'スイング全般の改善';
   const primaryFactorDisplay = compactTheme(primaryFactor);
-  const nextAction = analysisContext?.nextAction ?? '直近の動画で一番気になる点を1つ教えてください。';
-  const chain = analysisContext?.chain ?? [];
   const meta = contextReport?.meta ?? null;
   const metaHandedness = meta?.handedness === 'right' ? '右打ち' : meta?.handedness === 'left' ? '左打ち' : null;
   const metaClub = meta?.clubType ?? null;
@@ -875,26 +944,19 @@ const CoachPage = () => {
                     ? 'border-emerald-500/60 bg-emerald-900/25 text-emerald-100 hover:bg-emerald-900/35'
                     : 'border-slate-700 bg-slate-900/70 text-slate-200 hover:border-emerald-400/60 hover:text-emerald-100'
                 }`}
+                title={detailMode ? '精密（gpt-4o）で回答します' : '通常（gpt-4o-mini）で回答します'}
               >
                 <span>{detailMode ? '🧠' : '💸'}</span>
-                <span>{detailMode ? '詳細モード（高精度/コスト↑）' : '通常モード（コスパ）'}</span>
+                <span>{detailMode ? '精密モード（gpt-4o / コスト↑）' : '通常モード（gpt-4o-mini / コスパ）'}</span>
               </button>
               <button
                 type="button"
-                onClick={() => {
-                  const next = !visionMode;
-                  setVisionMode(next);
-                  saveVisionMode(thread.threadId, next);
-                }}
-                className={`flex items-center gap-1 rounded-lg border px-3 py-2 text-xs transition-colors ${
-                  visionMode
-                    ? 'border-emerald-500/60 bg-emerald-900/25 text-emerald-100 hover:bg-emerald-900/35'
-                    : 'border-slate-700 bg-slate-900/70 text-slate-200 hover:border-emerald-400/60 hover:text-emerald-100'
-                }`}
-                title="診断のフレーム（最大4枚）をコーチに渡して回答精度を上げます（コスト増）"
+                disabled
+                className="flex items-center gap-1 rounded-lg border border-emerald-500/40 bg-emerald-900/15 px-3 py-2 text-xs text-emerald-100/90 cursor-not-allowed"
+                title="フレーム参照は常時ONです（最大6枚）"
               >
-                <span>{visionMode ? '🖼️' : '🖼️'}</span>
-                <span>{visionMode ? 'フレーム参照ON（コスト↑）' : 'フレーム参照OFF'}</span>
+                <span>🖼️</span>
+                <span>フレーム参照ON（常時）</span>
               </button>
               <button
                 type="button"

@@ -42,3 +42,21 @@ export async function incrementAnonymousQuotaCount(id: string): Promise<number> 
   await persist();
   return next;
 }
+
+export async function setAnonymousQuotaCount(id: string, value: number): Promise<number> {
+  await loadPromise;
+  const next = Math.max(0, Math.floor(value));
+  if (next <= 0) {
+    anonymousCounts.delete(id);
+  } else {
+    anonymousCounts.set(id, next);
+  }
+  await persist();
+  return next;
+}
+
+export async function resetAnonymousQuotaStore(): Promise<void> {
+  await loadPromise;
+  anonymousCounts.clear();
+  await persist();
+}
