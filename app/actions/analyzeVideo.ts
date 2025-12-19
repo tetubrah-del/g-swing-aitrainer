@@ -5,28 +5,13 @@
 import {
   attachPoseKeypoints, defaultDetectKeypoints, determineSwingPhases
 } from "../lib/pose/determineSwingPhases";
+import { SWING_ANALYSIS_PROMPT } from "../lib/prompts/swingAnalysisPrompt";
 import { askVisionAPI } from "../lib/vision/askVisionAPI";
 import { PhaseFrame } from "../lib/vision/extractPhaseFrames";
 
 const OPENAI_API_BASE = process.env.OPENAI_API_BASE ?? "https://api.openai.com/v1";
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const VIDEO_EMBED_MODEL = "gpt-4o-vision-video-embed";
-
-export const SWING_ANALYSIS_PROMPT = `
-You are a professional golf swing analyzer.
-
-与えられた代表フレームをもとに、日本語で詳細なスイング分析を行い、
-以下の構造を持つ JSON オブジェクト「result」を返してください。
-
-{
-  "summary": "スイング全体の総評（300〜500文字程度で詳しく）",
-  "issues": ["具体的な問題点を箇条書きで"],
-  "cues": ["改善のための短いコーチングキューを箇条書きで"],
-  "priority": "改善すべき項目の優先順位を文章で記述",
-}
-
-必ず JSON のみ出力し、前後の文章は挿入しないこと。
-`;
 
 type VideoEmbeddingFrame = {
   image: string;
@@ -41,6 +26,7 @@ type VideoEmbeddingResponse = {
 
 export interface AnalyzeVideoResult {
   frames: PhaseFrame[];
+  rawFrames: PhaseFrame[];
   vision: unknown;
 }
 
@@ -58,7 +44,8 @@ async function createPhaseFramesFromVideo(file: File, buffer: Buffer): Promise<P
   const safeName = (file.name || "video.mp4").replace(/[^\w.\-]/g, "_");
   const mimeType = file.type && file.type.includes("/") ? file.type : "video/mp4";
 
-  const nodeBlob = new Blob([buffer], { type: mimeType });
+  const arrayBufferForBlob = buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength) as ArrayBuffer;
+  const nodeBlob = new Blob([arrayBufferForBlob], { type: mimeType });
   form.append("file", nodeBlob, safeName);
   form.append("model", VIDEO_EMBED_MODEL);
 
@@ -126,4 +113,3 @@ export async function analyzeVideo(formData: FormData): Promise<AnalyzeVideoResu
   // Next.js がクライアントへ自動で伝搬する
   return result;
 }
-

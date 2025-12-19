@@ -8,12 +8,14 @@ import crypto from "crypto";
 import { execSync } from "child_process";
 
 // ffmpeg 実体
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 let ffmpeg: any = null;
 let ffmpegPath: string | null = null;
 
 function loadFFmpeg() {
   if (ffmpeg) return;
 
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
   ffmpeg = require("fluent-ffmpeg");
 
   ffmpegPath = execSync("which ffmpeg").toString().trim();
@@ -23,6 +25,7 @@ function loadFFmpeg() {
 }
 
 const FPS = 15;
+const SCALE_FILTER = "scale=640:-1:force_original_aspect_ratio=decrease";
 
 export async function POST(req: Request) {
   try {
@@ -44,10 +47,10 @@ export async function POST(req: Request) {
     const outDir = path.join("/tmp", `frames-${crypto.randomUUID()}`);
     await fs.mkdir(outDir, { recursive: true });
 
-    // ffmpeg -i input -vf fps=15 out-%04d.jpg
+    // ffmpeg -i input -vf "fps=15,scale=640:-1:force_original_aspect_ratio=decrease" out-%04d.jpg
     await new Promise((resolve, reject) => {
       ffmpeg(inputPath)
-        .outputOptions([`-vf fps=${FPS}`])
+        .outputOptions([`-vf fps=${FPS},${SCALE_FILTER}`])
         .save(path.join(outDir, "frame-%04d.jpg"))
         .on("end", resolve)
         .on("error", reject);
@@ -57,15 +60,17 @@ export async function POST(req: Request) {
       .filter((f) => f.endsWith(".jpg"))
       .sort();
 
+    const baseUrl = (process.env.NEXT_PUBLIC_BASE_URL || new URL(req.url).origin).replace(/\/$/, "");
+
     const frames = jpgs.map((f) => ({
-      url: `/api/golf/extract/file?id=${f}&dir=${path.basename(outDir)}`,
+      url: `${baseUrl}/api/golf/extract/file?id=${f}&dir=${path.basename(outDir)}`,
     }));
 
     return NextResponse.json({ frames });
-  } catch (err: any) {
+  } catch (err) {
     console.error("[video extract]", err);
     return NextResponse.json(
-      { error: "frame extraction failed", detail: err?.message },
+      { error: "frame extraction failed", detail: (err as Error)?.message },
       { status: 500 }
     );
   }

@@ -13,8 +13,8 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: "idA and idB are required" }, { status: 400 });
   }
 
-  const resultA = getAnalysis(idA);
-  const resultB = getAnalysis(idB);
+  const resultA = await getAnalysis(idA);
+  const resultB = await getAnalysis(idB);
 
   return NextResponse.json(
     {

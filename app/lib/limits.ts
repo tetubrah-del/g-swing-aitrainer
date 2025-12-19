@@ -1,0 +1,3 @@
+export const FREE_MONTHLY_ANALYSIS_LIMIT = 3;
+export const ANONYMOUS_ANALYSIS_LIMIT = 1;
+

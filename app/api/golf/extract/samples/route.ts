@@ -7,11 +7,13 @@ import path from "path";
 import crypto from "crypto";
 import { execSync } from "child_process";
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 let ffmpeg: any = null;
 let ffmpegPath: string | null = null;
 
 function loadFfmpeg() {
   if (ffmpeg) return;
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
   ffmpeg = require("fluent-ffmpeg");
   try {
     ffmpegPath = execSync("which ffmpeg").toString().trim();
@@ -74,10 +76,10 @@ export async function POST(req: Request) {
     await fs.rm(outDir, { recursive: true, force: true });
 
     return NextResponse.json({ frames });
-  } catch (err: any) {
+  } catch (err) {
     console.error("[sample extract]", err);
     return NextResponse.json(
-      { error: "sample extraction failed", detail: err?.message },
+      { error: "sample extraction failed", detail: (err as Error)?.message },
       { status: 500 }
     );
   }

@@ -31,10 +31,7 @@ type OpenAIRequestMessageContent =
 
 type OpenAIResponseMessageContent = string | object;
 
-export async function askVisionAPI({ frames, prompt }: AskVisionAPIParams): Promise<unknown> {
-  const apiKey = assertEnv(OPENAI_API_KEY, "OPENAI_API_KEY");
-  const model = OPENAI_MODEL === "gpt-4o" || OPENAI_MODEL === "gpt-4o-mini" ? OPENAI_MODEL : "gpt-4o";
-  const limitedFrames = frames.slice(0, 6);
+function buildPayload(frames: PhaseFrame[], prompt: string, limit: number, model: string) {
   const enhancedPrompt = `${prompt}
 
 ※以下の画像フレームの内容を主に参照して分析を行ってください。
@@ -42,16 +39,10 @@ export async function askVisionAPI({ frames, prompt }: AskVisionAPIParams): Prom
 必ず JSON オブジェクトのみを出力し、前後のコメントは禁止します。
 `;
 
-  // 🔥 OpenAI Vision 正しい content 構造
   const content: OpenAIRequestMessageContent[] = [];
+  content.push({ type: "text", text: enhancedPrompt });
 
-  content.push({
-    type: "text",
-    text: enhancedPrompt,
-  });
-
-  // フレームを最大5枚まで画像として追加（順序を保持）
-  for (const frame of limitedFrames) {
+  for (const frame of frames.slice(0, limit)) {
     if (!frame?.base64Image || !frame?.mimeType) continue;
     content.push({
       type: "image_url",
@@ -61,30 +52,23 @@ export async function askVisionAPI({ frames, prompt }: AskVisionAPIParams): Prom
     });
   }
 
-  // Vision が画像後に制御文を読んだほうが従うため、補強のために1行追加
   content.push({
     type: "text",
     text: "※出力は JSON のみ（日本語）、テンプレではなくフレーム観察に基づく内容にしてください。",
   });
 
-  const payload = {
+  return {
     model,
-    // system を先頭に追加し Vision の挙動を固定化
     messages: [
-      {
-        role: "system" as const,
-        content: SYSTEM_ROLE,
-      },
-      {
-        role: "user" as const,
-        content,
-      },
+      { role: "system" as const, content: SYSTEM_ROLE },
+      { role: "user" as const, content },
     ],
-    response_format: {
-      type: "json_object",
-    },
+    response_format: { type: "json_object" },
   };
+}
 
+async function callOpenAI(payload: unknown) {
+  const apiKey = assertEnv(OPENAI_API_KEY, "OPENAI_API_KEY");
   const response = await fetch(`${OPENAI_API_BASE}/chat/completions`, {
     method: "POST",
     headers: {
@@ -101,11 +85,36 @@ export async function askVisionAPI({ frames, prompt }: AskVisionAPIParams): Prom
 
   const data = (await response.json()) as {
     choices?: Array<{ message?: { content?: OpenAIResponseMessageContent } }>;
-    error?: unknown;
+    error?: { message?: string };
   };
-  const rawContent = data?.choices?.[0]?.message?.content ?? null;
 
-  // Vision の content が object / string 両可能性に対応
+  if (data?.error) {
+    throw new Error(`OpenAI error: ${data.error.message || "unknown error"}`);
+  }
+
+  return data?.choices?.[0]?.message?.content ?? null;
+}
+
+export async function askVisionAPI({ frames, prompt }: AskVisionAPIParams): Promise<unknown> {
+  const model = OPENAI_MODEL === "gpt-4o" || OPENAI_MODEL === "gpt-4o-mini" ? OPENAI_MODEL : "gpt-4o";
+  const MAX_FRAMES = 16;
+  const limitedFrames = frames.slice(0, MAX_FRAMES);
+
+  const attempt = async (limit: number) => {
+    const payload = buildPayload(limitedFrames, prompt, limit, model);
+    return callOpenAI(payload);
+  };
+
+  let rawContent = await attempt(limitedFrames.length).catch(() => null);
+  if (rawContent == null) {
+    const fallbackLimit = Math.min(6, limitedFrames.length);
+    rawContent = await attempt(Math.max(1, fallbackLimit)).catch(() => null);
+  }
+
+  if (rawContent == null) {
+    throw new Error("Vision API returned empty response");
+  }
+
   if (typeof rawContent === "object" && rawContent !== null) {
     return rawContent;
   }

@@ -107,7 +107,7 @@ async function extractFrameAt(inputPath: string, outputPath: string, timeSec: nu
   ]);
 }
 
-async function extractVideoPhaseFrames(inputPath: string, _mimeType: string): Promise<PhaseFrames> {
+async function extractVideoPhaseFrames(inputPath: string): Promise<PhaseFrames> {
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "golf-phase-frames-"));
   try {
     const duration = await getVideoDuration(inputPath);
@@ -173,7 +173,7 @@ export async function extractPhaseFrames(params: { buffer: Buffer; mimeType: str
 
   try {
     await fs.writeFile(inputPath, buffer);
-    return await extractVideoPhaseFrames(inputPath, mimeType);
+    return await extractVideoPhaseFrames(inputPath);
   } finally {
     await fs.rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
   }
