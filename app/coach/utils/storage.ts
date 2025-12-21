@@ -10,6 +10,7 @@ const QUICK_REPLY_KEY = (threadId: string) => `coach_quickreply_${threadId}`;
 const CONTEXT_DISABLED_KEY = (threadId: string) => `coach_context_disabled_${threadId}`;
 const DETAIL_MODE_KEY = (threadId: string) => `coach_detail_mode_${threadId}`;
 const VISION_MODE_KEY = (threadId: string) => `coach_vision_mode_${threadId}`;
+const VISION_ENHANCE_KEY = (threadId: string) => `coach_vision_enhance_${threadId}`;
 
 const MAX_MESSAGES = 200;
 
@@ -113,6 +114,15 @@ export const appendMessages = (threadId: string | null, messages: CoachMessage[]
   return merged;
 };
 
+export const clearMessages = (threadId: string | null) => {
+  if (!threadId || typeof window === "undefined") return;
+  try {
+    window.localStorage.removeItem(MESSAGE_KEY(threadId));
+  } catch {
+    // ignore
+  }
+};
+
 export const saveThreadSummary = (summary: ThreadSummary | null) => {
   if (!summary || typeof window === "undefined") return;
   saveJson(SUMMARY_KEY(summary.threadId), summary);
@@ -208,10 +218,28 @@ export const hasDismissedQuickReplies = (threadId: string | null): boolean => {
   return !!parsed?.dismissed;
 };
 
+export const clearQuickRepliesDismissed = (threadId: string | null) => {
+  if (!threadId || typeof window === "undefined") return;
+  try {
+    window.localStorage.removeItem(QUICK_REPLY_KEY(threadId));
+  } catch {
+    // ignore
+  }
+};
+
 export const loadDetailMode = (threadId: string | null): boolean => {
   if (!threadId || typeof window === "undefined") return false;
   const parsed = safeParse<{ enabled?: boolean }>(window.localStorage.getItem(DETAIL_MODE_KEY(threadId)));
   return !!parsed?.enabled;
+};
+
+export const loadDetailModePreference = (threadId: string | null): boolean | null => {
+  if (!threadId || typeof window === "undefined") return null;
+  const raw = window.localStorage.getItem(DETAIL_MODE_KEY(threadId));
+  if (!raw) return null;
+  const parsed = safeParse<{ enabled?: boolean }>(raw);
+  if (!parsed || typeof parsed.enabled !== "boolean") return null;
+  return parsed.enabled;
 };
 
 export const saveDetailMode = (threadId: string | null, enabled: boolean) => {
@@ -228,4 +256,15 @@ export const loadVisionMode = (threadId: string | null): boolean => {
 export const saveVisionMode = (threadId: string | null, enabled: boolean) => {
   if (!threadId || typeof window === "undefined") return;
   saveJson(VISION_MODE_KEY(threadId), { enabled });
+};
+
+export const loadVisionEnhanceMode = (threadId: string | null): boolean => {
+  if (!threadId || typeof window === "undefined") return false;
+  const parsed = safeParse<{ enabled?: boolean }>(window.localStorage.getItem(VISION_ENHANCE_KEY(threadId)));
+  return !!parsed?.enabled;
+};
+
+export const saveVisionEnhanceMode = (threadId: string | null, enabled: boolean) => {
+  if (!threadId || typeof window === "undefined") return;
+  saveJson(VISION_ENHANCE_KEY(threadId), { enabled });
 };

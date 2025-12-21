@@ -45,6 +45,7 @@ export type CoachChatRequest = {
   mode?: "initial" | "chat";
   systemPersona: string;
   detailMode?: boolean;
+  debugVision?: boolean;
   visionFrames?: Array<{ url: string; timestampSec?: number; label?: string; frameIndex?: number }>;
   focusPhase?: "address" | "backswing" | "top" | "downswing" | "impact" | "finish" | null;
   phaseContextText?: string | null;

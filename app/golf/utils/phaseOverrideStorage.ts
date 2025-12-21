@@ -1,7 +1,7 @@
 export type ManualPhaseOverride = {
   analysisId: string;
-  downswing?: number; // 1-based sequence frame index
-  impact?: number; // 1-based sequence frame index
+  downswing?: number[]; // 1-based sequence frame indices
+  impact?: number[]; // 1-based sequence frame indices
   updatedAt: number; // epoch ms
 };
 
@@ -23,6 +23,17 @@ const normalizeIndex = (value: unknown): number | undefined => {
   return rounded;
 };
 
+const normalizeIndices = (value: unknown): number[] | undefined => {
+  if (typeof value === "number") {
+    const idx = normalizeIndex(value);
+    return idx ? [idx] : undefined;
+  }
+  if (!Array.isArray(value)) return undefined;
+  const indices = value.map((v) => normalizeIndex(v)).filter((v): v is number => typeof v === "number");
+  const unique = Array.from(new Set(indices)).sort((a, b) => a - b);
+  return unique.length ? unique : undefined;
+};
+
 export const loadPhaseOverride = (analysisId: string): ManualPhaseOverride | null => {
   if (!analysisId || typeof window === "undefined") return null;
   const parsed = safeParse<Partial<ManualPhaseOverride>>(window.localStorage.getItem(KEY(analysisId)));
@@ -30,19 +41,55 @@ export const loadPhaseOverride = (analysisId: string): ManualPhaseOverride | nul
   const updatedAt = typeof parsed.updatedAt === "number" && Number.isFinite(parsed.updatedAt) ? parsed.updatedAt : 0;
   return {
     analysisId,
-    downswing: normalizeIndex(parsed.downswing),
-    impact: normalizeIndex(parsed.impact),
+    // Backward compat: older records may store single number.
+    downswing: normalizeIndices((parsed as { downswing?: unknown }).downswing),
+    impact: normalizeIndices((parsed as { impact?: unknown }).impact),
     updatedAt,
   };
 };
 
-export const savePhaseOverride = (analysisId: string, next: { downswing?: number; impact?: number }): ManualPhaseOverride | null => {
+export const savePhaseOverride = (
+  analysisId: string,
+  next: { downswing?: number[] | number; impact?: number[] | number }
+): ManualPhaseOverride | null => {
   if (!analysisId || typeof window === "undefined") return null;
   const current = loadPhaseOverride(analysisId);
+  const nextDownswing = normalizeIndices(next.downswing ?? current?.downswing);
+  const nextImpact = normalizeIndices(next.impact ?? current?.impact);
   const merged: ManualPhaseOverride = {
     analysisId,
-    downswing: normalizeIndex(next.downswing ?? current?.downswing),
-    impact: normalizeIndex(next.impact ?? current?.impact),
+    downswing: nextDownswing,
+    impact: nextImpact,
+    updatedAt: Date.now(),
+  };
+  try {
+    window.localStorage.setItem(KEY(analysisId), JSON.stringify(merged));
+    return merged;
+  } catch {
+    return merged;
+  }
+};
+
+export const togglePhaseOverride = (
+  analysisId: string,
+  next: { downswing?: number; impact?: number }
+): ManualPhaseOverride | null => {
+  if (!analysisId || typeof window === "undefined") return null;
+  const current = loadPhaseOverride(analysisId);
+  const toggleList = (list: number[] | undefined, value?: number) => {
+    const idx = normalizeIndex(value);
+    const base = Array.isArray(list) ? [...list] : [];
+    if (!idx) return base.length ? base : undefined;
+    const set = new Set(base);
+    if (set.has(idx)) set.delete(idx);
+    else set.add(idx);
+    const out = Array.from(set).sort((a, b) => a - b);
+    return out.length ? out : undefined;
+  };
+  const merged: ManualPhaseOverride = {
+    analysisId,
+    downswing: toggleList(current?.downswing, next.downswing),
+    impact: toggleList(current?.impact, next.impact),
     updatedAt: Date.now(),
   };
   try {
@@ -61,4 +108,3 @@ export const clearPhaseOverride = (analysisId: string): void => {
     // ignore
   }
 };
-
