@@ -77,7 +77,7 @@ export default function AccountBillingPageClient() {
                 onClick={openPortal}
                 className="rounded-xl bg-emerald-500 px-4 py-3 text-sm font-medium text-slate-950 hover:bg-emerald-400 disabled:opacity-60"
               >
-                {portalLoading ? "開いています…" : "支払い情報を管理"}
+                {portalLoading ? "開いています…" : "支払い/解約を管理"}
               </button>
             </div>
 
@@ -90,4 +90,3 @@ export default function AccountBillingPageClient() {
     </main>
   );
 }
-

@@ -1,18 +1,28 @@
 "use client";
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
+import Link from "next/link";
+import { useMeUserState } from "@/app/golf/hooks/useMeUserState";
+import { useUserState } from "@/app/golf/state/userState";
 
 type BillingCycle = "monthly" | "yearly";
 
 export default function PricingPageClient() {
   const params = useSearchParams();
   const canceled = params?.get("canceled") === "1";
+  useMeUserState();
+  const { state: userState } = useUserState();
+  const [hydrated, setHydrated] = useState(false);
   const [cycle, setCycle] = useState<BillingCycle>("monthly");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const priceLabel = useMemo(() => (cycle === "yearly" ? "年額" : "月額"), [cycle]);
+
+  useEffect(() => {
+    setHydrated(true);
+  }, []);
 
   const startCheckout = useCallback(async () => {
     setLoading(true);
@@ -23,9 +33,17 @@ export default function PricingPageClient() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ billingCycle: cycle }),
       });
-      const data = (await res.json().catch(() => ({}))) as { url?: string; error?: string };
+      const data = (await res.json().catch(() => ({}))) as { url?: string; error?: string; manageUrl?: string };
       if (!res.ok || !data.url) {
-        setError(data.error ?? "checkout_failed");
+        if (res.status === 409 && data.error === "already_subscribed" && data.manageUrl) {
+          window.location.href = data.manageUrl;
+          return;
+        }
+        if (data.error === "invalid_price_not_recurring") {
+          setError("yearly_price_config_invalid");
+          return;
+        }
+        setError(data.error ?? (res.status === 401 ? "unauthorized" : "checkout_failed"));
         return;
       }
       window.location.href = data.url;
@@ -89,15 +107,36 @@ export default function PricingPageClient() {
           </ul>
 
           <div className="mt-6 flex items-center gap-3">
-            <button
-              type="button"
-              disabled={loading}
-              onClick={startCheckout}
-              className="rounded-xl bg-emerald-500 px-4 py-3 text-sm font-medium text-slate-950 hover:bg-emerald-400 disabled:opacity-60"
-            >
-              {loading ? "処理中..." : `${priceLabel}で購入`}
-            </button>
-            {error && <div className="text-xs text-rose-200">{error}</div>}
+            {!hydrated ? (
+              <button
+                type="button"
+                disabled
+                className="rounded-xl bg-emerald-500 px-4 py-3 text-sm font-medium text-slate-950 opacity-60"
+              >
+                読み込み中...
+              </button>
+            ) : userState.isAuthenticated ? (
+              <button
+                type="button"
+                disabled={loading}
+                onClick={startCheckout}
+                className="rounded-xl bg-emerald-500 px-4 py-3 text-sm font-medium text-slate-950 hover:bg-emerald-400 disabled:opacity-60"
+              >
+                {loading ? "処理中..." : `${priceLabel}で購入`}
+              </button>
+            ) : (
+              <Link
+                href={`/golf/register?next=${encodeURIComponent("/pricing")}`}
+                className="rounded-xl bg-emerald-500 px-4 py-3 text-sm font-medium text-slate-950 hover:bg-emerald-400"
+              >
+                ログインして購入
+              </Link>
+            )}
+            {error && (
+              <div className="text-xs text-rose-200">
+                {error === "yearly_price_config_invalid" ? "年額のprice設定がサブスク(Recurring)になっていません" : error}
+              </div>
+            )}
           </div>
 
           <div className="mt-4 text-xs text-slate-400">
@@ -108,4 +147,3 @@ export default function PricingPageClient() {
     </main>
   );
 }
-

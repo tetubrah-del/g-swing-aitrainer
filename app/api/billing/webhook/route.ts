@@ -6,9 +6,15 @@ import { updateStripeCustomerForUser, updateStripeSubscriptionForUser } from "@/
 export const runtime = "nodejs";
 
 function getWebhookSecret() {
-  const secret = process.env.STRIPE_WEBHOOK_SECRET;
-  if (!secret) throw new Error("Missing STRIPE_WEBHOOK_SECRET");
-  return secret;
+  const mode = (process.env.STRIPE_MODE ?? "").trim().toLowerCase() === "live" ? "live" : "test";
+  const secret =
+    mode === "live"
+      ? process.env.STRIPE_WEBHOOK_SECRET_LIVE ?? process.env.STRIPE_WEBHOOK_SECRET
+      : process.env.STRIPE_WEBHOOK_SECRET_TEST ?? process.env.STRIPE_WEBHOOK_SECRET;
+  if (!secret) {
+    throw new Error(mode === "live" ? "Missing STRIPE_WEBHOOK_SECRET_LIVE" : "Missing STRIPE_WEBHOOK_SECRET_TEST");
+  }
+  return secret.trim();
 }
 
 function extractUserIdFromSubscription(subscription: Stripe.Subscription): string | null {
@@ -94,4 +100,3 @@ export async function POST(request: NextRequest) {
 
   return NextResponse.json({ received: true });
 }
-

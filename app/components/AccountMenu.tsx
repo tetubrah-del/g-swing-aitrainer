@@ -73,7 +73,7 @@ function AccountMenuInner() {
               href="/account/billing"
               className="px-3 py-2 text-sm text-slate-100 hover:bg-slate-900/60"
             >
-              お支払い・プラン
+              お支払い・解約
             </Link>
             {!showLogout ? (
               <Link
