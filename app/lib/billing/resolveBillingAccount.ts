@@ -6,7 +6,11 @@ import { findUserByEmail, getUserById } from "@/app/lib/userStore";
 
 export async function resolveBillingAccount(request: NextRequest) {
   const emailSession = readEmailSessionFromRequest(request);
-  const activeAuth = readActiveAuthFromRequest(request) ?? (emailSession ? "email" : null);
+  let activeAuth = readActiveAuthFromRequest(request) ?? (emailSession ? "email" : null);
+  // If active_auth is "email" but there's no email session, fall back to NextAuth (Google) to avoid false 401s.
+  if (activeAuth === "email" && !emailSession) {
+    activeAuth = null;
+  }
 
   if (activeAuth !== "email") {
     const session = await auth();
@@ -42,4 +46,3 @@ export async function resolveBillingAccount(request: NextRequest) {
 
   return null;
 }
-

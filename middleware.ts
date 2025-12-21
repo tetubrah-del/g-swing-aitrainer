@@ -11,13 +11,17 @@ function unauthorized() {
 
 function decodeBase64(input: string) {
   if (typeof atob === "function") return atob(input);
-  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
   if (typeof Buffer !== "undefined") return Buffer.from(input, "base64").toString("utf8");
   return "";
 }
 
 export function middleware(req: NextRequest) {
-  const enabled = (process.env.BASIC_AUTH_ENABLED ?? "true") !== "false";
+  const pathname = req.nextUrl.pathname;
+  // Stripe webhooks won't include browser Basic Auth headers.
+  if (pathname.startsWith("/api/billing/webhook")) return NextResponse.next();
+
+  // Local development should be auth-free by default; enable explicitly via env when needed (e.g. staging).
+  const enabled = (process.env.BASIC_AUTH_ENABLED ?? "false") === "true";
   if (!enabled) return NextResponse.next();
 
   const authHeader = req.headers.get("authorization");
@@ -44,4 +48,3 @@ export const config = {
     "/((?!_next/static|_next/image|favicon.ico|robots.txt|sitemap.xml).*)",
   ],
 };
-
