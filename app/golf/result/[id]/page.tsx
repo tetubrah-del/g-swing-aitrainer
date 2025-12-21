@@ -6,7 +6,7 @@ import { useParams, usePathname, useRouter, useSearchParams } from 'next/navigat
 import { buildCoachContext } from '@/app/coach/utils/context';
 import { saveBootstrapContext } from '@/app/coach/utils/storage';
 import { useMeUserState } from '@/app/golf/hooks/useMeUserState';
-import { clearPhaseOverride, loadPhaseOverride, savePhaseOverride } from '@/app/golf/utils/phaseOverrideStorage';
+import { clearPhaseOverride, loadPhaseOverride, togglePhaseOverride } from '@/app/golf/utils/phaseOverrideStorage';
 import type {
   CausalImpactExplanation,
   GolfAnalysisResponse,
@@ -175,13 +175,13 @@ const getDisplayMiss = (text?: string | null): string => {
 const getFrameRange = (
   phaseKey: string,
   sequenceStages?: SequenceStageFeedback[],
-  manual?: { downswing?: number; impact?: number }
+  manual?: { downswing?: number[]; impact?: number[] }
 ): [number, number] | null => {
   try {
-    const manualDownswing = typeof manual?.downswing === 'number' ? manual.downswing : undefined;
-    const manualImpact = typeof manual?.impact === 'number' ? manual.impact : undefined;
-    if (phaseKey === 'downswing' && manualDownswing) return [manualDownswing, manualDownswing];
-    if (phaseKey === 'impact' && manualImpact) return [manualImpact, manualImpact];
+    const manualDownswing = Array.isArray(manual?.downswing) ? manual!.downswing : undefined;
+    const manualImpact = Array.isArray(manual?.impact) ? manual!.impact : undefined;
+    if (phaseKey === 'downswing' && manualDownswing?.length) return [manualDownswing[0], manualDownswing[manualDownswing.length - 1]];
+    if (phaseKey === 'impact' && manualImpact?.length) return [manualImpact[0], manualImpact[manualImpact.length - 1]];
 
     // sequenceStagesから実際のフェーズフレーム番号を取得
     if (sequenceStages && Array.isArray(sequenceStages) && sequenceStages.length > 0) {
@@ -244,7 +244,7 @@ const attachFrameRange = (
   comment: string,
   phaseKey: string,
   sequenceStages?: SequenceStageFeedback[],
-  manual?: { downswing?: number; impact?: number }
+  manual?: { downswing?: number[]; impact?: number[] }
 ): string => {
   try {
     const range = getFrameRange(phaseKey, sequenceStages, manual);
@@ -432,7 +432,7 @@ const GolfResultPage = () => {
   const [, setSelectedSwingType] = useState<SwingTypeKey | null>(null);
   const [expandedAlt, setExpandedAlt] = useState<SwingTypeKey | null>(null);
   const [highlightFrames, setHighlightFrames] = useState<number[]>([]);
-  const [manualPhase, setManualPhase] = useState<{ downswing?: number; impact?: number }>({});
+  const [manualPhase, setManualPhase] = useState<{ downswing?: number[]; impact?: number[] }>({});
   const [anonymousUserId, setAnonymousUserId] = useState<string | null>(null);
   const [previousHistory, setPreviousHistory] = useState<SwingAnalysisHistory | null>(null);
   const [hasSavedHistory, setHasSavedHistory] = useState(false);
@@ -1296,8 +1296,13 @@ const GolfResultPage = () => {
 
             <div className="flex flex-wrap items-center gap-2 rounded-lg border border-slate-800 bg-slate-950/40 px-3 py-2 text-xs text-slate-300">
               <span className="text-slate-400">手動指定:</span>
-              <span className="text-sky-200">ダウンスイング {manualPhase.downswing ? `#${manualPhase.downswing}` : '未設定'}</span>
-              <span className="text-rose-200">インパクト {manualPhase.impact ? `#${manualPhase.impact}` : '未設定'}</span>
+              <span className="text-sky-200">
+                ダウンスイング{' '}
+                {manualPhase.downswing?.length ? manualPhase.downswing.map((v) => `#${v}`).join(' / ') : '未設定'}
+              </span>
+              <span className="text-rose-200">
+                インパクト {manualPhase.impact?.length ? manualPhase.impact.map((v) => `#${v}`).join(' / ') : '未設定'}
+              </span>
               <button
                 type="button"
                 className="ml-auto rounded-md border border-slate-700 bg-slate-900/40 px-2 py-1 text-[11px] text-slate-200 hover:bg-slate-900/70"
@@ -1316,8 +1321,8 @@ const GolfResultPage = () => {
                 {sequenceFrames.map((frame, idx) => {
                   const frameNumber = idx + 1;
                   const highlighted = highlightFrames.includes(frameNumber);
-                  const isManualDownswing = manualPhase.downswing === frameNumber;
-                  const isManualImpact = manualPhase.impact === frameNumber;
+                  const isManualDownswing = manualPhase.downswing?.includes(frameNumber) ?? false;
+                  const isManualImpact = manualPhase.impact?.includes(frameNumber) ?? false;
                   return (
                     <div
                       key={`${frame.url}-${idx}`}
@@ -1368,22 +1373,22 @@ const GolfResultPage = () => {
                         className="flex-1 rounded-md border border-sky-600/50 bg-sky-950/40 px-2 py-1 text-[11px] text-sky-100 hover:bg-sky-900/30"
                         onClick={() => {
                           if (!data?.analysisId) return;
-                          const next = savePhaseOverride(data.analysisId, { downswing: frameNumber });
+                          const next = togglePhaseOverride(data.analysisId, { downswing: frameNumber });
                           setManualPhase({ downswing: next?.downswing, impact: next?.impact });
                         }}
                       >
-                        ダウンスイングにする
+                        {isManualDownswing ? 'ダウンスイング解除' : 'ダウンスイングにする'}
                       </button>
                       <button
                         type="button"
                         className="flex-1 rounded-md border border-rose-600/50 bg-rose-950/40 px-2 py-1 text-[11px] text-rose-100 hover:bg-rose-900/30"
                         onClick={() => {
                           if (!data?.analysisId) return;
-                          const next = savePhaseOverride(data.analysisId, { impact: frameNumber });
+                          const next = togglePhaseOverride(data.analysisId, { impact: frameNumber });
                           setManualPhase({ downswing: next?.downswing, impact: next?.impact });
                         }}
                       >
-                        インパクトにする
+                        {isManualImpact ? 'インパクト解除' : 'インパクトにする'}
                       </button>
                     </div>
                   </div>

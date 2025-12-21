@@ -12,19 +12,23 @@ import type {
 import { buildCoachContext } from '@/app/coach/utils/context';
 import {
   appendMessages,
+  clearMessages,
+  clearQuickRepliesDismissed,
   getOrCreateActiveThread,
   hasDismissedQuickReplies,
   isContextDisabled,
-  loadDetailMode,
+  loadDetailModePreference,
   loadBootstrapContext,
   loadCausalContext,
   loadMessages,
   loadThreadSummary,
+  loadVisionEnhanceMode,
   markQuickRepliesDismissed,
   saveDetailMode,
   saveCausalContext,
   saveThreadSummary,
   saveVisionMode,
+  saveVisionEnhanceMode,
   setContextDisabled,
   updateThreadMetadata,
 } from '@/app/coach/utils/storage';
@@ -43,11 +47,15 @@ import { useUserState } from '@/app/golf/state/userState';
 import { loadPhaseOverride } from '@/app/golf/utils/phaseOverrideStorage';
 
 const QUICK_REPLIES: CoachQuickReply[] = [
-  { key: 'cause-detail', label: '原因を詳しく知りたい', value: 'この原因がスコアにどう響くか、もう少し詳しく教えて。' },
+  { key: 'cause-detail', label: 'スイングの課題を知りたい', value: '私のスイングの課題を教えてください。' },
   { key: 'practice', label: '練習方法を具体的に知りたい', value: '次の練習で何を1つだけ意識すればいい？具体的なメニューで教えて。' },
   { key: 'checkpoint', label: '次の動画で何ができていればOK？', value: '次に動画を撮るとき、どこができていれば合格か教えて。' },
-  { key: 'other-factors', label: '他に考えられる要因は？', value: '他に考えられる要因があれば、優先度順に1つだけ教えて。' },
 ];
+
+const NO_DIAGNOSIS_MESSAGE =
+  'まずはスイング診断をしてください。「診断する」から動画をアップロードして、診断結果が出たらここで改善点を一緒に詰めましょう。';
+
+const DIAGNOSIS_INITIAL_MESSAGE = 'スイングにおける悩みをご相談ください。';
 
 const SYSTEM_PERSONA =
   'あなたはPGAティーチングプロ相当の専属AIゴルフコーチです。常に前向きで「褒めて伸ばす」スタンスで、まず良い点を1つ短く認めたうえで、改善テーマを1つに絞って指導してください。診断結果を踏まえ、専門用語（フェースtoパス、ダイナミックロフト、アタックアングル、シャローイング、Pポジション等）を積極的に使い、再現性の根拠（クラブパス/フェース/体の回旋/地面反力/リリース機序）まで踏み込んで説明してください。メインの改善テーマは1つに絞るが、そのテーマを深掘りして「なぜ起きるか」「どう確認するか」「どう矯正するか」を具体的に示します。';
@@ -157,19 +165,24 @@ const pickVisionFrames = (
 
   // When focusPhase is specified, never fill with unrelated stages.
   if (focusPhase) {
-    const manualIndex1Based =
-      focusPhase === 'downswing' ? manual?.downswing : focusPhase === 'impact' ? manual?.impact : undefined;
-    if (typeof manualIndex1Based === 'number') {
-      const idx = manualIndex1Based - 1;
-      if (idx >= 0 && idx < frames.length) {
-        return [
-          {
-            ...(frames[idx] as { url: string; timestampSec?: number }),
-            frameIndex: idx + 1,
-            label: `manual:${focusPhase}`,
-          },
-        ].filter((f) => typeof f?.url === 'string' && f.url.startsWith('data:image/'));
-      }
+    const manualIndices1Based =
+      focusPhase === 'downswing'
+        ? manual?.downswing
+        : focusPhase === 'impact'
+          ? manual?.impact
+          : undefined;
+    if (Array.isArray(manualIndices1Based) && manualIndices1Based.length) {
+      const pickedManual = manualIndices1Based
+        .map((n) => Math.round(n) - 1)
+        .filter((idx) => Number.isFinite(idx) && idx >= 0 && idx < frames.length)
+        .slice(0, max)
+        .map((idx) => ({
+          ...(frames[idx] as { url: string; timestampSec?: number }),
+          frameIndex: idx + 1,
+          label: `manual:${focusPhase}`,
+        }))
+        .filter((f) => typeof f?.url === 'string' && f.url.startsWith('data:image/'));
+      if (pickedManual.length) return pickedManual;
     }
 
     const [start1, end1] = phaseFrameRange1Based[focusPhase] ?? [1, Math.min(2, frames.length)];
@@ -227,13 +240,41 @@ const pickVisionFrames = (
     }
   }
 
-  return picked
+  // Always include manually-selected downswing/impact frames when available (even without focusPhase).
+  // If we already have max frames, manual selections should replace lower-priority picks.
+  const manualPriority: number[] = [];
+  const manualDownSet = new Set<number>();
+  const manualImpactSet = new Set<number>();
+  (manual?.downswing ?? []).forEach((n) => {
+    if (!Number.isFinite(n)) return;
+    const idx = Math.round(n) - 1;
+    if (idx >= 0 && idx < frames.length) {
+      manualPriority.push(idx);
+      manualDownSet.add(idx);
+    }
+  });
+  (manual?.impact ?? []).forEach((n) => {
+    if (!Number.isFinite(n)) return;
+    const idx = Math.round(n) - 1;
+    if (idx >= 0 && idx < frames.length) {
+      manualPriority.push(idx);
+      manualImpactSet.add(idx);
+    }
+  });
+  const manualUnique = Array.from(new Set(manualPriority));
+  const mergedPicked = manualUnique.length ? [...manualUnique, ...picked.filter((i) => !manualUnique.includes(i))] : picked;
+
+  return mergedPicked
     .slice(0, max)
     .sort((a, b) => a - b)
     .map((i) => ({
       ...(frames[i] as { url: string; timestampSec?: number }),
       frameIndex: i + 1,
-      label: stageByIndex.get(i) ?? undefined,
+      label: manualDownSet.has(i)
+        ? 'manual:downswing'
+        : manualImpactSet.has(i)
+          ? 'manual:impact'
+          : stageByIndex.get(i) ?? undefined,
     }))
     .filter((f) => typeof f?.url === 'string' && f.url.startsWith('data:image/'));
 };
@@ -241,24 +282,98 @@ const pickVisionFrames = (
 const detectFocusPhase = (text: string): 'address' | 'backswing' | 'top' | 'downswing' | 'impact' | 'finish' | null => {
   const t = (text || '').toLowerCase();
   if (!t.trim()) return null;
+
+  const matchAddress = /(アドレス|セットアップ|構え|setup|address)/i.test(text);
+  const matchBackswing = /(バックスイング|backswing|テークバック|テイクバック|takeaway)/i.test(text);
+  const matchTop = /(トップ|top|切り返し直前|捻転)/i.test(text);
+  const matchDownswing = /(ダウン|downswing|切り返し|下ろし|シャロー|シャロ|タメ|タメを作|リリースが早|力の開放)/i.test(text);
+  const matchImpact = /(インパクト|impact|当たり|ミート|打点|フェース|face|ロフト|ハンドファースト)/i.test(text);
+  const matchFinish = /(フィニッシュ|finish|フォロー|follow|振り抜き|回転が止|左肘|左肩|体が起き)/i.test(text);
+  const matchCount = [matchAddress, matchBackswing, matchTop, matchDownswing, matchImpact, matchFinish].filter(Boolean).length;
+
+  // If the user mentions multiple phases (e.g., downswing + impact), don't narrow; send a broader set of frames.
+  if (matchCount >= 2) return null;
+
   // Hand/handle position questions are typically about downswing slot/plane unless explicitly tied to another phase.
   if (/(手元|グリップ|ハンド)/i.test(text) && /(低|高|高さ|位置)/i.test(text)) {
-    if (/(アドレス|構え|setup|address)/i.test(text)) return 'address';
-    if (/(トップ|top|テークバック|テイクバック|backswing|バックスイング)/i.test(text)) return 'top';
-    if (/(インパクト|impact|当たり|ミート|打点)/i.test(text)) return 'impact';
-    if (/(フィニッシュ|finish|フォロー|follow)/i.test(text)) return 'finish';
+    if (matchAddress) return 'address';
+    if (matchTop || matchBackswing) return 'top';
+    if (matchImpact) return 'impact';
+    if (matchFinish) return 'finish';
     return 'downswing';
   }
-  if (/(アドレス|セットアップ|構え|setup|address)/i.test(text)) return 'address';
+
+  if (matchAddress) return 'address';
   // Treat backswing/ takeaway as a distinct phase unless the user explicitly asks about "top".
-  if (/(バックスイング|backswing|テークバック|テイクバック|takeaway)/i.test(text) && !/(トップ|top)/i.test(text)) {
-    return 'backswing';
-  }
-  if (/(トップ|top|切り返し直前|捻転)/i.test(text)) return 'top';
-  if (/(ダウン|downswing|切り返し|下ろし|シャロー|シャロ|タメ|タメを作|リリースが早|力の開放)/i.test(text)) return 'downswing';
-  if (/(インパクト|impact|当たり|ミート|打点|フェース|face|ロフト|ハンドファースト)/i.test(text)) return 'impact';
-  if (/(フィニッシュ|finish|フォロー|follow|振り抜き|回転が止|左肘|左肩|体が起き)/i.test(text)) return 'finish';
+  if (matchBackswing && !matchTop) return 'backswing';
+  if (matchTop) return 'top';
+  if (matchDownswing) return 'downswing';
+  if (matchImpact) return 'impact';
+  if (matchFinish) return 'finish';
   return null;
+};
+
+const cropVisionFrame = async (
+  url: string,
+  crop: { x: number; y: number; w: number; h: number },
+  maxOutWidth: number
+): Promise<string> => {
+  if (!url.startsWith('data:image/')) return url;
+  if (typeof window === 'undefined') return url;
+  try {
+    const img = new Image();
+    img.decoding = 'async';
+    const loaded = new Promise<void>((resolve, reject) => {
+      img.onload = () => resolve();
+      img.onerror = () => reject(new Error('failed_to_load_image'));
+    });
+    img.src = url;
+    await loaded;
+
+    const iw = img.naturalWidth || img.width;
+    const ih = img.naturalHeight || img.height;
+    if (!iw || !ih) return url;
+
+    const sx = Math.max(0, Math.min(iw - 1, Math.round(crop.x * iw)));
+    const sy = Math.max(0, Math.min(ih - 1, Math.round(crop.y * ih)));
+    const sw = Math.max(1, Math.min(iw - sx, Math.round(crop.w * iw)));
+    const sh = Math.max(1, Math.min(ih - sy, Math.round(crop.h * ih)));
+
+    // Preserve native crop resolution when possible (avoid upscaling that can look "blurred").
+    const targetW = Math.min(sw, Math.max(256, Math.round(maxOutWidth)));
+    const shouldScale = sw > targetW;
+    const ow = shouldScale ? targetW : sw;
+    const oh = shouldScale ? Math.round((sh * ow) / sw) : sh;
+
+    const canvas = document.createElement('canvas');
+    canvas.width = ow;
+    canvas.height = oh;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return url;
+    ctx.imageSmoothingEnabled = shouldScale;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(img, sx, sy, sw, sh, 0, 0, ow, oh);
+    // Keep quality high; avoid aggressive compression artifacts on small features like hands/clubface.
+    return canvas.toDataURL('image/jpeg', 0.95);
+  } catch {
+    return url;
+  }
+};
+
+const enhanceVisionFrames = async (
+  frames: Array<{ url: string; timestampSec?: number; label?: string; frameIndex?: number }>
+): Promise<Array<{ url: string; timestampSec?: number; label?: string; frameIndex?: number }>> => {
+  // Heuristic crop to remove side bars and increase effective pixel density around the golfer.
+  // Keep it slightly wider to avoid cutting arms/club on off-center recordings.
+  const crop = { x: 0.15, y: 0.0, w: 0.7, h: 1.0 };
+  const maxOutWidth = 1024;
+  return Promise.all(
+    frames.map(async (f) => ({
+      ...f,
+      url: await cropVisionFrame(f.url, crop, maxOutWidth),
+      label: f.label ? `${f.label}:crop` : 'crop',
+    }))
+  );
 };
 
 const phaseLabelJa = (phase: NonNullable<ReturnType<typeof detectFocusPhase>>): string => {
@@ -305,6 +420,11 @@ const resolveAnalysisIdFromMessages = (messages: CoachMessage[]): string | null 
   return found?.analysisId ?? null;
 };
 
+const hasMessageForAnalysisId = (messages: CoachMessage[], analysisId: string): boolean => {
+  if (!analysisId) return false;
+  return messages.some((m) => m.analysisId === analysisId);
+};
+
 const buildSummaryText = (context: CoachCausalImpactExplanation | null, messages: CoachMessage[]): string => {
   const latestAssistant = [...messages].filter((m) => m.role === 'assistant').slice(-2).map((m) => m.content).join(' / ');
   const latestUser = [...messages].filter((m) => m.role === 'user').slice(-2).map((m) => m.content).join(' / ');
@@ -318,6 +438,49 @@ const buildSummaryText = (context: CoachCausalImpactExplanation | null, messages
     .slice(0, 520);
 };
 
+const stripVisionDebugBlocks = (text: string): string => {
+  if (!text) return text;
+  const lines = String(text).split('\n');
+  const out: string[] = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i] ?? '';
+    const trimmed = line.trim();
+    if (trimmed.startsWith('送信フレーム:')) continue;
+    if (trimmed.startsWith('画像参照ログ')) {
+      // Skip until the first blank line after the block.
+      i += 1;
+      while (i < lines.length) {
+        if ((lines[i] ?? '').trim() === '') break;
+        i += 1;
+      }
+      continue;
+    }
+    out.push(line);
+  }
+  return out.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+};
+
+const replaceFrameIndexRefs = (
+  text: string,
+  frames: Array<{ frameIndex?: number; timestampSec?: number }>
+): string => {
+  if (!text) return text;
+  const tsMap = new Map<number, string>();
+  frames.forEach((f) => {
+    if (typeof f.frameIndex !== 'number') return;
+    const sec = typeof f.timestampSec === 'number' ? `${f.timestampSec.toFixed(2)}秒` : '';
+    tsMap.set(f.frameIndex, sec);
+  });
+  const toDisplay = (nStr: string) => {
+    const n = Number(nStr);
+    const sec = Number.isFinite(n) ? tsMap.get(n) : undefined;
+    return sec ? `#${n}(${sec})` : `#${nStr}`;
+  };
+  return String(text)
+    .replace(/frameIndex\(#(\d+)\)/g, (_, n) => toDisplay(String(n)))
+    .replace(/frameIndex（#(\d+)）/g, (_, n) => toDisplay(String(n)));
+};
+
 const CoachPage = () => {
   useMeUserState();
   const { state: userState } = useUserState();
@@ -325,9 +488,12 @@ const CoachPage = () => {
   const searchParams = useSearchParams();
   const chatRef = useRef<HTMLDivElement | null>(null);
   const seededContextRef = useRef(false);
+  const loadedThreadIdRef = useRef<string | null>(null);
 
   const swingTypeFromQuery = searchParams?.get('swingType') || '';
   const analysisIdFromQuery = searchParams?.get('analysisId') || '';
+  const debugUI = searchParams?.get('debug') === '1' || searchParams?.get('debugVision') === '1';
+  const debugVision = searchParams?.get('debugVision') === '1';
 
   const [userId, setUserId] = useState('');
   const [thread, setThread] = useState<CoachThread | null>(null);
@@ -336,6 +502,7 @@ const CoachPage = () => {
   const [contextReport, setContextReport] = useState<GolfAnalysisResponse | null>(null);
   const [detailMode, setDetailMode] = useState(false);
   const [visionMode, setVisionMode] = useState(false);
+  const [visionEnhanceMode, setVisionEnhanceMode] = useState(false);
   const [lastDebug, setLastDebug] = useState<{ model?: string; framesSent?: number; detailMode?: boolean } | null>(null);
   const [lastVisionFrames, setLastVisionFrames] = useState<Array<{ label?: string; timestampSec?: number; frameIndex?: number }>>(
     []
@@ -350,6 +517,7 @@ const CoachPage = () => {
   const [showQuickReplies, setShowQuickReplies] = useState(true);
   const sendingRef = useRef(false);
   const ensuredReportIdRef = useRef<string | null>(null);
+  const [serverHistoryIds, setServerHistoryIds] = useState<Set<string> | null>(null);
 
   const visibleMessages = useMemo(() => messages.slice(-visibleCount), [messages, visibleCount]);
 
@@ -402,23 +570,83 @@ const CoachPage = () => {
     setMessages(storedMessages);
     setSummary(loadThreadSummary(activeThread?.threadId ?? null));
     setShowQuickReplies(!hasDismissedQuickReplies(activeThread?.threadId ?? null));
-    setDetailMode(loadDetailMode(activeThread?.threadId ?? null));
+    const storedDetail = loadDetailModePreference(activeThread?.threadId ?? null);
+    const nextDetailMode = storedDetail ?? !!userState.hasProAccess;
+    setDetailMode(nextDetailMode);
+    if (activeThread?.threadId && storedDetail == null) {
+      saveDetailMode(activeThread.threadId, nextDetailMode);
+    }
     // Always keep vision mode ON for product behavior; images improve grounding and manual DS/IMP selection boosts trust.
     setVisionMode(true);
     if (activeThread?.threadId) saveVisionMode(activeThread.threadId, true);
-  }, [userState.userId, analysisIdFromQuery]);
+
+    // Vision enhance/crop mode: default OFF to match legacy behavior; can be toggled for experimentation.
+    const storedEnhance = loadVisionEnhanceMode(activeThread?.threadId ?? null);
+    setVisionEnhanceMode(storedEnhance);
+  }, [userState.userId, userState.hasProAccess, analysisIdFromQuery]);
+
+  useEffect(() => {
+    // Keep a server-truth set of diagnosis IDs for member accounts, and use it to filter stale local histories.
+    let cancelled = false;
+    if (!thread || !userId.startsWith('user:')) {
+      setServerHistoryIds(null);
+      return;
+    }
+    const run = async () => {
+      try {
+        const res = await fetch('/api/golf/history', { cache: 'no-store' });
+        if (!res.ok) return;
+        const json = (await res.json().catch(() => null)) as { items?: Array<{ id?: string }> } | null;
+        const ids = new Set<string>();
+        (json?.items ?? []).forEach((item) => {
+          if (typeof item?.id === 'string' && item.id.length > 0) ids.add(item.id);
+        });
+        if (!cancelled) setServerHistoryIds(ids);
+      } catch {
+        // ignore
+      }
+    };
+    void run();
+    return () => {
+      cancelled = true;
+    };
+  }, [thread, userId]);
+
+  useEffect(() => {
+    // If the account has a known server history set, hide (and delete) local chat messages for diagnoses not in that set.
+    if (!thread || !userId.startsWith('user:') || !serverHistoryIds) return;
+    const current = loadMessages(thread.threadId);
+    const filtered = current.filter((m) => !m.analysisId || serverHistoryIds.has(m.analysisId));
+    if (filtered.length === current.length) return;
+    clearMessages(thread.threadId);
+    const merged = filtered.length ? appendMessages(thread.threadId, filtered) : [];
+    setMessages(merged);
+  }, [serverHistoryIds, thread, userId]);
 
   useEffect(() => {
     if (!thread || !userId) return;
 
     let cancelled = false;
     const run = async () => {
+      // When switching identity/thread, clear previous diagnosis context immediately to avoid cross-account bleed.
+      if (loadedThreadIdRef.current !== thread.threadId) {
+        loadedThreadIdRef.current = thread.threadId;
+        seededContextRef.current = false;
+        ensuredReportIdRef.current = null;
+        setAnalysisContext(null);
+        setContextReport(null);
+        setError(null);
+        setIsLoading(true);
+      }
+
       const disabled = isContextDisabled(thread.threadId);
       setContextDisabledState(disabled);
 
       const applyContext = (ctx: CoachCausalImpactExplanation | null, report?: GolfAnalysisResponse | null) => {
         if (!ctx) {
           console.warn('[applyContext] ctx is null or undefined');
+          setAnalysisContext(null);
+          setContextReport(null);
           if (!cancelled) setIsLoading(false);
           return;
         }
@@ -555,9 +783,35 @@ const CoachPage = () => {
       const bootstrap = loadBootstrapContext(userId);
       const bootstrapReport = bootstrap?.analysisId ? getReportById(bootstrap.analysisId) : null;
 
+      const isMemberIdentity = userId.startsWith('user:');
+      const fetchMemberHistoryIds = async (): Promise<Set<string> | null> => {
+        if (!isMemberIdentity) return null;
+        try {
+          const res = await fetch('/api/golf/history', { cache: 'no-store' });
+          if (!res.ok) return null;
+          const json = (await res.json()) as { items?: Array<{ id?: string }> };
+          const ids = new Set<string>();
+          (json.items ?? []).forEach((item) => {
+            if (typeof item?.id === 'string' && item.id.length > 0) ids.add(item.id);
+          });
+          return ids;
+        } catch {
+          return null;
+        }
+      };
+
       // stored と bootstrap で analysisId が異なる場合は bootstrap を優先して上書き
       if (bootstrap && bootstrap.analysisId && storedContext?.analysisId !== bootstrap.analysisId) {
         applyContext(bootstrap, bootstrapReport);
+        setIsLoading(false);
+        return;
+      }
+
+      const memberHistoryIds = await fetchMemberHistoryIds();
+      if (isMemberIdentity && memberHistoryIds && memberHistoryIds.size === 0) {
+        // Logged-in account has no server history: do not fall back to anonymous/local reports.
+        setAnalysisContext(null);
+        setContextReport(null);
         setIsLoading(false);
         return;
       }
@@ -631,7 +885,33 @@ const CoachPage = () => {
       const active = getActiveAnalysisPointer();
       const activeReport = active?.analysisId ? getReportById(active.analysisId) : null;
       const latest = getMostRecentReportWithSequence() || getLatestReport();
-      const targetReport = bootstrapReport || activeReport || threadReport || recentReport || latest || null;
+
+      const isAllowedAnalysisId = (analysisId?: string | null): boolean => {
+        if (!analysisId) return false;
+        if (!isMemberIdentity) return true;
+        if (memberHistoryIds) return memberHistoryIds.has(analysisId);
+        // If history couldn't be fetched, only trust IDs already tied to this thread/user.
+        const safeIds = new Set<string>();
+        if (bootstrap?.analysisId) safeIds.add(bootstrap.analysisId);
+        if (storedContext?.analysisId) safeIds.add(storedContext.analysisId);
+        if (thread.lastAnalysisId) safeIds.add(thread.lastAnalysisId);
+        if (recentMessageId) safeIds.add(recentMessageId);
+        return safeIds.has(analysisId);
+      };
+
+      const pickAllowed = (report: GolfAnalysisResponse | null): GolfAnalysisResponse | null => {
+        if (!report?.result) return null;
+        return isAllowedAnalysisId(report.analysisId) ? report : null;
+      };
+
+      const targetReport =
+        pickAllowed(bootstrapReport) ||
+        pickAllowed(threadReport) ||
+        pickAllowed(recentReport) ||
+        // Global pointers (active/latest) are a source of cross-account mixing; only allow when server history confirms.
+        (memberHistoryIds ? pickAllowed(activeReport) : null) ||
+        (memberHistoryIds ? pickAllowed(latest) : null) ||
+        null;
 
       if (targetReport?.result) {
         const ctx = buildContextFromReport(targetReport);
@@ -641,6 +921,12 @@ const CoachPage = () => {
             setActiveAnalysisPointer(targetReport.analysisId, targetReport.createdAt);
           }
         }
+      }
+
+      if (!targetReport?.result && !cancelled) {
+        // Ensure a clean "no diagnosis" state instead of showing stale context.
+        setAnalysisContext(null);
+        setContextReport(null);
       }
 
       if (!cancelled) setIsLoading(false);
@@ -740,6 +1026,41 @@ const CoachPage = () => {
         setMessages(baseMessages);
       }
 
+      const hasDiagnosisNow = !!analysisContext?.analysisId;
+      if (!hasDiagnosisNow) {
+        clearMessages(thread.threadId);
+        const assistantMessage: CoachMessage = {
+          threadId: thread.threadId,
+          role: 'assistant',
+          content: NO_DIAGNOSIS_MESSAGE,
+          createdAt: new Date().toISOString(),
+        };
+        const merged = appendMessages(thread.threadId, [assistantMessage]);
+        setMessages(merged);
+        setShowQuickReplies(false);
+        sendingRef.current = false;
+        setSending(false);
+        setInput('');
+        return;
+      }
+
+      if (mode === 'initial' && !showUserMessage) {
+        const effectiveAnalysisId = analysisIdFromQuery || analysisContext?.analysisId;
+        const assistantMessage: CoachMessage = {
+          threadId: thread.threadId,
+          role: 'assistant',
+          content: DIAGNOSIS_INITIAL_MESSAGE,
+          createdAt: new Date().toISOString(),
+          analysisId: effectiveAnalysisId || undefined,
+        };
+        const merged = appendMessages(thread.threadId, [assistantMessage]);
+        setMessages(merged);
+        sendingRef.current = false;
+        setSending(false);
+        setInput('');
+        return;
+      }
+
       try {
         const recent = baseMessages.slice(-12);
         let reportForVision = contextReport;
@@ -747,7 +1068,12 @@ const CoachPage = () => {
         if (visionMode) {
           const active = getActiveAnalysisPointer();
           const desiredAnalysisId =
-            analysisIdFromQuery || active?.analysisId || analysisContext?.analysisId || thread.lastAnalysisId || null;
+            analysisIdFromQuery ||
+            analysisContext?.analysisId ||
+            thread.lastAnalysisId ||
+            // Avoid using global "active" pointer for member accounts; it can reference another diagnosis.
+            (!userId.startsWith('user:') ? active?.analysisId : null) ||
+            null;
 
           if (desiredAnalysisId && reportForVision?.analysisId !== desiredAnalysisId) {
             const local = getReportById(desiredAnalysisId);
@@ -795,8 +1121,24 @@ const CoachPage = () => {
           }
         }
         const phaseContextText = buildPhaseContextText(reportForVision, focusPhase);
-        const visionFrames = visionMode ? pickVisionFrames(reportForVision, 6, focusPhase) : [];
-        if (visionMode) {
+        const rawVisionFrames = visionMode ? pickVisionFrames(reportForVision, 6, focusPhase) : [];
+        const visionFrames = visionMode
+          ? visionEnhanceMode
+            ? await enhanceVisionFrames(rawVisionFrames)
+            : rawVisionFrames
+          : [];
+        const sentFramesMetaText =
+          debugVision && visionMode && visionFrames.length
+            ? `送信フレーム: ${visionFrames
+                .map((f, i) => {
+                  const label = f.label ? String(f.label) : `frame${i + 1}`;
+                  const idx = typeof f.frameIndex === 'number' ? `#${f.frameIndex}` : '#N/A';
+                  const ts = typeof f.timestampSec === 'number' ? `${f.timestampSec.toFixed(2)}s` : 'ts:N/A';
+                  return `${label}${idx}@${ts}`;
+                })
+                .join(' / ')}`
+            : null;
+        if (debugVision && visionMode) {
           setLastVisionFrames(
             visionFrames.map((f) => ({ label: f.label, timestampSec: f.timestampSec, frameIndex: f.frameIndex }))
           );
@@ -808,6 +1150,7 @@ const CoachPage = () => {
             mode,
             systemPersona: SYSTEM_PERSONA,
             detailMode,
+            debugVision,
             visionFrames,
             focusPhase,
             phaseContextText,
@@ -823,10 +1166,14 @@ const CoachPage = () => {
         });
         const data = (await res.json()) as { message?: string; debug?: { model?: string; framesSent?: number; detailMode?: boolean } };
         if (data?.debug) setLastDebug(data.debug);
+        const messageTextRaw = data?.message || '次のステップを準備中です。';
+        const messageText = replaceFrameIndexRefs(messageTextRaw, visionFrames);
+        const displayText = debugVision ? messageText : stripVisionDebugBlocks(messageText);
         const assistantMessage: CoachMessage = {
           threadId: thread.threadId,
           role: 'assistant',
-          content: data?.message || '次のステップを準備中です。',
+          content:
+            (sentFramesMetaText ? `${sentFramesMetaText}\n\n` : '') + displayText,
           createdAt: new Date().toISOString(),
           analysisId: (analysisIdFromQuery || analysisContext?.analysisId) || undefined,
         };
@@ -844,20 +1191,91 @@ const CoachPage = () => {
         setInput('');
       }
     },
-    [analysisContext, analysisIdFromQuery, contextReport, detailMode, summary?.summaryText, thread, updateSummary, visionMode]
+    [
+      analysisContext,
+      analysisIdFromQuery,
+      contextReport,
+      detailMode,
+      summary?.summaryText,
+      thread,
+      updateSummary,
+      userId,
+      debugVision,
+      visionEnhanceMode,
+      visionMode,
+    ]
   );
 
   useEffect(() => {
     if (!thread) return;
+    if (isLoading) return;
     const hasAssistant = messages.some((m) => m.role === 'assistant');
-    if (messages.length === 0 && !hasAssistant && !sendingRef.current) {
+    // Auto-seed only when a diagnosis context exists (otherwise we show a fixed guidance message without calling the API).
+    if (messages.length === 0 && !hasAssistant && !sendingRef.current && !!analysisContext?.analysisId) {
       void handleSend('', 'initial');
     }
-  }, [handleSend, messages, thread]);
+  }, [analysisContext?.analysisId, handleSend, isLoading, messages, thread]);
+
+  useEffect(() => {
+    if (!thread) return;
+    if (isLoading) return;
+    if (analysisContext?.analysisId) return;
+    // Replace any legacy chat content with a simple "diagnose first" guidance when there is no diagnosis.
+    const already =
+      messages.length === 1 && messages[0]?.role === 'assistant' && messages[0]?.content === NO_DIAGNOSIS_MESSAGE;
+    if (already) return;
+    clearMessages(thread.threadId);
+    const assistantMessage: CoachMessage = {
+      threadId: thread.threadId,
+      role: 'assistant',
+      content: NO_DIAGNOSIS_MESSAGE,
+      createdAt: new Date().toISOString(),
+    };
+    const merged = appendMessages(thread.threadId, [assistantMessage]);
+    setMessages(merged);
+    setShowQuickReplies(false);
+  }, [analysisContext?.analysisId, isLoading, messages, thread]);
+
+  useEffect(() => {
+    if (!thread) return;
+    if (isLoading) return;
+    if (!analysisContext?.analysisId) return;
+    const onlyNoDiagnosis =
+      messages.length === 1 && messages[0]?.role === 'assistant' && messages[0]?.content === NO_DIAGNOSIS_MESSAGE;
+    if (!onlyNoDiagnosis) return;
+    if (sendingRef.current) return;
+    // Diagnosis is now available, but the thread still shows the "no diagnosis" guidance message.
+    // Clear and regenerate the initial coach response based on the diagnosis context.
+    clearMessages(thread.threadId);
+    setMessages([]);
+    setShowQuickReplies(true);
+    void handleSend('', 'initial');
+  }, [analysisContext?.analysisId, handleSend, isLoading, messages, thread]);
+
+  useEffect(() => {
+    if (!thread) return;
+    if (isLoading) return;
+    const analysisId = analysisContext?.analysisId;
+    if (!analysisId) return;
+    if (sendingRef.current) return;
+    // Ensure the latest section is for the current diagnosis by seeding a simple initial prompt once per analysisId.
+    if (hasMessageForAnalysisId(messages, analysisId)) return;
+    clearQuickRepliesDismissed(thread.threadId);
+    setShowQuickReplies(true);
+    const assistantMessage: CoachMessage = {
+      threadId: thread.threadId,
+      role: 'assistant',
+      content: DIAGNOSIS_INITIAL_MESSAGE,
+      createdAt: new Date().toISOString(),
+      analysisId,
+    };
+    const merged = appendMessages(thread.threadId, [assistantMessage]);
+    setMessages(merged);
+  }, [analysisContext?.analysisId, isLoading, messages, thread]);
 
   const latestAssistantExists = messages.some((m) => m.role === 'assistant');
   const hasUserMessage = messages.some((m) => m.role === 'user');
-  const quickReplyVisible = showQuickReplies && latestAssistantExists && !hasUserMessage;
+  const quickReplyVisible = showQuickReplies && latestAssistantExists && !hasUserMessage && !!analysisContext?.analysisId;
 
   if (isLoading) {
     return (
@@ -896,6 +1314,7 @@ const CoachPage = () => {
     );
   }
 
+  const hasDiagnosis = !!analysisContext?.analysisId;
   const primaryFactor = analysisContext?.primaryFactor ?? 'スイング全般の改善';
   const primaryFactorDisplay = compactTheme(primaryFactor);
   const meta = contextReport?.meta ?? null;
@@ -909,55 +1328,106 @@ const CoachPage = () => {
         <header className="sticky top-0 z-10 rounded-2xl border border-slate-800 bg-slate-900/80 backdrop-blur px-4 py-3 shadow-lg shadow-emerald-500/10">
           <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
             <div className="space-y-1">
-              <p className="text-xs text-slate-400">🎯 現在の最重要テーマ</p>
-              <p
-                className="text-lg font-semibold text-emerald-100"
-                title={primaryFactor}
-                style={{
-                  display: '-webkit-box',
-                  WebkitLineClamp: 2,
-                  WebkitBoxOrient: 'vertical',
-                  overflow: 'hidden',
-                }}
-              >
-                {primaryFactorDisplay}
-              </p>
-              <div className="flex flex-wrap items-center gap-2 text-[11px] text-slate-400 mt-1">
-                <span className="px-2 py-1 rounded-full border border-slate-700 bg-slate-800/60">
-                  🧠 推定信頼度: {confidenceDisplay(analysisContext?.confidence)}
-                </span>
-                <span className="px-2 py-1 rounded-full border border-slate-700 bg-slate-800/60">
-                  スレッドID: {thread.threadId.slice(0, 8)}
-                </span>
-              </div>
-            </div>
-            <div className="flex flex-wrap items-center gap-2">
-              <button
-                type="button"
-                onClick={() => {
-                  const next = !detailMode;
-                  setDetailMode(next);
-                  saveDetailMode(thread.threadId, next);
-                }}
-                className={`flex items-center gap-1 rounded-lg border px-3 py-2 text-xs transition-colors ${
-                  detailMode
-                    ? 'border-emerald-500/60 bg-emerald-900/25 text-emerald-100 hover:bg-emerald-900/35'
-                    : 'border-slate-700 bg-slate-900/70 text-slate-200 hover:border-emerald-400/60 hover:text-emerald-100'
-                }`}
-                title={detailMode ? '精密（gpt-4o）で回答します' : '通常（gpt-4o-mini）で回答します'}
-              >
-                <span>{detailMode ? '🧠' : '💸'}</span>
-                <span>{detailMode ? '精密モード（gpt-4o / コスト↑）' : '通常モード（gpt-4o-mini / コスパ）'}</span>
-              </button>
-              <button
-                type="button"
-                disabled
-                className="flex items-center gap-1 rounded-lg border border-emerald-500/40 bg-emerald-900/15 px-3 py-2 text-xs text-emerald-100/90 cursor-not-allowed"
-                title="フレーム参照は常時ONです（最大6枚）"
-              >
-                <span>🖼️</span>
-                <span>フレーム参照ON（常時）</span>
-              </button>
+              {hasDiagnosis ? (
+                <>
+                  <p className="text-xs text-slate-400">🎯 現在の最重要テーマ</p>
+                  <p
+                    className="text-lg font-semibold text-emerald-100"
+                    title={primaryFactor}
+                    style={{
+                      display: '-webkit-box',
+                      WebkitLineClamp: 2,
+                      WebkitBoxOrient: 'vertical',
+                      overflow: 'hidden',
+                    }}
+                  >
+                    {primaryFactorDisplay}
+	                  </p>
+	                  {debugUI && (
+	                    <div className="flex flex-wrap items-center gap-2 text-[11px] text-slate-400 mt-1">
+	                      <span className="px-2 py-1 rounded-full border border-slate-700 bg-slate-800/60">
+	                        🧠 推定信頼度: {confidenceDisplay(analysisContext?.confidence)}
+	                      </span>
+	                      <span className="px-2 py-1 rounded-full border border-slate-700 bg-slate-800/60">
+	                        スレッドID: {thread.threadId.slice(0, 8)}
+	                      </span>
+	                    </div>
+	                  )}
+	                </>
+	              ) : (
+	                <>
+	                  <p className="text-xs text-slate-400">📝 診断結果がありません</p>
+	                  <p className="text-lg font-semibold text-slate-100">まずはスイング診断をアップロードしてください</p>
+	                  <div className="flex flex-wrap items-center gap-2 text-[11px] text-slate-400 mt-1">
+	                    <span className="px-2 py-1 rounded-full border border-slate-700 bg-slate-800/60">
+	                      この画面は一般的な相談もできます（診断ありの方が精度が上がります）
+	                    </span>
+	                    {debugUI && (
+	                      <span className="px-2 py-1 rounded-full border border-slate-700 bg-slate-800/60">
+	                        スレッドID: {thread.threadId.slice(0, 8)}
+	                      </span>
+	                    )}
+	                  </div>
+	                </>
+	              )}
+	            </div>
+	            <div className="flex flex-wrap items-center gap-2">
+              {!hasDiagnosis && (
+                <button
+                  type="button"
+                  onClick={() => router.push('/golf/upload')}
+                  className="flex items-center gap-1 rounded-lg border border-emerald-500/60 bg-emerald-900/25 px-3 py-2 text-xs text-emerald-100 hover:bg-emerald-900/35"
+                >
+	                  診断する
+	                </button>
+	              )}
+	              {debugUI && (
+	                <>
+	                  <button
+	                    type="button"
+	                    onClick={() => {
+	                      const next = !detailMode;
+	                      setDetailMode(next);
+	                      saveDetailMode(thread.threadId, next);
+	                    }}
+	                    className={`flex items-center gap-1 rounded-lg border px-3 py-2 text-xs transition-colors ${
+	                      detailMode
+	                        ? 'border-emerald-500/60 bg-emerald-900/25 text-emerald-100 hover:bg-emerald-900/35'
+	                        : 'border-slate-700 bg-slate-900/70 text-slate-200 hover:border-emerald-400/60 hover:text-emerald-100'
+	                    }`}
+	                    title={detailMode ? '精密（gpt-4o）で回答します' : '通常（gpt-4o-mini）で回答します'}
+	                  >
+	                    <span>{detailMode ? '🧠' : '💸'}</span>
+	                    <span>{detailMode ? '精密モード（gpt-4o / コスト↑）' : '通常モード（gpt-4o-mini / コスパ）'}</span>
+	                  </button>
+	                  <button
+	                    type="button"
+	                    disabled
+	                    className="flex items-center gap-1 rounded-lg border border-emerald-500/40 bg-emerald-900/15 px-3 py-2 text-xs text-emerald-100/90 cursor-not-allowed"
+	                    title="フレーム参照は常時ONです（最大6枚）"
+	                  >
+	                    <span>🖼️</span>
+	                    <span>フレーム参照ON（常時）</span>
+	                  </button>
+	                  <button
+	                    type="button"
+	                    onClick={() => {
+	                      const next = !visionEnhanceMode;
+	                      setVisionEnhanceMode(next);
+	                      if (thread?.threadId) saveVisionEnhanceMode(thread.threadId, next);
+	                    }}
+	                    className={`flex items-center gap-1 rounded-lg border px-3 py-2 text-xs transition-colors ${
+	                      visionEnhanceMode
+	                        ? 'border-emerald-500/60 bg-emerald-900/25 text-emerald-100 hover:bg-emerald-900/35'
+	                        : 'border-slate-700 bg-slate-900/70 text-slate-200 hover:border-emerald-400/60 hover:text-emerald-100'
+	                    }`}
+	                    title={visionEnhanceMode ? '画像をクロップ/補正して送信します（実験）' : '画像はそのまま送信します（従来）'}
+	                  >
+	                    <span>🧪</span>
+	                    <span>{visionEnhanceMode ? '画像補正ON' : '画像補正OFF'}</span>
+	                  </button>
+	                </>
+	              )}
               <button
                 type="button"
                 onClick={() => {
@@ -991,48 +1461,37 @@ const CoachPage = () => {
               </button>
             </div>
           </div>
-          <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-400">
-            <div className="flex flex-wrap items-center gap-2">
-              <span>
-                現在のコンテキスト:{' '}
-                {analysisContext?.analysisId
-                  ? `${analysisContext.analysisId}${analysisContext.analyzedAt ? ` / ${new Date(analysisContext.analyzedAt).toLocaleString('ja-JP')}` : ''}`
-                  : 'なし（一般相談モード）'}
-              </span>
-              {(metaHandedness || metaClub || metaLevel) && (
-                <span className="text-slate-500">
-                  {metaHandedness ? `${metaHandedness}` : ''}
-                  {metaClub ? `${metaHandedness ? ' / ' : ''}${metaClub}` : ''}
-                  {metaLevel ? `${metaHandedness || metaClub ? ' / ' : ''}${metaLevel}` : ''}
-                </span>
-              )}
-            </div>
-          </div>
-        </header>
+	          {debugUI && (
+	            <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-400">
+	              <div className="flex flex-wrap items-center gap-2">
+	                <span>
+	                  現在のコンテキスト:{' '}
+	                  {analysisContext?.analysisId
+	                    ? `${analysisContext.analysisId}${analysisContext.analyzedAt ? ` / ${new Date(analysisContext.analyzedAt).toLocaleString('ja-JP')}` : ''}`
+	                    : 'なし（一般相談モード）'}
+	                </span>
+	                {(metaHandedness || metaClub || metaLevel) && (
+	                  <span className="text-slate-500">
+	                    {metaHandedness ? `${metaHandedness}` : ''}
+	                    {metaClub ? `${metaHandedness ? ' / ' : ''}${metaClub}` : ''}
+	                    {metaLevel ? `${metaHandedness || metaClub ? ' / ' : ''}${metaLevel}` : ''}
+	                  </span>
+	                )}
+	              </div>
+	            </div>
+	          )}
+	        </header>
 
-        <section className="rounded-2xl border border-slate-800 bg-slate-900/70 shadow-xl shadow-emerald-500/10">
-          <div className="px-4 pt-4">
-            <div className="flex items-center justify-between text-xs text-slate-400">
-              <span>専属AIコーチとのスレッド</span>
-              {summary?.updatedAt && <span>要約更新: {new Date(summary.updatedAt).toLocaleString('ja-JP')}</span>}
-            </div>
-            {analysisContext?.swingTypeHeadline && (
-              <p className="mt-1 text-[11px] text-emerald-200">狙うスイングタイプ: {analysisContext.swingTypeHeadline}</p>
-            )}
-            {quickReplyVisible && (
-              <div className="mt-3 flex flex-wrap gap-2">
-                {QUICK_REPLIES.map((item) => (
-                  <button
-                    key={item.key}
-                    onClick={() => handleSend(item.value, 'chat', item.key)}
-                    className="rounded-full border border-emerald-500/40 bg-emerald-900/30 px-3 py-1 text-xs text-emerald-50 hover:bg-emerald-900/50 transition-colors"
-                  >
-                    {item.label}
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
+	        <section className="rounded-2xl border border-slate-800 bg-slate-900/70 shadow-xl shadow-emerald-500/10">
+	          <div className="px-4 pt-4">
+	            <div className="flex items-center justify-between text-xs text-slate-400">
+	              <span>専属AIコーチとのスレッド</span>
+	              {summary?.updatedAt && <span>要約更新: {new Date(summary.updatedAt).toLocaleString('ja-JP')}</span>}
+	            </div>
+	            {analysisContext?.swingTypeHeadline && (
+	              <p className="mt-1 text-[11px] text-emerald-200">狙うスイングタイプ: {analysisContext.swingTypeHeadline}</p>
+	            )}
+	          </div>
 
           <div className="mt-4 h-[65vh] sm:h-[70vh] overflow-y-auto px-4 pb-4 space-y-3" ref={chatRef}>
             {groupedSections.map((section, idx) => {
@@ -1056,13 +1515,35 @@ const CoachPage = () => {
                   </button>
                   {!isCollapsed && (
                     <div className="space-y-2">
-                      {section.messages.map((msg, messageIdx) => (
-                        <MessageBubble key={`${msg.createdAt}-${messageIdx}`} message={msg} />
-                      ))}
-                    </div>
-                  )}
-                </div>
-              );
+		                      {section.messages.map((msg, messageIdx) => {
+		                        const showInlineQuickReplies =
+		                          quickReplyVisible &&
+		                          idx === groupedSections.length - 1 &&
+		                          messageIdx === section.messages.length - 1 &&
+		                          msg.role === 'assistant';
+		                        return (
+		                          <div key={`${msg.createdAt}-${messageIdx}`} className="space-y-2">
+		                            <MessageBubble message={msg} debugVision={debugVision} />
+		                            {showInlineQuickReplies && (
+		                              <div className="flex flex-wrap gap-2">
+		                                {QUICK_REPLIES.map((item) => (
+		                                  <button
+		                                    key={item.key}
+	                                    onClick={() => handleSend(item.value, 'chat', item.key)}
+	                                    className="rounded-full border border-emerald-500/40 bg-emerald-900/30 px-3 py-1 text-xs text-emerald-50 hover:bg-emerald-900/50 transition-colors"
+	                                  >
+	                                    {item.label}
+	                                  </button>
+	                                ))}
+	                              </div>
+	                            )}
+	                          </div>
+	                        );
+	                      })}
+	                    </div>
+	                  )}
+	                </div>
+	              );
             })}
           </div>
 
@@ -1109,7 +1590,7 @@ const CoachPage = () => {
             <p className="mt-2 text-[11px] text-slate-500">
               1テーマに絞って相談すると精度が上がります。低信頼度の場合は「参考推定」として次回動画で再確認します。
             </p>
-            {visionMode && lastVisionFrames.length > 0 && (
+            {debugVision && visionMode && lastVisionFrames.length > 0 && (
               <p className="mt-1 text-[11px] text-slate-500">
                 送信フレーム:{' '}
                 {lastVisionFrames
@@ -1134,7 +1615,7 @@ const CoachPage = () => {
   );
 };
 
-const MessageBubble = ({ message }: { message: CoachMessage }) => {
+const MessageBubble = ({ message, debugVision }: { message: CoachMessage; debugVision: boolean }) => {
   const isAssistant = message.role === 'assistant';
   const isUser = message.role === 'user';
   const tone = isAssistant
@@ -1142,6 +1623,7 @@ const MessageBubble = ({ message }: { message: CoachMessage }) => {
     : isUser
       ? 'border-slate-700 bg-slate-800/70 text-slate-50'
       : 'border-slate-800 bg-slate-900/40 text-slate-400';
+  const content = debugVision ? message.content : stripVisionDebugBlocks(message.content);
 
   return (
     <div className={`rounded-xl border px-3 py-2 shadow-sm ${tone}`}>
@@ -1149,7 +1631,7 @@ const MessageBubble = ({ message }: { message: CoachMessage }) => {
         <span>{isAssistant ? 'AIコーチ' : isUser ? 'あなた' : 'システム'}</span>
         <span>{new Date(message.createdAt).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' })}</span>
       </div>
-      <p className="whitespace-pre-wrap text-sm leading-relaxed">{message.content}</p>
+      <p className="whitespace-pre-wrap text-sm leading-relaxed">{content}</p>
     </div>
   );
 };

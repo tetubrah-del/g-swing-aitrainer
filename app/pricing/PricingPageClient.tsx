@@ -8,6 +8,24 @@ import { useUserState } from "@/app/golf/state/userState";
 
 type BillingCycle = "monthly" | "yearly";
 
+type BillingStatusResponse = {
+  provider: "none" | "stripe" | "apple" | "google" | "revenuecat" | null;
+  subscriptionStatus: string | null;
+  billingInterval: "day" | "week" | "month" | "year" | null;
+  billingIntervalCount: number | null;
+};
+
+const resolveCurrentCycle = (status: BillingStatusResponse | null): BillingCycle | null => {
+  if (!status || status.provider !== "stripe") return null;
+  if (status.billingInterval === "year") return "yearly";
+  if (status.billingInterval === "month") {
+    const count = typeof status.billingIntervalCount === "number" && status.billingIntervalCount > 0 ? status.billingIntervalCount : 1;
+    if (count >= 12) return "yearly";
+    return "monthly";
+  }
+  return null;
+};
+
 export default function PricingPageClient() {
   const params = useSearchParams();
   const canceled = params?.get("canceled") === "1";
@@ -16,13 +34,34 @@ export default function PricingPageClient() {
   const [hydrated, setHydrated] = useState(false);
   const [cycle, setCycle] = useState<BillingCycle>("monthly");
   const [loading, setLoading] = useState(false);
+  const [portalLoading, setPortalLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [billingStatus, setBillingStatus] = useState<BillingStatusResponse | null>(null);
 
   const priceLabel = useMemo(() => (cycle === "yearly" ? "年額" : "月額"), [cycle]);
+  const currentCycle = useMemo(() => resolveCurrentCycle(billingStatus), [billingStatus]);
+  const isSubscribed = !!userState.hasProAccess && billingStatus?.provider === "stripe";
 
   useEffect(() => {
     setHydrated(true);
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!hydrated) return;
+    if (!userState.isAuthenticated) return;
+    fetch("/api/billing/status", { cache: "no-store" })
+      .then((r) => (r.ok ? r.json().catch(() => null) : null))
+      .then((data: BillingStatusResponse | null) => {
+        if (!cancelled) setBillingStatus(data);
+      })
+      .catch(() => {
+        if (!cancelled) setBillingStatus(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [hydrated, userState.isAuthenticated]);
 
   const startCheckout = useCallback(async () => {
     setLoading(true);
@@ -54,6 +93,46 @@ export default function PricingPageClient() {
     }
   }, [cycle]);
 
+  const openPortal = useCallback(async () => {
+    setPortalLoading(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/billing/portal", { method: "POST" });
+      const data = (await res.json().catch(() => ({}))) as { url?: string; error?: string };
+      if (!res.ok || !data.url) {
+        setError(data.error ?? "portal_failed");
+        return;
+      }
+      window.location.href = data.url;
+    } catch {
+      setError("portal_failed");
+    } finally {
+      setPortalLoading(false);
+    }
+  }, []);
+
+  const ctaLabel = useMemo(() => {
+    if (!hydrated) return "読み込み中...";
+    if (!userState.isAuthenticated) return "ログインして購入";
+    if (!isSubscribed) return `${priceLabel}で購入`;
+    if (currentCycle && currentCycle === cycle) return cycle === "yearly" ? "年額プランを利用中" : "月額プランを利用中";
+    return cycle === "yearly" ? "年額に切り替える" : "月額に切り替える";
+  }, [cycle, currentCycle, hydrated, isSubscribed, priceLabel, userState.isAuthenticated]);
+
+  const onPrimaryAction = useCallback(() => {
+    if (!hydrated) return;
+    if (!userState.isAuthenticated) return;
+    if (!isSubscribed) {
+      void startCheckout();
+      return;
+    }
+    // Switching plan / cancel should be managed in Stripe portal.
+    void openPortal();
+  }, [hydrated, isSubscribed, openPortal, startCheckout, userState.isAuthenticated]);
+
+  const monthlyToggleLabel = "月額プラン";
+  const yearlyToggleLabel = "年額プラン";
+
   return (
     <main className="min-h-screen bg-slate-950 text-slate-100">
       <div className="mx-auto max-w-3xl px-6 py-12">
@@ -84,7 +163,7 @@ export default function PricingPageClient() {
                     : "border-slate-700 bg-slate-950/30 text-slate-200"
                 }`}
               >
-                月額
+                {monthlyToggleLabel}
               </button>
               <button
                 type="button"
@@ -95,7 +174,7 @@ export default function PricingPageClient() {
                     : "border-slate-700 bg-slate-950/30 text-slate-200"
                 }`}
               >
-                年額
+                {yearlyToggleLabel}
               </button>
             </div>
           </div>
@@ -113,24 +192,35 @@ export default function PricingPageClient() {
                 disabled
                 className="rounded-xl bg-emerald-500 px-4 py-3 text-sm font-medium text-slate-950 opacity-60"
               >
-                読み込み中...
+                {ctaLabel}
               </button>
             ) : userState.isAuthenticated ? (
               <button
                 type="button"
-                disabled={loading}
-                onClick={startCheckout}
+                disabled={loading || portalLoading || (isSubscribed && currentCycle != null && currentCycle === cycle)}
+                onClick={onPrimaryAction}
                 className="rounded-xl bg-emerald-500 px-4 py-3 text-sm font-medium text-slate-950 hover:bg-emerald-400 disabled:opacity-60"
               >
-                {loading ? "処理中..." : `${priceLabel}で購入`}
+                {loading || portalLoading ? "処理中..." : ctaLabel}
               </button>
             ) : (
               <Link
                 href={`/golf/register?next=${encodeURIComponent("/pricing")}`}
                 className="rounded-xl bg-emerald-500 px-4 py-3 text-sm font-medium text-slate-950 hover:bg-emerald-400"
               >
-                ログインして購入
+                {ctaLabel}
               </Link>
+            )}
+
+            {hydrated && userState.isAuthenticated && isSubscribed && currentCycle != null && currentCycle === cycle && (
+              <button
+                type="button"
+                disabled={portalLoading}
+                onClick={openPortal}
+                className="rounded-xl border border-slate-700 bg-slate-950/30 px-4 py-3 text-sm text-slate-100 hover:border-emerald-400/60 disabled:opacity-60"
+              >
+                {portalLoading ? "開いています..." : "キャンセルはこちら"}
+              </button>
             )}
             {error && (
               <div className="text-xs text-rose-200">
