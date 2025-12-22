@@ -905,10 +905,9 @@ const GolfUploadPage = () => {
                 累計 {limitInfo.used} / {limitInfo.limit ?? 0} 回利用
               </span>
             </div>
-            {(limitInfo.remaining ?? 0) <= 1 && (
-              <p className="text-xs text-amber-200">
-                無料診断は上限に達しつつあります。PROなら診断回数は無制限で利用できます。
-              </p>
+            {(limitInfo.remaining ?? 0) === 1 && <p className="text-xs text-amber-200">無料診断は残り1回です。</p>}
+            {(limitInfo.remaining ?? 0) === 0 && (
+              <p className="text-xs text-amber-200">無料診断の利用回数は上限に達しました。</p>
             )}
             <div className="mt-2 flex flex-wrap gap-2">
               {!userState.isAuthenticated && (
@@ -920,10 +919,11 @@ const GolfUploadPage = () => {
                   登録して続ける
                 </button>
               )}
-              {userState.isAuthenticated && (
+              {userState.isAuthenticated && (limitInfo.remaining ?? 0) === 0 && (
                 <button
                   type="button"
                   className="rounded-md border border-emerald-200/60 bg-emerald-500/15 px-3 py-2 text-xs font-semibold text-emerald-50 hover:bg-emerald-500/25"
+                  onClick={() => router.push("/pricing")}
                 >
                   PROにアップグレード
                 </button>

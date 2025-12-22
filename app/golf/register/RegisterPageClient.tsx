@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useMemo, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { signIn } from "next-auth/react";
@@ -27,7 +27,13 @@ export default function RegisterPage() {
   const [error, setError] = useState<string | null>(null);
   const [sent, setSent] = useState(false);
   const [devLink, setDevLink] = useState<string | null>(null);
-  const anonymousUserId = useMemo(() => getAnonymousUserId(), []);
+  const [anonymousUserId, setAnonymousUserId] = useState<string>("");
+  const [hydrated, setHydrated] = useState(false);
+
+  useEffect(() => {
+    setHydrated(true);
+    setAnonymousUserId(getAnonymousUserId());
+  }, []);
 
   const handleEmailRegister = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -44,7 +50,7 @@ export default function RegisterPage() {
       const res = await fetch("/api/golf/register/email/request", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, anonymousUserId, next }),
+        body: JSON.stringify({ email, anonymousUserId: anonymousUserId || getAnonymousUserId(), next }),
       });
       const data = (await res.json().catch(() => ({}))) as { ok?: boolean; devLink?: string; error?: string };
       if (!res.ok || !data?.ok) {
@@ -72,8 +78,9 @@ export default function RegisterPage() {
       });
       const callbackUrl = buildRedirectTarget(next, "/golf/history");
       const url = new URL(callbackUrl, window.location.origin);
-      if (anonymousUserId) {
-        url.searchParams.set("anonymousUserId", anonymousUserId);
+      const anon = anonymousUserId || getAnonymousUserId();
+      if (anon) {
+        url.searchParams.set("anonymousUserId", anon);
       }
       await signIn("google", {
         callbackUrl: url.toString(),
@@ -98,7 +105,7 @@ export default function RegisterPage() {
             <h1 className="text-2xl sm:text-3xl font-semibold leading-tight">スイングの履歴を保存して、成長を可視化しよう</h1>
             <p className="text-sm text-slate-300">
               メール登録またはGoogleでの登録で、無料診断を合計3回まで利用でき、診断履歴・スコア推移をいつでも確認できます。
-              クレジットカードは不要です。
+              メール会員（無料）はクレジットカード不要。PROはクレジットカード決済でいつでも解約できます。
             </p>
           </div>
 
@@ -113,7 +120,7 @@ export default function RegisterPage() {
             </div>
             <div className="flex items-start gap-2">
               <span className="mt-1 h-2 w-2 rounded-full bg-emerald-400" />
-              <p>クレジットカード登録は不要</p>
+              <p>無料登録はクレジットカード不要（PROはクレジットカード決済）</p>
             </div>
           </div>
 
@@ -169,7 +176,9 @@ export default function RegisterPage() {
           </div>
 
           <div className="flex items-center justify-between text-xs text-slate-400 pt-2">
-            <span>匿名ID: {anonymousUserId.slice(0, 8)}…</span>
+            <span suppressHydrationWarning>
+              匿名ID: {(hydrated && anonymousUserId ? anonymousUserId.slice(0, 8) : "--------")}…
+            </span>
             <Link href={next && next.startsWith("/") ? next : "/golf/history"} className="text-emerald-300 underline underline-offset-4">
               戻る
             </Link>
