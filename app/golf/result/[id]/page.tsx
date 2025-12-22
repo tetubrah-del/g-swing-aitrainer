@@ -25,6 +25,7 @@ import { getAnonymousUserId, getSwingHistories, saveSwingHistory } from '@/app/g
 import { buildRuleBasedCausalImpact } from '@/app/golf/utils/causalImpact';
 import { saveSwingTypeResult } from '@/app/golf/utils/swingTypeStorage';
 import { useUserState } from '@/app/golf/state/userState';
+import ProUpsellModal from '@/app/components/ProUpsellModal';
 
 type SwingTypeBadge = {
   label: string;
@@ -438,6 +439,7 @@ const GolfResultPage = () => {
   const [hasSavedHistory, setHasSavedHistory] = useState(false);
   const [hasSeededCoachContext, setHasSeededCoachContext] = useState(false);
   const [fallbackNote, setFallbackNote] = useState<string | null>(null);
+  const [proModalOpen, setProModalOpen] = useState(false);
 
   useEffect(() => {
     const id = getAnonymousUserId();
@@ -1118,10 +1120,20 @@ const GolfResultPage = () => {
                 累計 {usageBanner.used} / {usageBanner.limit ?? 0} 回利用
               </span>
             </div>
-            {(usageBanner.remaining ?? 0) <= 1 && (
-              <p className="text-xs text-amber-200">
-                無料診断の上限が近づいています。PROなら診断回数は無制限で利用できます。
-              </p>
+            {(usageBanner.remaining ?? 0) === 1 && <p className="text-xs text-amber-200">無料診断は残り1回です。</p>}
+            {(usageBanner.remaining ?? 0) === 0 && (
+              <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
+                <p className="text-xs text-amber-200">無料診断の利用回数は上限に達しました。</p>
+                {userState.isAuthenticated && (
+                  <button
+                    type="button"
+                    className="rounded-md border border-emerald-200/60 bg-emerald-500/15 px-3 py-2 text-xs font-semibold text-emerald-50 hover:bg-emerald-500/25"
+                    onClick={() => router.push('/pricing')}
+                  >
+                    PROにアップグレード
+                  </button>
+                )}
+              </div>
             )}
           </div>
         )}
@@ -1138,7 +1150,7 @@ const GolfResultPage = () => {
             <p className="text-xs text-slate-400">総合スイングスコア</p>
             <p className="text-3xl font-bold mt-1">{result.totalScore}</p>
             <p className="text-xs text-slate-400 mt-1">（100点満点）</p>
-            {previousHistory && (
+            {userState.hasProAccess && previousHistory && (
               <div className="mt-3 space-y-1 text-xs text-slate-300">
                 <p>
                   前回{previousAnalyzedAt ? `（${previousAnalyzedAt}）` : ''}：{previousHistory.swingScore} 点
@@ -1150,6 +1162,20 @@ const GolfResultPage = () => {
                       : `今回 ${previousScoreDelta >= 0 ? '+' : ''}${previousScoreDelta} 点`}
                   </p>
                 )}
+              </div>
+            )}
+            {!userState.hasProAccess && previousHistory && (
+              <div className="mt-3 relative rounded-lg border border-slate-800 bg-slate-950/20 p-3 text-xs text-slate-300">
+                <div className="opacity-50 space-y-1">
+                  <p>前回との比較（PRO）</p>
+                  <p>前回比のスコア変化・改善点の比較は PRO で確認できます。</p>
+                </div>
+                <button
+                  type="button"
+                  className="absolute inset-0 rounded-lg"
+                  aria-label="PRO案内"
+                  onClick={() => setProModalOpen(true)}
+                />
               </div>
             )}
           </div>
@@ -1400,7 +1426,7 @@ const GolfResultPage = () => {
           </section>
         )}
 
-        {comparison && (comparison.improved.length > 0 || comparison.regressed.length > 0) && (
+        {userState.hasProAccess && comparison && (comparison.improved.length > 0 || comparison.regressed.length > 0) && (
           <section className="rounded-xl bg-slate-900/70 border border-slate-700 p-4 space-y-3">
             <h2 className="text-sm font-semibold">前回比 改善ポイント / 悪化ポイント</h2>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -1438,6 +1464,30 @@ const GolfResultPage = () => {
             </div>
           </section>
         )}
+
+        {!userState.hasProAccess && previousHistory && (
+          <section className="rounded-xl bg-slate-900/50 border border-slate-700 p-4 space-y-2 relative">
+            <div className="opacity-40">
+              <h2 className="text-sm font-semibold">前回比 改善ポイント / 悪化ポイント（PRO）</h2>
+              <p className="text-xs text-slate-300 mt-1">比較・推移は PRO で確認できます。</p>
+            </div>
+            <button
+              type="button"
+              className="absolute inset-0 rounded-xl"
+              aria-label="PRO案内"
+              onClick={() => setProModalOpen(true)}
+            />
+          </section>
+        )}
+
+        <ProUpsellModal
+          open={proModalOpen}
+          onClose={() => setProModalOpen(false)}
+          title="比較・推移はPROで確認できます"
+          message="履歴の推移グラフや前回比の比較が利用できます。"
+          ctaHref={userState.isAuthenticated ? '/pricing' : `/golf/register?next=${encodeURIComponent('/pricing')}`}
+          ctaLabel={userState.isAuthenticated ? 'PROにアップグレード' : '登録してPROを見る'}
+        />
 
         {/* フェーズごとの評価 */}
         <section className="rounded-xl bg-slate-900/70 border border-slate-700 p-4 space-y-4">

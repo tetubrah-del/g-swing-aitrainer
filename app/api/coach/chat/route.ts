@@ -1,6 +1,11 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import OpenAI from "openai";
 import { CoachChatRequest, CoachConfidenceLevel, CoachMessage } from "@/app/coach/types";
+import { auth } from "@/auth";
+import { readEmailSessionFromRequest } from "@/app/lib/emailSession";
+import { readActiveAuthFromRequest } from "@/app/lib/activeAuth";
+import { findUserByEmail, getUserById } from "@/app/lib/userStore";
+import { getFeatures } from "@/app/lib/features";
 
 export const runtime = "nodejs";
 
@@ -281,10 +286,46 @@ const buildFallback = (payload: CoachChatRequest) => {
   } ${question}`;
 };
 
-export async function POST(req: Request) {
+export async function POST(req: NextRequest) {
   try {
     const payload = (await req.json().catch(() => ({}))) as CoachChatRequest;
     const persona = payload.systemPersona || DEFAULT_PERSONA;
+
+    const emailSession = readEmailSessionFromRequest(req);
+    const activeAuth = readActiveAuthFromRequest(req) ?? (emailSession ? "email" : null);
+    let account = null;
+    if (activeAuth !== "email") {
+      const session = await auth();
+      const sessionUserId = session?.user?.id ?? null;
+      account = sessionUserId ? await getUserById(sessionUserId) : null;
+    }
+    if (!account && activeAuth !== "google" && emailSession) {
+      const byId = await getUserById(emailSession.userId);
+      if (
+        byId &&
+        byId.authProvider === "email" &&
+        byId.emailVerifiedAt != null &&
+        typeof byId.email === "string" &&
+        byId.email.toLowerCase() === emailSession.email.toLowerCase()
+      ) {
+        account = byId;
+      } else {
+        const byEmail = await findUserByEmail(emailSession.email);
+        if (byEmail && byEmail.authProvider === "email" && byEmail.emailVerifiedAt != null) {
+          account = byEmail;
+        }
+      }
+    }
+
+    const now = Date.now();
+    const isPro = !!account?.proAccess && (account.proAccessExpiresAt == null || account.proAccessExpiresAt > now);
+    const features = getFeatures({ remainingCount: null, isPro });
+    if (features.coach !== "free_chat") {
+      return NextResponse.json(
+        { message: "この機能はPROで利用できます。/pricing からアップグレードできます。" },
+        { status: 403 }
+      );
+    }
 
     if (!client.apiKey) {
       return NextResponse.json({ message: buildFallback(payload) }, { status: 200 });

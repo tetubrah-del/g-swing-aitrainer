@@ -6,6 +6,8 @@ import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { ResponsiveContainer, LineChart, Line, XAxis, YAxis, Tooltip, CartesianGrid } from "recharts";
 import { useUserState } from "@/app/golf/state/userState";
 import { useMeUserState } from "@/app/golf/hooks/useMeUserState";
+import { getFeatures } from "@/app/lib/features";
+import ProUpsellModal from "@/app/components/ProUpsellModal";
 
 type HistoryItem = {
   id: string;
@@ -13,16 +15,28 @@ type HistoryItem = {
   score: number | null;
   club: string | null;
   level: string | null;
+  keyImprovement?: string | null;
+  phaseRatings?: Record<"address" | "backswing" | "top" | "downswing" | "impact" | "finish", "good" | "needs_improvement"> | null;
 };
 
 type HistoryResponse = {
   items: HistoryItem[];
   access: "anonymous" | "member";
+  historyDepth?: "full" | "latest_only";
 };
 
 const formatDate = (ts: number) => {
   const d = new Date(ts);
   return Number.isFinite(d.getTime()) ? d.toLocaleString("ja-JP") : "";
+};
+
+const PHASE_LABELS: Record<keyof NonNullable<HistoryItem["phaseRatings"]>, string> = {
+  address: "アドレス",
+  backswing: "バックスイング",
+  top: "トップ",
+  downswing: "ダウン",
+  impact: "インパクト",
+  finish: "フィニッシュ",
 };
 
 export default function HistoryPage() {
@@ -35,6 +49,7 @@ export default function HistoryPage() {
   const pathname = usePathname();
   const searchParams = useSearchParams();
   const [showToast, setShowToast] = useState(false);
+  const [proModalOpen, setProModalOpen] = useState(false);
 
   useEffect(() => {
     const load = async () => {
@@ -105,6 +120,9 @@ export default function HistoryPage() {
   const isAnonymous = !isMember;
   const hasHistories = (data?.items.length ?? 0) > 0;
   const registerUrl = `/golf/register?next=${encodeURIComponent(pathname)}`;
+  const features = getFeatures({ remainingCount: userState.monthlyAnalysis?.remaining ?? null, isPro: userState.hasProAccess });
+  const isPro = features.historyDepth === "full";
+  const latest = data?.items?.[0] ?? null;
 
   return (
     <main className="min-h-screen bg-slate-950 text-slate-50 flex justify-center">
@@ -130,12 +148,25 @@ export default function HistoryPage() {
         </header>
 
         {!isAnonymous && hasHistories && (
-          <section className="rounded-xl bg-slate-900/70 border border-slate-800 p-4 space-y-3">
+          <section className="rounded-xl bg-slate-900/70 border border-slate-800 p-4 space-y-3 relative">
             <div className="flex items-center justify-between">
               <h2 className="text-sm font-semibold text-slate-100">スコア推移</h2>
-              <p className="text-xs text-slate-400">スコアと診断日で推移を確認できます。</p>
+              <p className="text-xs text-slate-400">
+                {isPro ? "スコアと診断日で推移を確認できます。" : "過去との比較・推移は PRO で確認できます"}
+              </p>
             </div>
-            <div className="h-64">
+            {!isPro && (
+              <div className="flex items-center justify-end">
+                <button
+                  type="button"
+                  onClick={() => setProModalOpen(true)}
+                  className="rounded-md border border-emerald-500/40 bg-emerald-900/10 px-3 py-2 text-xs font-semibold text-emerald-100 hover:bg-emerald-900/20"
+                >
+                  PROにアップグレード
+                </button>
+              </div>
+            )}
+            <div className={`h-64 ${isPro ? "" : "opacity-40"}`}>
               <ResponsiveContainer width="100%" height="100%">
                 <LineChart data={chartData}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#475569" />
@@ -149,6 +180,14 @@ export default function HistoryPage() {
                 </LineChart>
               </ResponsiveContainer>
             </div>
+            {!isPro && (
+              <button
+                type="button"
+                onClick={() => setProModalOpen(true)}
+                className="absolute inset-0 rounded-xl"
+                aria-label="PRO案内"
+              />
+            )}
           </section>
         )}
 
@@ -178,7 +217,7 @@ export default function HistoryPage() {
             </div>
           )}
 
-          {hasHistories && (
+          {hasHistories && isPro && (
             <div className="space-y-3">
               {data?.items.map((item) => (
                 <div
@@ -212,8 +251,101 @@ export default function HistoryPage() {
               ))}
             </div>
           )}
+
+          {hasHistories && !isPro && latest && (
+            <div className="space-y-3">
+              <div className="rounded-lg border border-slate-800 bg-slate-900/70 p-4 space-y-3">
+                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                  <div className="space-y-1">
+                    <p className="text-slate-100 text-sm font-semibold">{formatDate(latest.createdAt)}</p>
+                    <p className="text-xs text-slate-400">
+                      クラブ: {latest.club ?? "不明"} / レベル: {latest.level ?? "不明"}
+                    </p>
+                    {latest.keyImprovement && (
+                      <p className="text-xs text-slate-200">改善ポイント: {latest.keyImprovement}</p>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <p className="text-lg font-bold text-emerald-300">
+                      {latest.score !== null ? `${latest.score} 点` : "スコアなし"}
+                    </p>
+                    <Link
+                      href={`/golf/result/${latest.id}`}
+                      className="rounded-md border border-slate-700 px-3 py-2 text-sm text-slate-100 hover:border-emerald-400 hover:text-emerald-200"
+                    >
+                      結果を見る
+                    </Link>
+                    <Link
+                      href={`/coach?analysisId=${encodeURIComponent(latest.id)}`}
+                      className="rounded-md border border-slate-700 bg-slate-900/30 px-3 py-2 text-sm text-slate-100 hover:border-emerald-400/70"
+                    >
+                      AIコーチ
+                    </Link>
+                  </div>
+                </div>
+
+                {latest.phaseRatings && (
+                  <div className="flex flex-wrap gap-2 pt-1">
+                    {Object.entries(latest.phaseRatings).map(([key, value]) => (
+                      <div
+                        key={key}
+                        className={`rounded-full border px-3 py-1 text-xs ${
+                          value === "good"
+                            ? "border-emerald-500/40 bg-emerald-900/20 text-emerald-100"
+                            : "border-slate-700 bg-slate-950/30 text-slate-200"
+                        }`}
+                      >
+                        {PHASE_LABELS[key as keyof typeof PHASE_LABELS]}：{value === "good" ? "良い" : "要改善"}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <div className="rounded-lg border border-slate-800 bg-slate-900/40 p-4 relative">
+                <div className="opacity-40 space-y-2">
+                  <p className="text-sm font-semibold text-slate-100">過去の履歴一覧（PRO）</p>
+                  <p className="text-xs text-slate-300">
+                    PROなら推移グラフ・履歴の蓄積・前回比の比較ができ、AIコーチもフリーチャット＋診断画像参照で深掘りできます。
+                  </p>
+                  <div className="grid gap-2">
+                    {[0, 1].map((i) => (
+                      <div key={i} className="rounded-lg border border-slate-800 bg-slate-950/20 p-3 text-xs text-slate-300">
+                        過去の診断がここに表示されます
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                <div className="mt-3 flex justify-end">
+                  <button
+                    type="button"
+                    onClick={() => setProModalOpen(true)}
+                    className="rounded-md bg-emerald-500 px-3 py-2 text-sm font-semibold text-slate-950 hover:bg-emerald-400"
+                  >
+                    PROにアップグレード
+                  </button>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setProModalOpen(true)}
+                  className="absolute inset-0 rounded-lg"
+                  aria-label="PRO案内"
+                />
+                <p className="mt-2 text-xs text-slate-400">過去との比較・推移は PRO で確認できます</p>
+              </div>
+            </div>
+          )}
         </section>
       </div>
+
+      <ProUpsellModal
+        open={proModalOpen}
+        onClose={() => setProModalOpen(false)}
+        title="過去との比較・推移はPROで確認できます"
+        message="履歴一覧・推移グラフ・比較機能が利用できます。"
+        ctaHref={userState.isAuthenticated ? "/pricing" : `/golf/register?next=${encodeURIComponent("/pricing")}`}
+        ctaLabel={userState.isAuthenticated ? "PROにアップグレード" : "登録してPROを見る"}
+      />
     </main>
   );
 }

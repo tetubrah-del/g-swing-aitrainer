@@ -15,6 +15,10 @@ type BillingStatusResponse = {
   billingIntervalCount: number | null;
 };
 
+const MONTHLY_PRICE_JPY = 1980;
+const YEARLY_PRICE_JPY = 19800;
+const YEARLY_DISCOUNT_PERCENT = Math.round((1 - YEARLY_PRICE_JPY / (MONTHLY_PRICE_JPY * 12)) * 100);
+
 const resolveCurrentCycle = (status: BillingStatusResponse | null): BillingCycle | null => {
   if (!status || status.provider !== "stripe") return null;
   if (status.billingInterval === "year") return "yearly";
@@ -132,6 +136,7 @@ export default function PricingPageClient() {
 
   const monthlyToggleLabel = "月額プラン";
   const yearlyToggleLabel = "年額プラン";
+  const yearlyDiscountLabel = `約${YEARLY_DISCOUNT_PERCENT}%OFF`;
 
   return (
     <main className="min-h-screen bg-slate-950 text-slate-100">
@@ -210,6 +215,16 @@ export default function PricingPageClient() {
               >
                 {ctaLabel}
               </Link>
+            )}
+
+            {cycle === "yearly" ? (
+              <span className="rounded-full border border-emerald-400/40 bg-emerald-500/10 px-3 py-1 text-xs font-semibold text-emerald-200">
+                {yearlyDiscountLabel}
+              </span>
+            ) : (
+              <span className="rounded-full border border-slate-700 bg-slate-950/30 px-3 py-1 text-xs font-semibold text-slate-200">
+                年額なら{yearlyDiscountLabel}
+              </span>
             )}
 
             {hydrated && userState.isAuthenticated && isSubscribed && currentCycle != null && currentCycle === cycle && (
