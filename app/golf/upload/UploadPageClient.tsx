@@ -894,6 +894,14 @@ const GolfUploadPage = () => {
         <h1 className="text-2xl font-semibold text-center">
           AIゴルフスイング診断 – アップロード
         </h1>
+        <div className="flex justify-center">
+          <Link
+            href="/golf/upload-impact"
+            className="text-xs text-emerald-200/90 hover:text-emerald-100 underline underline-offset-4"
+          >
+            インパクトを手動指定して解析する（周辺16枚）
+          </Link>
+        </div>
 
         {!userState.hasProAccess && limitInfo && (
           <div className="rounded-lg border border-amber-400/60 bg-amber-500/10 px-4 py-3 text-sm text-amber-50 space-y-1">

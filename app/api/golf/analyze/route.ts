@@ -39,6 +39,7 @@ import {
 import { canPerform } from "@/app/lib/permissions";
 import { User, UserPlan } from "@/app/types/user";
 import { buildSwingStyleComment, detectSwingStyle, detectSwingStyleChange, SwingStyleType } from "@/app/lib/swing/style";
+import { extractSequenceFramesAroundImpact } from "@/app/lib/vision/extractSequenceFramesAroundImpact";
 
 const execFileAsync = promisify(execFile);
 
@@ -761,6 +762,204 @@ function computeHandPosition(pose?: Record<string, unknown> | null): { x: number
   return lw || rw || null;
 }
 
+async function extractPreviewFramesFromBuffer(params: {
+  buffer: Buffer;
+  mimeType: string;
+  maxFrames?: number;
+}): Promise<Array<PhaseFrame & { timestampSec?: number }>> {
+  const { buffer, mimeType, maxFrames = 48 } = params;
+
+  if (mimeType.startsWith("image/")) {
+    return [{ base64Image: buffer.toString("base64"), mimeType, timestampSec: 0 }];
+  }
+
+  if (!mimeType.startsWith("video/")) {
+    return [];
+  }
+
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "golf-preview-"));
+  const extension = mimeType.includes("/") ? `.${mimeType.split("/")[1]}` : ".mp4";
+  const inputPath = path.join(tempDir, `input${extension}`);
+
+  try {
+    await fs.writeFile(inputPath, buffer);
+    const duration = await getVideoDuration(inputPath);
+    if (duration > 7) {
+      throw new Error("Video duration exceeds limit (7 seconds)");
+    }
+
+    const targetCount = Math.max(2, Math.min(Math.floor(maxFrames), 60));
+    const safeEnd = Math.max(0, duration - 0.05);
+    const step = targetCount <= 1 ? 0 : (safeEnd - 0) / Math.max(targetCount - 1, 1);
+
+    const timestamps: number[] = [];
+    for (let i = 0; i < targetCount; i += 1) {
+      timestamps.push(Math.min(Math.max(0, i * step), safeEnd));
+    }
+
+    const outputs = timestamps.map((_, idx) => path.join(tempDir, `preview-${idx}.jpg`));
+    const concurrency = 6;
+    for (let i = 0; i < timestamps.length; i += concurrency) {
+      const slice = timestamps.slice(i, i + concurrency);
+      await Promise.all(slice.map((t, j) => extractFrameAt(inputPath, outputs[i + j], t)));
+    }
+
+    const jpegMime = "image/jpeg";
+    const frames: Array<PhaseFrame & { timestampSec?: number }> = [];
+    for (let i = 0; i < outputs.length; i += 1) {
+      try {
+        const fileBuf = await fs.readFile(outputs[i]);
+        frames.push({
+          base64Image: fileBuf.toString("base64"),
+          mimeType: jpegMime,
+          timestampSec: timestamps[i],
+        });
+      } catch {
+        // skip missing frames; continue
+      }
+    }
+
+    return frames;
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true }).catch(() => null);
+  }
+}
+
+function buildImpactAwareTimestamps(params: {
+  previewFrames: Array<{ timestampSec?: number }>;
+  impactIndex: number;
+  maxFrames?: number;
+}): number[] {
+  const { previewFrames, impactIndex, maxFrames = 16 } = params;
+  const limit = Number.isFinite(maxFrames) ? Math.max(1, Math.floor(maxFrames)) : 16;
+
+  const impact = previewFrames[Math.min(previewFrames.length - 1, Math.max(0, Math.floor(impactIndex)))];
+  const impactTime = typeof impact?.timestampSec === "number" && Number.isFinite(impact.timestampSec) ? impact.timestampSec : null;
+  if (impactTime == null) return [];
+
+  // Fine extraction window around impact (0.03s step):
+  // - pre: 3 frames (-0.15, -0.10, -0.05)
+  // - impact: 0
+  // - post: 1 frame (+0.05)
+  const offsets = [-0.15, -0.1, -0.05, 0, 0.05];
+  const fineTimes = offsets.map((o) => impactTime + o);
+
+  const key = (t: number) => Number(t.toFixed(3));
+  const fineKeySet = new Set(fineTimes.map(key));
+
+  // Avoid clustering near impact: besides the fine window, do not pick additional coarse frames
+  // within a small guard band around the impact time.
+  const guardStart = impactTime - 0.155;
+  const guardEnd = impactTime + 0.055;
+
+  const candidateTimes = previewFrames
+    .map((f) => f.timestampSec)
+    .filter((t): t is number => typeof t === "number" && Number.isFinite(t))
+    .filter((t) => t < guardStart || t > guardEnd)
+    .map(key);
+
+  const candidateUnique = Array.from(new Set(candidateTimes)).sort((a, b) => a - b);
+
+  const merged = new Set<number>();
+  fineTimes.map(key).forEach((t) => merged.add(t));
+  if (candidateUnique.length) {
+    merged.add(candidateUnique[0]);
+    merged.add(candidateUnique[candidateUnique.length - 1]);
+  }
+
+  const remainingSlots = Math.max(0, limit - merged.size);
+  if (remainingSlots > 0 && candidateUnique.length > 0) {
+    const remainingCandidates = candidateUnique.filter((t) => !merged.has(t) && !fineKeySet.has(t));
+    if (remainingCandidates.length > 0) {
+      const stride = (remainingCandidates.length - 1) / Math.max(remainingSlots - 1, 1);
+      for (let i = 0; i < remainingSlots; i += 1) {
+        const idx = Math.round(i * stride);
+        merged.add(remainingCandidates[Math.min(remainingCandidates.length - 1, idx)]);
+      }
+    }
+  }
+
+  // If we still exceed the limit due to edge cases, trim non-fine candidates while keeping edges.
+  const all = Array.from(merged).sort((a, b) => a - b);
+  if (all.length <= limit) return all;
+
+  const must = all.filter((t) => fineKeySet.has(t));
+  const edgeA = all[0];
+  const edgeB = all[all.length - 1];
+  const kept = new Set<number>([...must, edgeA, edgeB]);
+
+  const rest = all.filter((t) => !kept.has(t));
+  const slots = Math.max(0, limit - kept.size);
+  if (slots > 0 && rest.length > 0) {
+    const stride = (rest.length - 1) / Math.max(slots - 1, 1);
+    for (let i = 0; i < slots; i += 1) {
+      const idx = Math.round(i * stride);
+      kept.add(rest[Math.min(rest.length - 1, idx)]);
+    }
+  }
+
+  return Array.from(kept).sort((a, b) => a - b).slice(0, limit);
+}
+
+async function extractFramesAtTimestampsFromBuffer(params: {
+  buffer: Buffer;
+  mimeType: string;
+  timestampsSec: number[];
+}): Promise<Array<PhaseFrame & { timestampSec?: number }>> {
+  const { buffer, mimeType, timestampsSec } = params;
+
+  if (mimeType.startsWith("image/")) {
+    return [{ base64Image: buffer.toString("base64"), mimeType, timestampSec: 0 }];
+  }
+
+  if (!mimeType.startsWith("video/")) {
+    return [];
+  }
+
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "golf-ts-"));
+  const extension = mimeType.includes("/") ? `.${mimeType.split("/")[1]}` : ".mp4";
+  const inputPath = path.join(tempDir, `input${extension}`);
+
+  try {
+    await fs.writeFile(inputPath, buffer);
+    const duration = await getVideoDuration(inputPath);
+    if (duration > 7) {
+      throw new Error("Video duration exceeds limit (7 seconds)");
+    }
+
+    const safeEnd = Math.max(0, duration - 0.05);
+    const clamped = timestampsSec
+      .filter((t) => typeof t === "number" && Number.isFinite(t))
+      .map((t) => Math.min(Math.max(0, t), safeEnd));
+
+    const outputs = clamped.map((_, idx) => path.join(tempDir, `ts-${idx}.jpg`));
+    const concurrency = 6;
+    for (let i = 0; i < clamped.length; i += concurrency) {
+      const slice = clamped.slice(i, i + concurrency);
+      await Promise.all(slice.map((t, j) => extractFrameAt(inputPath, outputs[i + j], t)));
+    }
+
+    const jpegMime = "image/jpeg";
+    const frames: Array<PhaseFrame & { timestampSec?: number }> = [];
+    for (let i = 0; i < outputs.length; i += 1) {
+      try {
+        const fileBuf = await fs.readFile(outputs[i]);
+        frames.push({
+          base64Image: fileBuf.toString("base64"),
+          mimeType: jpegMime,
+          timestampSec: clamped[i],
+        });
+      } catch {
+        // skip missing frames; continue
+      }
+    }
+
+    return frames;
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true }).catch(() => null);
+  }
+}
+
 export async function POST(req: NextRequest) {
   try {
     const formData = await req.formData();
@@ -770,6 +969,9 @@ export async function POST(req: NextRequest) {
   const clubType = formData.get("clubType");
   const level = formData.get("level");
   const mode = formData.get("mode");
+    const previewOnlyRaw = formData.get("previewOnly");
+    const impactIndexRaw = formData.get("impactIndex");
+    const previewMaxFramesRaw = formData.get("previewMaxFrames");
     const previousAnalysisId = formData.get("previousAnalysisId");
     const previousReportJson = formData.get("previousReportJson");
     const phaseFramesJson = formData.get("phaseFramesJson");
@@ -779,6 +981,22 @@ export async function POST(req: NextRequest) {
     if (!(file instanceof File)) {
       return NextResponse.json({ error: "file is required" }, { status: 400 });
     }
+
+    const previewOnly =
+      previewOnlyRaw === "1" ||
+      previewOnlyRaw === "true" ||
+      previewOnlyRaw === "yes" ||
+      previewOnlyRaw === "on";
+
+    const parsedImpactIndex =
+      typeof impactIndexRaw === "string" && impactIndexRaw.trim().length ? Number(impactIndexRaw) : undefined;
+    const impactIndex = Number.isFinite(parsedImpactIndex) ? Math.floor(parsedImpactIndex!) : undefined;
+
+    const parsedPreviewMaxFrames =
+      typeof previewMaxFramesRaw === "string" && previewMaxFramesRaw.trim().length ? Number(previewMaxFramesRaw) : undefined;
+    const previewMaxFrames = Number.isFinite(parsedPreviewMaxFrames)
+      ? Math.max(20, Math.min(60, Math.floor(parsedPreviewMaxFrames!)))
+      : 48;
 
     let userCtx: UserContext;
     try {
@@ -790,6 +1008,26 @@ export async function POST(req: NextRequest) {
       throw error;
     }
     const { user, anonymousUserId, mintedAnonymousUserId } = userCtx;
+
+    if (previewOnly) {
+      const buffer = Buffer.from(await file.arrayBuffer());
+      const mimeType = file.type || "application/octet-stream";
+      const previewFrames = await extractPreviewFramesFromBuffer({ buffer, mimeType, maxFrames: previewMaxFrames });
+      const previewSequence: SequenceFrameInput[] = previewFrames.map((f) => ({
+        url: `data:${f.mimeType};base64,${f.base64Image}`,
+        timestampSec: f.timestampSec,
+      }));
+
+      const usageState = buildUsageStateFromUser(user, user.freeAnalysisCount ?? 0, anonymousUserId);
+      const res = NextResponse.json({ previewFrames: previewSequence, userState: usageState });
+      if (mintedAnonymousUserId) {
+        setAnonymousTokenOnResponse(res, mintedAnonymousUserId);
+      } else if (anonymousUserId) {
+        setAnonymousTokenOnResponse(res, anonymousUserId);
+      }
+      return res;
+    }
+
     const permission = canAnalyzeNow(user);
     // Quota tests: anonymous 1st OK, 2nd -> 429 anonymous_limit; free 3rd OK, 4th -> 429 free_limit; pro always OK.
     if (!permission.allowed) {
@@ -822,6 +1060,9 @@ export async function POST(req: NextRequest) {
       level: normalizedLevel,
       previousAnalysisId: typeof previousAnalysisId === "string" ? (previousAnalysisId as AnalysisId) : null,
     };
+    if (typeof impactIndex === "number") {
+      meta.impactIndex = impactIndex;
+    }
 
     let providedFrames: Partial<PhaseFrames> | null = null;
 
@@ -870,50 +1111,72 @@ export async function POST(req: NextRequest) {
     const extractedFrames = await extractPhaseFrames({ buffer, mimeType });
     const frames = mergePhaseFrames(providedFrames, extractedFrames);
 
-    let autoSequenceFrames: SequenceFrameInput[] = [];
-    try {
-    const seqFrames = await extractSequenceFramesFromBuffer({
-      buffer,
-      mimeType,
-      maxFrames: 16,
-      mode: mode === "beta" ? "beta" : "default",
-    });
-      autoSequenceFrames = seqFrames.map((f) => ({
-        url: `data:${f.mimeType};base64,${f.base64Image}`,
-        timestampSec: f.timestampSec,
-      }));
-    } catch (error) {
-      console.warn("[golf/analyze] failed to auto-extract sequence frames", error);
-      // fallback: use extracted phase frames as minimal sequence
-      autoSequenceFrames = PHASE_ORDER.map((phase) => {
-        const p = frames[phase];
-        return p
-          ? {
-              url: `data:${p.mimeType};base64,${p.base64Image}`,
-              timestampSec: p.timestampSec,
-            }
-          : null;
-      }).filter(Boolean) as SequenceFrameInput[];
-    }
-
     let sequenceFrames: SequenceFrameInput[] = [];
-    if (typeof sequenceFramesJson === "string") {
+    if (typeof impactIndex === "number") {
       try {
-        const parsed = JSON.parse(sequenceFramesJson) as Array<SequenceFrameInput>;
-        if (Array.isArray(parsed)) {
-          sequenceFrames = parsed
-            .filter((f) => f && typeof f === "object" && typeof f.url === "string")
-            .map((f) => ({
-              url: String(f.url),
-              timestampSec: typeof f.timestampSec === "number" ? f.timestampSec : undefined,
-            }));
+        const previewFrames = await extractPreviewFramesFromBuffer({ buffer, mimeType, maxFrames: 60 });
+        const timestampsSec = buildImpactAwareTimestamps({ previewFrames, impactIndex, maxFrames: 16 });
+        if (timestampsSec.length) {
+          const reExtracted = await extractFramesAtTimestampsFromBuffer({ buffer, mimeType, timestampsSec });
+          sequenceFrames = reExtracted.map((f) => ({
+            url: `data:${f.mimeType};base64,${f.base64Image}`,
+            timestampSec: f.timestampSec,
+          }));
+        } else {
+          const allFrames: SequenceFrameInput[] = previewFrames.map((f) => ({
+            url: `data:${f.mimeType};base64,${f.base64Image}`,
+            timestampSec: f.timestampSec,
+          }));
+          sequenceFrames = extractSequenceFramesAroundImpact(allFrames, impactIndex, 16);
         }
       } catch (error) {
-        console.warn("[golf/analyze] failed to parse sequenceFramesJson", error);
+        console.warn("[golf/analyze] failed to extract preview frames for impact selection", error);
       }
-    }
-    if (!sequenceFrames.length && autoSequenceFrames.length) {
-      sequenceFrames = autoSequenceFrames;
+    } else {
+      let autoSequenceFrames: SequenceFrameInput[] = [];
+      try {
+        const seqFrames = await extractSequenceFramesFromBuffer({
+          buffer,
+          mimeType,
+          maxFrames: 16,
+          mode: mode === "beta" ? "beta" : "default",
+        });
+        autoSequenceFrames = seqFrames.map((f) => ({
+          url: `data:${f.mimeType};base64,${f.base64Image}`,
+          timestampSec: f.timestampSec,
+        }));
+      } catch (error) {
+        console.warn("[golf/analyze] failed to auto-extract sequence frames", error);
+        // fallback: use extracted phase frames as minimal sequence
+        autoSequenceFrames = PHASE_ORDER.map((phase) => {
+          const p = frames[phase];
+          return p
+            ? {
+                url: `data:${p.mimeType};base64,${p.base64Image}`,
+                timestampSec: p.timestampSec,
+              }
+            : null;
+        }).filter(Boolean) as SequenceFrameInput[];
+      }
+
+      if (typeof sequenceFramesJson === "string") {
+        try {
+          const parsed = JSON.parse(sequenceFramesJson) as Array<SequenceFrameInput>;
+          if (Array.isArray(parsed)) {
+            sequenceFrames = parsed
+              .filter((f) => f && typeof f === "object" && typeof f.url === "string")
+              .map((f) => ({
+                url: String(f.url),
+                timestampSec: typeof f.timestampSec === "number" ? f.timestampSec : undefined,
+              }));
+          }
+        } catch (error) {
+          console.warn("[golf/analyze] failed to parse sequenceFramesJson", error);
+        }
+      }
+      if (!sequenceFrames.length && autoSequenceFrames.length) {
+        sequenceFrames = autoSequenceFrames;
+      }
     }
 
     let previousReport: SwingAnalysis | null = null;
@@ -997,9 +1260,10 @@ export async function POST(req: NextRequest) {
       parsed = parseMultiPhaseResponse(MOCK_GOLF_ANALYSIS_RESULT);
     }
 
-    const totalScore = Number.isFinite(parsed.totalScore)
-      ? parsed.totalScore
-      : phaseOrder.reduce((sum, phase) => sum + (parsed.phases[phase]?.score ?? 0), 0);
+    // Total score is derived deterministically from phase scores to reduce "same swing, different score" drift.
+    // Each phase score is 0-20 (6 phases => 120 max). Convert to 0-100.
+    const phaseScoreSum = phaseOrder.reduce((sum, phase) => sum + (parsed.phases[phase]?.score ?? 0), 0);
+    const totalScore = Math.max(0, Math.min(100, Math.round((phaseScoreSum / (phaseOrder.length * 20)) * 100)));
 
     const analysisId: AnalysisId =
       typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `golf-${Date.now()}`;

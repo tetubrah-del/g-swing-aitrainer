@@ -94,6 +94,8 @@ export function genPrompt(meta?: GolfAnalyzeMeta, previousReport?: SwingAnalysis
     "}",
     "",
     "【重要ルール】",
+    "- スコア（score）は今回のフレームの内容からの「絶対評価」にすること（previousReport に引っ張られて上下させない）。",
+    "- score は 6フェーズの各 score（0〜20）の合計を 120点満点として 100点満点に換算した値にすること：round((sumPhaseScore/120)*100)。",
     "- 画像は時系列で与えられる。stage は必ず以下の順序とキー名を使う：",
     "  address → address_to_backswing → backswing_to_top → top_to_downswing → downswing_to_impact → finish",
     "- keyFrameIndices が渡されたフレーム順序に基づくことを忘れない（不明なら空配列可）",
