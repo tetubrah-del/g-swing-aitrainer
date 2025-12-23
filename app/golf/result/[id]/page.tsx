@@ -176,11 +176,16 @@ const getDisplayMiss = (text?: string | null): string => {
 const getFrameRange = (
   phaseKey: string,
   sequenceStages?: SequenceStageFeedback[],
-  manual?: { downswing?: number[]; impact?: number[] }
+  manual?: { backswing?: number[]; top?: number[]; downswing?: number[]; impact?: number[] }
 ): [number, number] | null => {
   try {
+    const manualBackswing = Array.isArray(manual?.backswing) ? manual!.backswing : undefined;
+    const manualTop = Array.isArray(manual?.top) ? manual!.top : undefined;
     const manualDownswing = Array.isArray(manual?.downswing) ? manual!.downswing : undefined;
     const manualImpact = Array.isArray(manual?.impact) ? manual!.impact : undefined;
+    if (phaseKey === 'backswing' && manualBackswing?.length)
+      return [manualBackswing[0], manualBackswing[manualBackswing.length - 1]];
+    if (phaseKey === 'top' && manualTop?.length) return [manualTop[0], manualTop[manualTop.length - 1]];
     if (phaseKey === 'downswing' && manualDownswing?.length) return [manualDownswing[0], manualDownswing[manualDownswing.length - 1]];
     if (phaseKey === 'impact' && manualImpact?.length) return [manualImpact[0], manualImpact[manualImpact.length - 1]];
 
@@ -245,7 +250,7 @@ const attachFrameRange = (
   comment: string,
   phaseKey: string,
   sequenceStages?: SequenceStageFeedback[],
-  manual?: { downswing?: number[]; impact?: number[] }
+  manual?: { backswing?: number[]; top?: number[]; downswing?: number[]; impact?: number[] }
 ): string => {
   try {
     const range = getFrameRange(phaseKey, sequenceStages, manual);
@@ -256,6 +261,20 @@ const attachFrameRange = (
     console.error('[attachFrameRange] error:', err, { comment, phaseKey });
     return comment;
   }
+};
+
+const pickPreviousHistory = (ownerId: string, analysisId: string, currentTs: number): SwingAnalysisHistory | null => {
+  const toTime = (value: string): number => {
+    const ts = new Date(value).getTime();
+    return Number.isFinite(ts) ? ts : 0;
+  };
+  const histories = getSwingHistories(ownerId).filter((item) => item.analysisId !== analysisId);
+  if (!histories.length) return null;
+  if (currentTs > 0) {
+    const candidates = histories.filter((h) => toTime(h.createdAt) <= currentTs);
+    if (candidates.length) return candidates[0] ?? null;
+  }
+  return histories[0] ?? null;
 };
 
 const normalizeTextPool = (result: GolfAnalysisResponse['result']) => {
@@ -273,11 +292,13 @@ const deriveSwingTypes = (result: GolfAnalysisResponse['result']): SwingTypeBadg
     typeof keyword === 'string' ? pool.includes(keyword) : keyword.test(pool);
   const downswingScore = result.phases.downswing?.score ?? 0;
   const impactScore = result.phases.impact?.score ?? 0;
+  const topScore = result.phases.top?.score ?? 0;
 
   const badges: SwingTypeBadge[] = [];
 
   // 下半身主導型
-  if (downswingScore >= 14 || has(/下半身リード|腰の回転|体幹/)) {
+  // NOTE: some analyses describe lower-body lead as "体重移動" rather than explicitly "下半身リード".
+  if (downswingScore >= 14 || has(/下半身リード|腰の回転|体幹/) || (downswingScore >= 12 && has(/体重移動/))) {
     const confidence = Math.min(90, 50 + Math.round(((downswingScore + impactScore) / 40) * 50));
     badges.push({
       label: '下半身主導型',
@@ -299,7 +320,6 @@ const deriveSwingTypes = (result: GolfAnalysisResponse['result']): SwingTypeBadg
   }
 
   // ボディターン適性
-  const topScore = result.phases.top?.score ?? 0;
   const bodyTurnScore = (downswingScore + topScore) / 2;
   if (bodyTurnScore >= 10 || has(/ボディターン|体の回転/)) {
     const value = bodyTurnScore >= 14 ? '高' : bodyTurnScore >= 11 ? '中' : '低';
@@ -309,6 +329,17 @@ const deriveSwingTypes = (result: GolfAnalysisResponse['result']): SwingTypeBadg
       positive: value !== '低',
       reason:
         'トップからダウンで肩と腰の回転が連動しやすく、体幹主導で振り抜けています。体幹で回転を作れているので、手元の暴れが少なく、軌道とフェース向きの再現性を高めやすい傾向です。',
+    });
+  }
+
+  // トップの安定性（クラブ位置の再現性）
+  if (has(/クラブの位置が不安定|トップ.*不安定/)) {
+    badges.push({
+      label: 'トップ安定性',
+      value: '低',
+      positive: false,
+      reason:
+        'トップ付近でクラブの位置が揃いにくく、切り返し以降の軌道やフェース向きが毎回同じになりにくい傾向があります。トップの再現性が上がるほど、スイング全体の安定につながります。',
     });
   }
 
@@ -324,7 +355,7 @@ const deriveSwingTypes = (result: GolfAnalysisResponse['result']): SwingTypeBadg
   }
 
   // リズム/テンポ傾向
-  if (has(/リズム|テンポ|滑らか/)) {
+  if (has(/リズム|テンポ|滑らか|スムーズ/)) {
     badges.push({
       label: 'リズムが滑らか',
       positive: true,
@@ -433,7 +464,10 @@ const GolfResultPage = () => {
   const [, setSelectedSwingType] = useState<SwingTypeKey | null>(null);
   const [expandedAlt, setExpandedAlt] = useState<SwingTypeKey | null>(null);
   const [highlightFrames, setHighlightFrames] = useState<number[]>([]);
-  const [manualPhase, setManualPhase] = useState<{ downswing?: number[]; impact?: number[] }>({});
+  const [manualPhase, setManualPhase] = useState<{ backswing?: number[]; top?: number[]; downswing?: number[]; impact?: number[] }>({});
+  const [isPhaseReevalLoading, setIsPhaseReevalLoading] = useState(false);
+  const [phaseReevalError, setPhaseReevalError] = useState<string | null>(null);
+  const [phaseOverrideAppliedSig, setPhaseOverrideAppliedSig] = useState<string | null>(null);
   const [anonymousUserId, setAnonymousUserId] = useState<string | null>(null);
   const [previousHistory, setPreviousHistory] = useState<SwingAnalysisHistory | null>(null);
   const [hasSavedHistory, setHasSavedHistory] = useState(false);
@@ -544,12 +578,26 @@ const GolfResultPage = () => {
     setActiveAnalysisPointer(record.analysisId, record.createdAt);
   }, [data]);
 
+  const currentResultCreatedAtTs = useMemo(() => {
+    const createdAtSource = data?.result?.createdAt ?? data?.createdAt ?? null;
+    if (!createdAtSource) return 0;
+    const ts =
+      typeof createdAtSource === "number"
+        ? createdAtSource
+        : typeof createdAtSource === "string"
+          ? new Date(createdAtSource).getTime()
+          : 0;
+    return Number.isFinite(ts) ? ts : 0;
+  }, [data?.createdAt, data?.result?.createdAt]);
+
   useEffect(() => {
-    if (!anonymousUserId || !data?.analysisId) return;
-    const histories = getSwingHistories(anonymousUserId);
-    const prev = histories.find((item) => item.analysisId !== data.analysisId) ?? null;
-    setPreviousHistory(prev);
-  }, [anonymousUserId, data?.analysisId]);
+    const ownerId = userState.userId ?? anonymousUserId;
+    if (!ownerId || !data?.analysisId) {
+      setPreviousHistory(null);
+      return;
+    }
+    setPreviousHistory(pickPreviousHistory(ownerId, data.analysisId, currentResultCreatedAtTs));
+  }, [anonymousUserId, currentResultCreatedAtTs, data?.analysisId, userState.userId]);
 
   const handleRetry = () => {
     clearActiveAnalysisPointer();
@@ -602,30 +650,30 @@ const GolfResultPage = () => {
       return {
         label: '上級',
         detail:
-          '完成度が高く、安定した再現性が期待できます。細部のフェース管理と球筋コントロールを磨けば競技レベルでも通用します。下半身リードとトップの静止をキープしつつ、セットアップの精度を日々確認するとさらに安定度が上がります。',
+          '全体の完成度が高く、動きの再現性が高いスイングです。良い点は、切り返し以降の体幹の回転が途切れにくく、インパクトでの当たり負けが少ないことです。一方で、わずかなフェース向きのズレやリリースのタイミング差が球筋に出やすく、弾道のばらつき要因になりやすい傾向があります。',
       };
     if (score >= 70)
       return {
         label: '中上級',
         detail:
-          '全体のバランスは良好で、再現性も高い段階です。トップからダウンの切り返しでクラブをスムーズに落とし、インパクトでのフェース向きを安定させると一気に上級域へ近づきます。ルーティンの質とテンポ管理を強化しましょう。',
+          '全体のバランスが良く、スイングの形が崩れにくいタイプです。良い点は、トップ〜ダウンの動きが比較的スムーズで、ミート率につながる“体とクラブの同調”が見えやすいことです。課題は、切り返し付近でクラブの落ち方／フェース向きが一定になりきらず、方向性のブレが残りやすい点です。',
       };
     if (score >= 55)
       return {
         label: '中級',
         detail:
-          '基本は安定しており、リズムと軌道の精度を上げることで大きく伸びます。アドレスの重心とトップのクラブポジションを毎回揃えることが次のステップです。切り返しで手先が暴れないよう、下半身主導のイメージを持ちましょう。',
+          '基本動作は安定しており、スイングの形としては十分にまとまっています。良い点は、アドレス〜トップまでの流れが大きく破綻せず、振り抜きまでのリズムが作れていることです。課題は、毎回の重心位置やトップ位置にわずかな差が出やすく、その影響が切り返し以降のクラブ軌道／フェース向きのばらつきとして現れやすい点です。',
       };
     if (score >= 40)
       return {
         label: '初級',
         detail:
-          '姿勢とテンポの基礎づくりを強化するタイミングです。アドレスの前傾とグリッププレッシャーを一定にし、ハーフスイングでフェース向きとコンタクトを安定させる練習がおすすめです。体重移動のリズムをゆっくり身につけましょう。',
+          'スイングは成立しており、形の方向性も見えています。良い点は、フィニッシュまで振り切ろうとする意識があり、動作が途中で止まりにくいことです。課題は、アドレスの姿勢（前傾・重心）やグリップの一定感が揺れやすく、インパクトで当たり所とフェース向きが安定しにくい点です。',
       };
     return {
       label: 'ビギナー',
       detail:
-        'まずはアドレスとリズムの基礎を固める段階です。スタンス幅、前傾角、グリップを毎回揃え、ハーフスイングで芯に当てる感覚を作りましょう。重心を左右に大きく動かさず、一定のテンポで振り抜くことを意識すると次のステップに進みやすくなります。',
+        'スイングの骨格を作っている段階で、動きの再現性はこれから伸びるタイプです。良い点は、クラブを振る動作自体はできており、改善に必要な“基準の形”を作れる余地が大きいことです。課題は、アドレス姿勢とテンポが毎回変わりやすく、トップ位置やインパクトの当たり所が揃いにくい点です。',
     };
   }, [data?.result?.totalScore]);
 
@@ -934,9 +982,7 @@ const GolfResultPage = () => {
     };
 
     saveSwingHistory(history);
-    const histories = getSwingHistories(ownerId);
-    const prev = histories.find((item) => item.analysisId !== history.analysisId) ?? null;
-    setPreviousHistory(prev);
+    setPreviousHistory(pickPreviousHistory(ownerId, history.analysisId, new Date(history.createdAt).getTime()));
     setHasSavedHistory(true);
   }, [
     anonymousUserId,
@@ -1001,8 +1047,67 @@ const GolfResultPage = () => {
     if (!data?.analysisId) return;
     const stored = loadPhaseOverride(data.analysisId);
     if (!stored) return;
-    setManualPhase({ downswing: stored.downswing, impact: stored.impact });
+    setManualPhase({ backswing: stored.backswing, top: stored.top, downswing: stored.downswing, impact: stored.impact });
   }, [data?.analysisId]);
+
+  const phaseOverrideSig = useMemo(() => {
+    const bs = (manualPhase.backswing ?? []).join(",");
+    const top = (manualPhase.top ?? []).join(",");
+    const ds = (manualPhase.downswing ?? []).join(",");
+    const imp = (manualPhase.impact ?? []).join(",");
+    if (!bs && !top && !ds && !imp) return "";
+    return `bs:${bs}|top:${top}|ds:${ds}|imp:${imp}`;
+  }, [manualPhase.backswing, manualPhase.downswing, manualPhase.impact, manualPhase.top]);
+
+  useEffect(() => {
+    if (!data?.analysisId || typeof window === "undefined") return;
+    const key = `golf_phase_override_applied_${data.analysisId}`;
+    setPhaseOverrideAppliedSig(window.localStorage.getItem(key));
+  }, [data?.analysisId]);
+
+  const runPhaseReeval = async () => {
+    if (!data?.analysisId) return;
+    const backswing = manualPhase.backswing ?? [];
+    const top = manualPhase.top ?? [];
+    const downswing = manualPhase.downswing ?? [];
+    const impact = manualPhase.impact ?? [];
+    if (!backswing.length && !top.length && !downswing.length && !impact.length) return;
+
+    try {
+      setIsPhaseReevalLoading(true);
+      setPhaseReevalError(null);
+      const res = await fetch("/api/golf/reanalyze-phases", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ analysisId: data.analysisId, backswing, top, downswing, impact }),
+      });
+      const json = (await res.json().catch(() => null)) as GolfAnalysisResponse | { error?: string } | null;
+      if (!res.ok) {
+        const message =
+          (json && typeof json === "object" && "error" in json && json.error) || "再評価に失敗しました";
+        throw new Error(message);
+      }
+      if (!json || typeof json !== "object" || !("result" in json)) {
+        throw new Error("invalid response");
+      }
+      const next = json as GolfAnalysisResponse;
+      if (typeof window !== "undefined") {
+        const key = `golf_phase_override_applied_${data.analysisId}`;
+        window.localStorage.setItem(key, phaseOverrideSig);
+        setPhaseOverrideAppliedSig(phaseOverrideSig);
+      }
+      setData(next);
+      if (next.result) {
+        setSwingTypes(deriveSwingTypes(next.result));
+        setSwingTypeResult(deriveSwingTypeResult(next.result));
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "再評価に失敗しました";
+      setPhaseReevalError(message);
+    } finally {
+      setIsPhaseReevalLoading(false);
+    }
+  };
 
   // ▼ early return は Hooks の後に置く
   if (isLoading) {
@@ -1048,6 +1153,19 @@ const GolfResultPage = () => {
   const previousAnalyzedAt =
     previousHistory?.createdAt ? new Date(previousHistory.createdAt).toLocaleString('ja-JP') : null;
   const usageBanner = !userState.hasProAccess ? userState.monthlyAnalysis : null;
+  const shouldShowPhaseEvaluation =
+    sequenceFrames.length === 0 ||
+    (!!manualPhase.downswing?.length &&
+      !!manualPhase.impact?.length &&
+      phaseOverrideSig.length > 0 &&
+      phaseOverrideSig === phaseOverrideAppliedSig);
+  const autoBackswingRange = getFrameRange('backswing', sequenceStages, undefined);
+  const autoTopRange = getFrameRange('top', sequenceStages, undefined);
+  const showAutoPhaseWarning =
+    sequenceFrames.length > 0 &&
+    (!manualPhase.backswing?.length || !manualPhase.top?.length) &&
+    ((autoBackswingRange != null && (autoBackswingRange[0] === 1 || autoBackswingRange[1] - autoBackswingRange[0] >= 3)) ||
+      (autoTopRange != null && (autoTopRange[0] === 1 || autoTopRange[1] - autoTopRange[0] >= 3)));
 
   return (
     <main className="min-h-screen bg-slate-950 text-slate-50 flex justify-center">
@@ -1154,6 +1272,9 @@ const GolfResultPage = () => {
             <p className="text-xs text-slate-400">総合スイングスコア</p>
             <p className="text-3xl font-bold mt-1">{result.totalScore}</p>
             <p className="text-xs text-slate-400 mt-1">（100点満点）</p>
+            <p className="text-[11px] text-slate-500 mt-1">
+              ※同じ動画でも、AIの推定誤差やフレーム抽出の差で数点ブレる場合があります
+            </p>
             {userState.hasProAccess && previousHistory && (
               <div className="mt-3 space-y-1 text-xs text-slate-300">
                 <p>
@@ -1184,16 +1305,9 @@ const GolfResultPage = () => {
             )}
           </div>
           <div className="rounded-xl bg-slate-900/70 border border-slate-700 p-4 sm:col-span-2">
-            <p className="text-xs text-slate-400">推奨ドリル</p>
-            {result.recommendedDrills && result.recommendedDrills.length > 0 ? (
-              <ul className="list-disc pl-5 space-y-1 text-sm mt-2">
-                {result.recommendedDrills.map((drill, i) => (
-                  <li key={i}>{drill}</li>
-                ))}
-              </ul>
-            ) : (
-              <p className="text-sm text-slate-300 mt-2">ドリル情報がありません。</p>
-            )}
+            <p className="text-xs text-slate-400">推定レベル診断</p>
+            <p className="text-xl font-semibold mt-1">{levelEstimate.label}</p>
+            <p className="text-sm text-slate-300 mt-1">{levelEstimate.detail}</p>
           </div>
         </section>
 
@@ -1248,13 +1362,9 @@ const GolfResultPage = () => {
           ) : (
             <p className="text-sm text-slate-300">因果チェーンを準備中です。</p>
           )}
-          <p className="text-[11px] text-slate-500">
-            {causalImpact?.note ?? '数値は推定です。最重要の1点のみ表示しています。'}
-            {causalImpact?.confidence === 'low' ? '（参考表示）' : ''}
-          </p>
         </section>
 
-        {/* 推定ラウンドスコア＆レベル診断 */}
+        {/* 推定ラウンドスコア＆推奨ドリル */}
         <section className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div className="rounded-xl bg-slate-900/70 border border-slate-700 p-4">
             <p className="text-xs text-slate-400">推定ラウンドスコア</p>
@@ -1267,9 +1377,16 @@ const GolfResultPage = () => {
             </div>
           </div>
           <div className="rounded-xl bg-slate-900/70 border border-slate-700 p-4">
-            <p className="text-xs text-slate-400">推定レベル診断</p>
-            <p className="text-xl font-semibold mt-1">{levelEstimate.label}</p>
-            <p className="text-sm text-slate-300 mt-1">{levelEstimate.detail}</p>
+            <p className="text-xs text-slate-400">推奨ドリル</p>
+            {result.recommendedDrills && result.recommendedDrills.length > 0 ? (
+              <ul className="list-disc pl-5 space-y-1 text-sm mt-2">
+                {result.recommendedDrills.map((drill, i) => (
+                  <li key={i}>{drill}</li>
+                ))}
+              </ul>
+            ) : (
+              <p className="text-sm text-slate-300 mt-2">ドリル情報がありません。</p>
+            )}
           </div>
         </section>
 
@@ -1327,8 +1444,18 @@ const GolfResultPage = () => {
               </span>
             </div>
 
-            <div className="flex flex-wrap items-center gap-2 rounded-lg border border-slate-800 bg-slate-950/40 px-3 py-2 text-xs text-slate-300">
+            <div
+              id="manual-phase-selector"
+              className="flex flex-wrap items-center gap-2 rounded-lg border border-slate-800 bg-slate-950/40 px-3 py-2 text-xs text-slate-300"
+            >
               <span className="text-slate-400">手動指定:</span>
+              <span className="text-violet-200">
+                バックスイング{' '}
+                {manualPhase.backswing?.length ? manualPhase.backswing.map((v) => `#${v}`).join(' / ') : '未設定'}
+              </span>
+              <span className="text-amber-200">
+                トップ {manualPhase.top?.length ? manualPhase.top.map((v) => `#${v}`).join(' / ') : '未設定'}
+              </span>
               <span className="text-sky-200">
                 ダウンスイング{' '}
                 {manualPhase.downswing?.length ? manualPhase.downswing.map((v) => `#${v}`).join(' / ') : '未設定'}
@@ -1338,22 +1465,49 @@ const GolfResultPage = () => {
               </span>
               <button
                 type="button"
+                disabled={
+                  isPhaseReevalLoading ||
+                  (!manualPhase.backswing?.length &&
+                    !manualPhase.top?.length &&
+                    !manualPhase.downswing?.length &&
+                    !manualPhase.impact?.length)
+                }
+                className="rounded-md border border-emerald-700/50 bg-emerald-950/25 px-2 py-1 text-[11px] text-emerald-100 hover:bg-emerald-900/30 disabled:opacity-60"
+                onClick={() => void runPhaseReeval()}
+                title="手動指定したフレームを使って、フェーズ評価コメントを再計算します"
+              >
+                {isPhaseReevalLoading ? '再評価中…' : 'この指定で再評価'}
+              </button>
+              <button
+                type="button"
                 className="ml-auto rounded-md border border-slate-700 bg-slate-900/40 px-2 py-1 text-[11px] text-slate-200 hover:bg-slate-900/70"
                 onClick={() => {
                   if (!data?.analysisId) return;
                   clearPhaseOverride(data.analysisId);
                   setManualPhase({});
+                  if (typeof window !== "undefined") {
+                    window.localStorage.removeItem(`golf_phase_override_applied_${data.analysisId}`);
+                  }
+                  setPhaseOverrideAppliedSig(null);
                 }}
               >
                 リセット
               </button>
             </div>
+            {phaseReevalError && <p className="text-xs text-rose-300">再評価エラー: {phaseReevalError}</p>}
+            {showAutoPhaseWarning && (
+              <p className="text-xs text-amber-200">
+                バックスイング/トップの抽出がズレている可能性があります（自動目安: BS {autoBackswingRange ? `#${autoBackswingRange[0]}〜#${autoBackswingRange[1]}` : 'N/A'} / TOP {autoTopRange ? `#${autoTopRange[0]}〜#${autoTopRange[1]}` : 'N/A'}）。必要ならBS/TOPも手動指定して再評価してください。
+              </p>
+            )}
 
             {sequenceFrames.length > 0 && (
               <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
                 {sequenceFrames.map((frame, idx) => {
                   const frameNumber = idx + 1;
                   const highlighted = highlightFrames.includes(frameNumber);
+                  const isManualBackswing = manualPhase.backswing?.includes(frameNumber) ?? false;
+                  const isManualTop = manualPhase.top?.includes(frameNumber) ?? false;
                   const isManualDownswing = manualPhase.downswing?.includes(frameNumber) ?? false;
                   const isManualImpact = manualPhase.impact?.includes(frameNumber) ?? false;
                   return (
@@ -1379,6 +1533,16 @@ const GolfResultPage = () => {
                             IMP
                           </span>
                         )}
+                        {isManualBackswing && (
+                          <span className="rounded px-1.5 py-0.5 text-[10px] border border-violet-500/60 text-violet-200 bg-violet-900/20">
+                            BS
+                          </span>
+                        )}
+                        {isManualTop && (
+                          <span className="rounded px-1.5 py-0.5 text-[10px] border border-amber-500/60 text-amber-200 bg-amber-900/20">
+                            TOP
+                          </span>
+                        )}
                       </div>
                       {typeof frame.timestampSec === 'number' && <span>{frame.timestampSec.toFixed(2)}s</span>}
                     </div>
@@ -1400,28 +1564,50 @@ const GolfResultPage = () => {
                         className="h-full w-full object-contain bg-slate-950"
                       />
                     </div>
-                    <div className="flex items-center gap-2">
+                    <div className="grid grid-cols-2 gap-2">
                       <button
                         type="button"
-                        className="flex-1 rounded-md border border-sky-600/50 bg-sky-950/40 px-2 py-1 text-[11px] text-sky-100 hover:bg-sky-900/30"
+                        className="rounded-md border border-sky-600/50 bg-sky-950/40 px-2 py-1 text-[11px] text-sky-100 hover:bg-sky-900/30"
                         onClick={() => {
                           if (!data?.analysisId) return;
                           const next = togglePhaseOverride(data.analysisId, { downswing: frameNumber });
-                          setManualPhase({ downswing: next?.downswing, impact: next?.impact });
+                          setManualPhase({ backswing: next?.backswing, top: next?.top, downswing: next?.downswing, impact: next?.impact });
                         }}
                       >
                         {isManualDownswing ? 'ダウンスイング解除' : 'ダウンスイングにする'}
                       </button>
                       <button
                         type="button"
-                        className="flex-1 rounded-md border border-rose-600/50 bg-rose-950/40 px-2 py-1 text-[11px] text-rose-100 hover:bg-rose-900/30"
+                        className="rounded-md border border-rose-600/50 bg-rose-950/40 px-2 py-1 text-[11px] text-rose-100 hover:bg-rose-900/30"
                         onClick={() => {
                           if (!data?.analysisId) return;
                           const next = togglePhaseOverride(data.analysisId, { impact: frameNumber });
-                          setManualPhase({ downswing: next?.downswing, impact: next?.impact });
+                          setManualPhase({ backswing: next?.backswing, top: next?.top, downswing: next?.downswing, impact: next?.impact });
                         }}
                       >
                         {isManualImpact ? 'インパクト解除' : 'インパクトにする'}
+                      </button>
+                      <button
+                        type="button"
+                        className="rounded-md border border-violet-600/50 bg-violet-950/40 px-2 py-1 text-[11px] text-violet-100 hover:bg-violet-900/30"
+                        onClick={() => {
+                          if (!data?.analysisId) return;
+                          const next = togglePhaseOverride(data.analysisId, { backswing: frameNumber });
+                          setManualPhase({ backswing: next?.backswing, top: next?.top, downswing: next?.downswing, impact: next?.impact });
+                        }}
+                      >
+                        {isManualBackswing ? 'BS解除' : 'バックスイングにする'}
+                      </button>
+                      <button
+                        type="button"
+                        className="rounded-md border border-amber-600/50 bg-amber-950/40 px-2 py-1 text-[11px] text-amber-100 hover:bg-amber-900/30"
+                        onClick={() => {
+                          if (!data?.analysisId) return;
+                          const next = togglePhaseOverride(data.analysisId, { top: frameNumber });
+                          setManualPhase({ backswing: next?.backswing, top: next?.top, downswing: next?.downswing, impact: next?.impact });
+                        }}
+                      >
+                        {isManualTop ? 'TOP解除' : 'トップにする'}
                       </button>
                     </div>
                   </div>
@@ -1497,6 +1683,7 @@ const GolfResultPage = () => {
         />
 
         {/* フェーズごとの評価 */}
+        {shouldShowPhaseEvaluation ? (
         <section className="rounded-xl bg-slate-900/70 border border-slate-700 p-4 space-y-4">
           <h2 className="text-sm font-semibold">フェーズ別評価</h2>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -1513,14 +1700,37 @@ const GolfResultPage = () => {
               }
 
               // データの安全性を再確認
-              const safeGood = Array.isArray(data.good) ? data.good : [];
-              const safeIssues = Array.isArray(data.issues) ? data.issues : [];
-              const safeAdvice = Array.isArray(data.advice) ? data.advice : [];
+	              const safeGood = Array.isArray(data.good) ? data.good : [];
+	              const safeIssues = Array.isArray(data.issues) ? data.issues : [];
+	              const safeAdvice = Array.isArray(data.advice) ? data.advice : [];
+	
+	              const swingStyle = result.swingStyle;
+	              const swingStyleChange = result.swingStyleChange;
+	              const shouldShowSwingStyleComment =
+	                !!swingStyle &&
+	                !!swingStyleChange &&
+	                swingStyle.confidence !== 'low' &&
+	                swingStyleChange.change !== 'unchanged' &&
+	                swingStyleChange.change !== 'unclear';
+	
+	              const swingStyleCommentText = (() => {
+	                if (!shouldShowSwingStyleComment) return null;
+	                if (key === 'top' && swingStyleChange?.current === 'torso-dominant') {
+	                  return `トップでは、腕だけで上げる動きから\n胸の回転を使った形に変わりつつあります。\n切り返し以降の動きと噛み合うと安定感が増します。`;
+	                }
+	                if (key === 'downswing' && swingStyleChange?.change === 'improving') {
+	                  return `ダウンスイングでは、\n手先ではなく胸の回転でクラブを下ろそうとする意識が見られます。\nまだタイミングにばらつきがありますが、方向性としては良い変化です。`;
+	                }
+	                if (key === 'impact' && swingStyleChange?.current === 'torso-dominant' && data.score < 15) {
+	                  return `インパクトでは胸の回転を使った形に移行していますが、\nフェース管理がまだ安定しきっていません。\n動き自体は正しいため、再現性を高める段階です。`;
+	                }
+	                return null;
+	              })();
 
-              return (
-                <div key={key} className="rounded-lg border border-slate-800 bg-slate-950/60 p-3 space-y-2">
-                  <div className="flex items-center justify-between">
-                    <p className="text-sm font-semibold">{label}</p>
+	              return (
+	                <div key={key} className="rounded-lg border border-slate-800 bg-slate-950/60 p-3 space-y-2">
+	                  <div className="flex items-center justify-between">
+	                    <p className="text-sm font-semibold">{label}</p>
                     <span className="text-xs text-slate-300">スコア：{data.score}/20</span>
                   </div>
                   <div>
@@ -1565,14 +1775,17 @@ const GolfResultPage = () => {
                           console.error('[phaseList] error rendering issues item:', err, { key, i, b });
                           return <li key={i}>{String(b || '')}</li>;
                         }
-                      })}
-                    </ul>
-                  </div>
-                  <div>
-                    <p className="text-xs text-slate-400">アドバイス</p>
-                    <ul className="list-disc pl-4 text-sm space-y-1">
-                      {safeAdvice.map((adv, i) => {
-                        try {
+	                      })}
+	                    </ul>
+	                  </div>
+	                  {swingStyleCommentText && (
+	                    <p className="text-sm text-slate-300 mt-2 whitespace-pre-line">{swingStyleCommentText}</p>
+	                  )}
+	                  <div>
+	                    <p className="text-xs text-slate-400">アドバイス</p>
+	                    <ul className="list-disc pl-4 text-sm space-y-1">
+	                      {safeAdvice.map((adv, i) => {
+	                        try {
                           const text = attachFrameRange(String(adv || ''), key, sequenceStages, manualPhase);
                           return (
                             <li
@@ -1605,6 +1818,26 @@ const GolfResultPage = () => {
             })}
           </div>
         </section>
+        ) : (
+          <section className="rounded-xl bg-slate-900/70 border border-slate-700 p-4 space-y-3">
+            <h2 className="text-sm font-semibold">フェーズ別評価</h2>
+            <p className="text-sm text-slate-300">
+              ダウンスイングとインパクトを「連続フレーム診断」で手動指定して、「この指定で再評価」を押すと表示されます。
+            </p>
+            <div className="flex justify-end">
+              <button
+                type="button"
+                className="rounded-md border border-slate-700 bg-slate-900/40 px-3 py-2 text-xs text-slate-100 hover:bg-slate-900/70"
+                onClick={() => {
+                  const el = typeof document !== 'undefined' ? document.getElementById('manual-phase-selector') : null;
+                  if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                }}
+              >
+                手動指定へ移動
+              </button>
+            </div>
+          </section>
+        )}
 
         {/* スイングタイプ（AI判定・型の解説） */}
         <section className="rounded-xl bg-slate-900/70 border border-slate-700 p-4 space-y-4">

@@ -23,6 +23,26 @@ const confidenceFromNumber = (value?: number | null): CoachConfidenceLevel => {
   return "low";
 };
 
+const evidenceLabel = (level: CoachConfidenceLevel): "十分" | "普通" | "不足" => {
+  if (level === "high") return "十分";
+  if (level === "medium") return "普通";
+  return "不足";
+};
+
+const sanitizeCoachMessage = (text: string): string => {
+  let out = (text || "").trim();
+  if (!out) return out;
+
+  // Remove confusing internal English "confidence" mentions if the model echoes the prompt.
+  out = out.replace(/^.*\bconfidence\b.*$/gim, "");
+  out = out.replace(/\bconfidence\b/gi, "");
+  // Avoid forcing UI-visible prefixes; if the model prints "結論:" remove it.
+  out = out.replace(/^\s*結論[:：]\s*/m, "");
+  out = out.replace(/\n{3,}/g, "\n\n");
+  out = out.replace(/[ \t]{2,}/g, " ");
+  return out.trim();
+};
+
 const formatRecentMessages = (messages?: CoachMessage[]): string => {
   if (!messages || !messages.length) return "N/A";
   return messages
@@ -70,9 +90,17 @@ const isHandPositionQuestion = (text?: string | null): boolean => {
   return /手元|グリップ|ハンド/.test(t) && /位置|高さ|低|高|前|後|近|遠|浮|詰/.test(t);
 };
 
+const isBallFlightQuestion = (text?: string | null): boolean => {
+  const t = (text || "").trim();
+  if (!t) return false;
+  // When asked, we should estimate from swing cues (face-to-path, open/closed, inside-out/outside-in, etc.).
+  return /弾道|球筋|ドロー|フェード|スライス|フック|ストレート|プッシュ|プル|出ますか|出るか|どっち|どちら|推定/i.test(t);
+};
+
 const buildPrompt = (payload: CoachChatRequest) => {
   const hasDiagnosis = !!payload.analysisContext?.analysisId;
   const confidence = confidenceFromNumber(payload.analysisContext?.confidence);
+  const evidence = evidenceLabel(confidence);
   const chain = payload.analysisContext?.chain?.join(" → ") || "未設定";
   const nextAction = payload.analysisContext?.nextAction || "次の練習内容は未設定";
   const primary = payload.analysisContext?.primaryFactor || "テーマ未設定";
@@ -97,19 +125,20 @@ const buildPrompt = (payload: CoachChatRequest) => {
   const asksWhy = isWhyQuestion(payload.userMessage);
   const mentionsWristStiff = isWristStiffExpression(payload.userMessage);
   const asksHandPosition = isHandPositionQuestion(payload.userMessage);
+  const asksBallFlight = isBallFlightQuestion(payload.userMessage);
   const toneInstruction =
     confidence === "high"
       ? "断定的かつ行動重視で提示する。"
       : confidence === "medium"
-        ? "仮説であることを示しつつ『まずは』で始まる提案にする。"
-        : "参考推定として柔らかく、観察と次回動画で確認すべき1点を示す。";
+        ? "断定しすぎず、ただし結論は1つに絞って明確に言い切る。"
+        : "判断材料が不足している前提で、仮説として述べつつ次回動画で確認すべき1点を示す。";
 
   const analysisContext = hasDiagnosis
     ? `診断ID: ${payload.analysisContext?.analysisId}
 現在の最重要テーマ: ${primary}
 因果チェーン: ${chain}
 次の練習アクション: ${nextAction}
-confidence: ${confidence} (${payload.analysisContext?.confidence ?? "N/A"})
+判断材料(出力禁止): ${evidence}（根拠が不足なら参考推定として扱う）
 診断サマリ: ${payload.analysisContext?.summary || "N/A"}
 スイング型: ${payload.analysisContext?.swingTypeHeadline || "N/A"}
 フェーズ指定: ${focusPhase ?? "なし"}
@@ -134,6 +163,17 @@ confidence: ${confidence} (${payload.analysisContext?.confidence ?? "N/A"})
   2) どうすれば判別できるようになるか（撮影方向・距離・高さ・明るさ・服装・必要フレームの指定などを、次に試す1つに絞って具体化）
 `;
 
+  const ballFlightRule = asksBallFlight
+    ? `
+追加ルール（弾道/球筋の推定）:
+- 「弾道を見ていないから分からない」で終わるのは禁止。スイング（診断サマリ/フェーズ評価/フレーム観察）から必ず“推定”を出す。
+- 最初の1文で推定を言い切る（例: 「現状はフェード寄りの可能性が高いです（参考推定）。」）。
+- 根拠は必ず2点: (1) フェースが開く/閉じる傾向 (2) クラブ軌道がインサイドアウト/アウトサイドインになりやすい傾向（診断文言やフレーム観察を使う）。
+- 判断材料が不足（evidence=不足）の場合は「参考推定」と明記し、最後に“1つだけ”追加で聞く（例: 右/左への曲がり、スタート方向、ミスの頻度のどれか1つ）。
+- ただしユーザーに毎回「弾道が見える撮影を…」と促さない。聞かれた時だけ推定し、必要なら最小の追加質問で詰める。
+`
+    : "";
+
   const phaseSection = focusPhase
     ? `
 【PhaseFocus（ユーザー質問の対象フェーズ）】
@@ -150,7 +190,7 @@ ${phaseContextText}
 - 「ある程度できている」で終わるのは禁止。必ず「どこまでOKで、どこからNGか」を切り分ける。
 - 文章スタイル: Markdown見出し（###）や「-」箇条書きで区切らず、口語寄りの自然な文章でつなげる（短い段落で改行はOK）。
 - 入れる情報の順番（この順に“文章の流れ”として含める。ラベルは文中の括弧程度に留めてOK）:
-  1) 判定（4段階: OK / ほぼOK / 一部NG / NG）＋confidence（high/medium/low）＋その理由（1文）
+  1) 判定（4段階: OK / ほぼOK / 一部NG / NG）＋判断材料（十分/普通/不足）＋その理由（1文）
   2) できている範囲（通常:最大2点 / 詳細:最大3点）
   3) できていない範囲（通常:最大2点 / 詳細:最大3点）
   4) 境界（どこから崩れ始めるか）: OK→NGに切り替わる「変化点」を特定（例: Top→Downの序盤/中盤/終盤、または address→top→downswing→impact→finish）。必ず #番号(秒) を添える
@@ -254,16 +294,19 @@ ${latestUserMessage || "（直近の質問なし）"}
 	 ${frameRefRule}
 	 ${granularBreakdownRule}
 	 ${whyDeepDiveRule}
-	 ${noDiagnosisRule}
+ ${noDiagnosisRule}
 	 ${wristRule}
 	 ${cannotJudgeRule}
  ${handPositionRule}
+ ${ballFlightRule}
 
  制約:
 - まずユーザー質問に1文で直接答える。答えられない場合はその旨を簡潔に伝える。
+- 最初の1文で、やるべき/やらないべき/今のままで良いを断定的に言い切る（「良い考えです」「〜と思います」で濁さない）。
 - メインの改善テーマは必ず「最新のユーザー質問」に合わせて1つに絞る（primaryFactorは文脈として参照してよい）。
 - PhaseFocusが指定されている場合、必ずそのフェーズに寄せて説明する（別フェーズへ話題が飛ばない）。
-- confidenceがlowの場合は「参考推定」「次回動画で確認」を必ず含める。
+- 判断材料が不足の場合は「参考推定」「次回動画で確認」を必ず含める。
+- 「confidence」「high/medium/low」など英単語の確度表現はユーザーに出さない。
 - 返答は日本語。口語寄りで自然につなげる（短い段落区切りはOKだが、Markdown見出し（###）や「-」箇条書きは使わない）。
 - 通常モード: 目安 120〜700文字、ドリル1つ＋チェックポイント1つ。
 - 詳細モード: 目安 300〜2200文字、ドリル2つ＋チェックポイント2つ。
@@ -276,13 +319,25 @@ const buildFallback = (payload: CoachChatRequest) => {
   const primary = payload.analysisContext?.primaryFactor || "スイングの再現性";
   const chain = payload.analysisContext?.chain?.join(" → ") || "原因とミスの関係を特定中";
   const action = payload.analysisContext?.nextAction || "ハーフスイングでフェース向きを一定に保つ練習を10球";
+  const asksBallFlight = isBallFlightQuestion(payload.userMessage);
+  const summaryText = (payload.analysisContext?.summary || "").toString();
+  const guess =
+    /開/.test(summaryText) || /フェース.*開/.test(summaryText) || /アウトサイドイン|カット|スライス/.test(summaryText)
+      ? "フェード寄り"
+      : /閉/.test(summaryText) || /フェース.*閉/.test(summaryText) || /インサイドアウト|ドロー|フック/.test(summaryText)
+        ? "ドロー寄り"
+        : "ほぼストレート寄り";
   const question =
     confidence === "low"
       ? "次の動画ではどの場面で違和感があるか教えてください。"
       : "次の練習で意識できそうか、気になる場面があれば教えてください。";
 
-  return `現在フォーカスするのは「${primary}」です。因果は ${chain} と見ています。まずは ${action} を1セットだけ試してください。${
-    confidence === "low" ? "推定精度は低めなので、次回の動画でもう一度確認しましょう。" : "この1点だけを守れば軌道とフェースが揃いやすくなります。"
+  if (asksBallFlight) {
+    return `現状は「${guess}」の可能性が高いです${confidence === "low" ? "（参考推定）" : ""}。根拠は、診断文の中でフェース向きの変化（開き/閉じ）と軌道の傾向（インサイドアウト/アウトサイドイン）に触れているためです。曲がりの方向（右に曲がる/左に曲がる）と、球の出だし（右に出る/左に出る）のどちらか1つだけ教えてください。より確度を上げて言い切れます。`;
+  }
+
+  return `まずは「${primary}」の改善を優先してください。因果は ${chain} と見ています。${action} を1セットだけ試しましょう。${
+    confidence === "low" ? "判断材料が不足しているため参考推定です。次回の動画でもう一度確認します。" : "この1点が揃うと軌道とフェースが安定しやすくなります。"
   } ${question}`;
 };
 
@@ -371,15 +426,15 @@ export async function POST(req: NextRequest) {
           role: "system",
           content:
             payload.detailMode
-              ? `厳守: (1) 最新のユーザー質問にまず1文で答える（できない場合はできないと述べる）。 (2) 良い点を1つ短く褒める。 (3) メインテーマは1つ（primaryFactorに紐づける）が、原因・根拠・矯正は深掘りする。 (4) ドリル2つ（回数/狙い）と次回動画チェックポイント2つ（合格条件）を必ず入れる。 (5) confidenceがlowなら参考推定として扱い、次回動画での確認点を明示する。 ${visionHardRule}`
-              : `厳守: (1) 最新のユーザー質問にまず1文で答える（できない場合はできないと述べる）。 (2) 良い点を1つ短く褒める。 (3) メインテーマは1つ（primaryFactorに紐づける）。 (4) ドリル1つ（回数/狙い）と次回動画チェックポイント1つ（合格条件）を必ず入れる。 (5) confidenceがlowなら参考推定として扱い、次回動画での確認点を明示する。 ${visionHardRule}`,
+              ? `厳守: (1) 最新のユーザー質問にまず1文で答える（できない場合はできないと述べる）。 (2) 良い点を1つ短く褒める。 (3) メインテーマは1つ（primaryFactorに紐づける）が、原因・根拠・矯正は深掘りする。 (4) ドリル2つ（回数/狙い）と次回動画チェックポイント2つ（合格条件）を必ず入れる。 (5) 判断材料が不足なら参考推定として扱い、次回動画での確認点を明示する。 (6) 「confidence」「high/medium/low」は出力しない。 ${visionHardRule}`
+              : `厳守: (1) 最新のユーザー質問にまず1文で答える（できない場合はできないと述べる）。 (2) 良い点を1つ短く褒める。 (3) メインテーマは1つ（primaryFactorに紐づける）。 (4) ドリル1つ（回数/狙い）と次回動画チェックポイント1つ（合格条件）を必ず入れる。 (5) 判断材料が不足なら参考推定として扱い、次回動画での確認点を明示する。 (6) 「confidence」「high/medium/low」は出力しない。 ${visionHardRule}`,
         },
         { role: "user", content: userContent },
       ],
     });
 
     const aiMessage = completion.choices?.[0]?.message?.content?.trim();
-    const message = aiMessage && aiMessage.length > 0 ? aiMessage : buildFallback(payload);
+    const message = sanitizeCoachMessage(aiMessage && aiMessage.length > 0 ? aiMessage : buildFallback(payload));
 
     const body: {
       message: string;

@@ -78,6 +78,7 @@ export interface GolfAnalyzeMeta {
   clubType: "driver" | "iron" | "wedge";
   level: "beginner" | "beginner_plus" | "intermediate" | "upper_intermediate" | "advanced";
   previousAnalysisId?: AnalysisId | null;
+  impactIndex?: number;
 }
 
 export type AuthProvider = "google" | "email";

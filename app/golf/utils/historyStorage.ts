@@ -56,10 +56,12 @@ export const getAnonymousUserId = (): string => {
 export const saveSwingHistory = (history: SwingAnalysisHistory): void => {
   if (typeof window === "undefined") return;
   try {
-    const existing = loadAllHistories().filter((item) => item.userId === history.userId);
+    const all = loadAllHistories();
+    const others = all.filter((item) => item.userId !== history.userId);
+    const existing = all.filter((item) => item.userId === history.userId);
     const deduped = existing.filter((item) => item.analysisId !== history.analysisId);
     const next = [history, ...deduped].slice(0, MAX_HISTORIES);
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify([...next, ...others]));
   } catch (error) {
     console.warn("[historyStorage] failed to save", error);
   }

@@ -59,6 +59,9 @@ function buildPayload(frames: PhaseFrame[], prompt: string, limit: number, model
 
   return {
     model,
+    // Make outputs as stable as possible for "same input => same result".
+    temperature: 0,
+    top_p: 1,
     messages: [
       { role: "system" as const, content: SYSTEM_ROLE },
       { role: "user" as const, content },

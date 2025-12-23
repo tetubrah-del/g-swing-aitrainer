@@ -1,5 +1,7 @@
 export type ManualPhaseOverride = {
   analysisId: string;
+  backswing?: number[]; // 1-based sequence frame indices
+  top?: number[]; // 1-based sequence frame indices
   downswing?: number[]; // 1-based sequence frame indices
   impact?: number[]; // 1-based sequence frame indices
   updatedAt: number; // epoch ms
@@ -42,6 +44,8 @@ export const loadPhaseOverride = (analysisId: string): ManualPhaseOverride | nul
   return {
     analysisId,
     // Backward compat: older records may store single number.
+    backswing: normalizeIndices((parsed as { backswing?: unknown }).backswing),
+    top: normalizeIndices((parsed as { top?: unknown }).top),
     downswing: normalizeIndices((parsed as { downswing?: unknown }).downswing),
     impact: normalizeIndices((parsed as { impact?: unknown }).impact),
     updatedAt,
@@ -50,14 +54,23 @@ export const loadPhaseOverride = (analysisId: string): ManualPhaseOverride | nul
 
 export const savePhaseOverride = (
   analysisId: string,
-  next: { downswing?: number[] | number; impact?: number[] | number }
+  next: {
+    backswing?: number[] | number;
+    top?: number[] | number;
+    downswing?: number[] | number;
+    impact?: number[] | number;
+  }
 ): ManualPhaseOverride | null => {
   if (!analysisId || typeof window === "undefined") return null;
   const current = loadPhaseOverride(analysisId);
+  const nextBackswing = normalizeIndices(next.backswing ?? current?.backswing);
+  const nextTop = normalizeIndices(next.top ?? current?.top);
   const nextDownswing = normalizeIndices(next.downswing ?? current?.downswing);
   const nextImpact = normalizeIndices(next.impact ?? current?.impact);
   const merged: ManualPhaseOverride = {
     analysisId,
+    backswing: nextBackswing,
+    top: nextTop,
     downswing: nextDownswing,
     impact: nextImpact,
     updatedAt: Date.now(),
@@ -72,7 +85,7 @@ export const savePhaseOverride = (
 
 export const togglePhaseOverride = (
   analysisId: string,
-  next: { downswing?: number; impact?: number }
+  next: { backswing?: number; top?: number; downswing?: number; impact?: number }
 ): ManualPhaseOverride | null => {
   if (!analysisId || typeof window === "undefined") return null;
   const current = loadPhaseOverride(analysisId);
@@ -88,6 +101,8 @@ export const togglePhaseOverride = (
   };
   const merged: ManualPhaseOverride = {
     analysisId,
+    backswing: toggleList(current?.backswing, next.backswing),
+    top: toggleList(current?.top, next.top),
     downswing: toggleList(current?.downswing, next.downswing),
     impact: toggleList(current?.impact, next.impact),
     updatedAt: Date.now(),
