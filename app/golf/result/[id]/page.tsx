@@ -836,11 +836,15 @@ const GolfResultPage = () => {
   const nextActionText = causalImpact?.nextAction?.content ?? displayIssueInfo.nextAction;
   const causalChain = useMemo(() => {
     if (!causalImpact) return [];
-    if (causalImpact.chain?.length) return causalImpact.chain;
-    const chain = [displayIssueInfo.label, displayMissLabel];
+    const base = causalImpact.chain?.length ? [...causalImpact.chain] : [displayIssueInfo.label, displayMissLabel];
+    const shouldPrefix = data?.result?.swingStyleChange?.change === "improving";
+    if (shouldPrefix && base[0] !== "スイング様式を胸主導へ移行中") {
+      base.unshift("スイング様式を胸主導へ移行中");
+    }
+    const chain = base;
     if (causalImpactText) chain.push(causalImpactText);
     return chain;
-  }, [causalImpact, causalImpactText, displayIssueInfo.label, displayMissLabel]);
+  }, [causalImpact, causalImpactText, data?.result?.swingStyleChange?.change, displayIssueInfo.label, displayMissLabel]);
   const swingTypeBadges = useMemo(
     () => (data?.result ? deriveSwingTypes(data.result) : swingTypes),
     [data?.result, swingTypes]
@@ -1217,6 +1221,9 @@ const GolfResultPage = () => {
               <span>{isCausalLoading ? '推定中…' : causalImpact?.source === 'ai' ? 'AI推定' : 'ルールベース'}</span>
             </div>
           </div>
+          {typeof result.swingStyleComment === "string" && result.swingStyleComment.trim().length > 0 && (
+            <p className="text-sm text-slate-200">{result.swingStyleComment}</p>
+          )}
           {causalImpact ? (
             <div className="space-y-2">
               <div className="flex flex-wrap items-center gap-2">
