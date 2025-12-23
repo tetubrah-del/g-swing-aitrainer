@@ -21,6 +21,7 @@ import { extractPhaseFrames, PhaseFrame, PhaseKey, PhaseFrames } from "@/app/lib
 import { detectPhases } from "@/app/lib/vision/detectPhases";
 import { genPrompt } from "@/app/lib/vision/genPrompt";
 import { parseMultiPhaseResponse } from "@/app/lib/vision/parseMultiPhaseResponse";
+import { extractPoseKeypointsFromImages } from "@/app/lib/vision/extractPoseKeypoints";
 import { auth } from "@/auth";
 import { readAnonymousFromRequest, setAnonymousTokenOnResponse } from "@/app/lib/anonymousToken";
 import { readEmailSessionFromRequest } from "@/app/lib/emailSession";
@@ -37,6 +38,7 @@ import {
 } from "@/app/lib/userStore";
 import { canPerform } from "@/app/lib/permissions";
 import { User, UserPlan } from "@/app/types/user";
+import { buildSwingStyleComment, detectSwingStyle, detectSwingStyleChange, SwingStyleType } from "@/app/lib/swing/style";
 
 const execFileAsync = promisify(execFile);
 
@@ -727,6 +729,38 @@ async function normalizePhaseFrame(frame: PhaseFrame, reqUrl: string): Promise<P
   }
 }
 
+function toPosePoint(value: unknown): { x: number; y: number } | null {
+  if (!value || typeof value !== "object") return null;
+  const v = value as { x?: unknown; y?: unknown };
+  const x = Number(v.x);
+  const y = Number(v.y);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+  return { x, y };
+}
+
+function computeShoulderAngleRad(pose?: Record<string, unknown> | null): number | null {
+  const ls = toPosePoint(pose?.leftShoulder);
+  const rs = toPosePoint(pose?.rightShoulder);
+  if (!ls || !rs) return null;
+  return Math.atan2(rs.y - ls.y, rs.x - ls.x);
+}
+
+function computeShoulderCenterAndWidth(pose?: Record<string, unknown> | null): { center: { x: number; y: number }; width: number } | null {
+  const ls = toPosePoint(pose?.leftShoulder);
+  const rs = toPosePoint(pose?.rightShoulder);
+  if (!ls || !rs) return null;
+  const center = { x: (ls.x + rs.x) / 2, y: (ls.y + rs.y) / 2 };
+  const width = Math.hypot(ls.x - rs.x, ls.y - rs.y);
+  return { center, width };
+}
+
+function computeHandPosition(pose?: Record<string, unknown> | null): { x: number; y: number } | null {
+  const lw = toPosePoint(pose?.leftWrist);
+  const rw = toPosePoint(pose?.rightWrist);
+  if (lw && rw) return { x: (lw.x + rw.x) / 2, y: (lw.y + rw.y) / 2 };
+  return lw || rw || null;
+}
+
 export async function POST(req: NextRequest) {
   try {
     const formData = await req.formData();
@@ -1057,6 +1091,113 @@ export async function POST(req: NextRequest) {
           ? { frames: [], stages: stagesWithMotion ?? parsed.sequenceStages }
           : undefined,
     };
+
+    // -------------------------------
+    // P1/P2: swing style detection (torso/arm/mixed) without altering scores
+    // - Use existing Top/Downswing/Impact frames only
+    // - Extract pose with gpt-4o-mini (small) when available
+    // -------------------------------
+    try {
+      const topFrame = frames.top;
+      const downswingFrame = frames.downswing;
+      const impactFrame = frames.impact;
+
+      const poseFrames = await extractPoseKeypointsFromImages({
+        frames: [
+          { base64Image: topFrame.base64Image, mimeType: normalizeMime(topFrame.mimeType) },
+          { base64Image: downswingFrame.base64Image, mimeType: normalizeMime(downswingFrame.mimeType) },
+          { base64Image: impactFrame.base64Image, mimeType: normalizeMime(impactFrame.mimeType) },
+        ],
+      }).catch((err) => {
+        console.warn("[golf/analyze] swingStyle pose extract failed", err);
+        return [];
+      });
+
+      const byIdx = new Map<number, Record<string, unknown>>();
+      poseFrames.forEach((f) => {
+        if (f && typeof f === "object") {
+          byIdx.set(f.idx, (f.pose as unknown as Record<string, unknown>) ?? {});
+        }
+      });
+
+      const poseTop = byIdx.get(0) ?? null;
+      const poseDs = byIdx.get(1) ?? null;
+      const poseImp = byIdx.get(2) ?? null;
+
+      const topAngle = computeShoulderAngleRad(poseTop);
+      const dsAngle = computeShoulderAngleRad(poseDs);
+      const impAngle = computeShoulderAngleRad(poseImp);
+      const topHand = computeHandPosition(poseTop);
+      const dsHand = computeHandPosition(poseDs);
+      const impHand = computeHandPosition(poseImp);
+      const dsShoulders = computeShoulderCenterAndWidth(poseDs);
+      const topShoulders = computeShoulderCenterAndWidth(poseTop);
+      const impShoulders = computeShoulderCenterAndWidth(poseImp);
+
+      const faceUnstableHint =
+        parsed.phases?.impact?.issues?.some((t) => /フェース|開き|face/i.test(String(t))) ?? false;
+
+      if (
+        typeof topAngle === "number" &&
+        typeof dsAngle === "number" &&
+        typeof impAngle === "number" &&
+        topHand &&
+        dsHand &&
+        impHand
+      ) {
+        const assessment = detectSwingStyle({
+          frames: {
+            top: {
+              shoulder_angle: topAngle,
+              hand_position: topHand,
+              shoulder_center: topShoulders?.center,
+              shoulder_width: topShoulders?.width,
+            },
+            downswing: {
+              shoulder_angle: dsAngle,
+              hand_position: dsHand,
+              shoulder_center: dsShoulders?.center,
+              shoulder_width: dsShoulders?.width,
+            },
+            impact: {
+              shoulder_angle: impAngle,
+              hand_position: impHand,
+              face_angle: null,
+              shoulder_center: impShoulders?.center,
+              shoulder_width: impShoulders?.width,
+            },
+          },
+          faceUnstableHint,
+        });
+
+        const previousType: SwingStyleType | null =
+          (previousReport?.swingStyle?.type as SwingStyleType | undefined) ?? null;
+        const change = detectSwingStyleChange({ previous: previousType, current: assessment });
+        const scoreDelta =
+          typeof previousReport?.totalScore === "number" && Number.isFinite(previousReport.totalScore)
+            ? totalScore - previousReport.totalScore
+            : null;
+        const comment = buildSwingStyleComment({ assessment, change, scoreDelta });
+
+        result.swingStyle = assessment;
+        result.swingStyleChange = change;
+        result.swingStyleComment = comment;
+      } else {
+        // If pose signals are incomplete, still emit a safe default to support UX.
+        const assessment = { type: "mixed", confidence: "low", evidence: ["判定に必要な情報が不足"] } as const;
+        result.swingStyle = assessment;
+        const previousType: SwingStyleType | null =
+          (previousReport?.swingStyle?.type as SwingStyleType | undefined) ?? null;
+        result.swingStyleChange = detectSwingStyleChange({ previous: previousType, current: assessment });
+        result.swingStyleComment = buildSwingStyleComment({
+          assessment,
+          change: result.swingStyleChange,
+          scoreDelta: null,
+        });
+      }
+    } catch (err) {
+      console.warn("[golf/analyze] swingStyle detection failed", err);
+    }
 
     const note = visionFailedMessage ? `Vision fallback: ${visionFailedMessage}` : undefined;
 

@@ -67,6 +67,9 @@ export interface SwingAnalysis {
     regressed: string[];
   };
   sequence?: SequenceReview;
+  swingStyle?: import("@/app/lib/swing/style").SwingStyleAssessment;
+  swingStyleChange?: import("@/app/lib/swing/style").SwingStyleChange;
+  swingStyleComment?: string;
 }
 
 // POST /api/golf/analyze に渡ってくるメタ情報
