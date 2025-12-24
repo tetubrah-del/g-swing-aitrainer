@@ -1,9 +1,11 @@
 export type ManualPhaseOverride = {
   analysisId: string;
+  address?: number[]; // 1-based sequence frame indices
   backswing?: number[]; // 1-based sequence frame indices
   top?: number[]; // 1-based sequence frame indices
   downswing?: number[]; // 1-based sequence frame indices
   impact?: number[]; // 1-based sequence frame indices
+  finish?: number[]; // 1-based sequence frame indices
   updatedAt: number; // epoch ms
 };
 
@@ -44,10 +46,12 @@ export const loadPhaseOverride = (analysisId: string): ManualPhaseOverride | nul
   return {
     analysisId,
     // Backward compat: older records may store single number.
+    address: normalizeIndices((parsed as { address?: unknown }).address),
     backswing: normalizeIndices((parsed as { backswing?: unknown }).backswing),
     top: normalizeIndices((parsed as { top?: unknown }).top),
     downswing: normalizeIndices((parsed as { downswing?: unknown }).downswing),
     impact: normalizeIndices((parsed as { impact?: unknown }).impact),
+    finish: normalizeIndices((parsed as { finish?: unknown }).finish),
     updatedAt,
   };
 };
@@ -55,24 +59,30 @@ export const loadPhaseOverride = (analysisId: string): ManualPhaseOverride | nul
 export const savePhaseOverride = (
   analysisId: string,
   next: {
+    address?: number[] | number;
     backswing?: number[] | number;
     top?: number[] | number;
     downswing?: number[] | number;
     impact?: number[] | number;
+    finish?: number[] | number;
   }
 ): ManualPhaseOverride | null => {
   if (!analysisId || typeof window === "undefined") return null;
   const current = loadPhaseOverride(analysisId);
+  const nextAddress = normalizeIndices(next.address ?? current?.address);
   const nextBackswing = normalizeIndices(next.backswing ?? current?.backswing);
   const nextTop = normalizeIndices(next.top ?? current?.top);
   const nextDownswing = normalizeIndices(next.downswing ?? current?.downswing);
   const nextImpact = normalizeIndices(next.impact ?? current?.impact);
+  const nextFinish = normalizeIndices(next.finish ?? current?.finish);
   const merged: ManualPhaseOverride = {
     analysisId,
+    address: nextAddress,
     backswing: nextBackswing,
     top: nextTop,
     downswing: nextDownswing,
     impact: nextImpact,
+    finish: nextFinish,
     updatedAt: Date.now(),
   };
   try {
@@ -85,7 +95,7 @@ export const savePhaseOverride = (
 
 export const togglePhaseOverride = (
   analysisId: string,
-  next: { backswing?: number; top?: number; downswing?: number; impact?: number }
+  next: { address?: number; backswing?: number; top?: number; downswing?: number; impact?: number; finish?: number }
 ): ManualPhaseOverride | null => {
   if (!analysisId || typeof window === "undefined") return null;
   const current = loadPhaseOverride(analysisId);
@@ -101,10 +111,12 @@ export const togglePhaseOverride = (
   };
   const merged: ManualPhaseOverride = {
     analysisId,
+    address: toggleList(current?.address, next.address),
     backswing: toggleList(current?.backswing, next.backswing),
     top: toggleList(current?.top, next.top),
     downswing: toggleList(current?.downswing, next.downswing),
     impact: toggleList(current?.impact, next.impact),
+    finish: toggleList(current?.finish, next.finish),
     updatedAt: Date.now(),
   };
   try {

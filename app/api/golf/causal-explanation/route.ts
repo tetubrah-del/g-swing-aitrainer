@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import OpenAI from "openai";
 import { CausalImpactExplanation, GolfAnalyzeMeta, SwingAnalysis } from "@/app/golf/types";
 import { buildRuleBasedCausalImpact } from "@/app/golf/utils/causalImpact";
+import { retrieveCoachKnowledge } from "@/app/coach/rag/retrieve";
 
 export const runtime = "nodejs";
 
@@ -35,6 +36,16 @@ function buildPrompt(params: { payload: CausalRequestPayload; fallback: CausalIm
   const trimmedPhases = phasesText ? JSON.stringify(phasesText).slice(0, 1800) : "N/A";
   const trimmedSummary = summary.slice(0, 400);
   const roundText = JSON.stringify(roundEstimates ?? {}).slice(0, 400);
+  const rag = retrieveCoachKnowledge(
+    `${trimmedSummary}\n${trimmedPhases}\n因果 優先度 上流 1つに絞る 結果は修正しない`,
+    { maxChunks: 2, maxChars: 900, minScore: 1 }
+  );
+  const ragSection = rag.contextText
+    ? `
+【CoachingPrinciples（RAG）】
+${rag.contextText}
+`
+    : "";
 
   return `
 以下はゴルフスイング診断データです。
@@ -48,6 +59,7 @@ function buildPrompt(params: { payload: CausalRequestPayload; fallback: CausalIm
 ・数値は推定でよい
 ・日本語で簡潔に
 ・「複数ある問題の中から、最もスコアに影響が大きい1つだけを選び、因果関係を簡潔に説明せよ」
+・結果（形/現象）を“直す対象”にしない。必ず最上流の原因1点に言い換える（RAGの原則に従う）
 
 入力データ:
 - totalScore (0-100): ${totalScore}
@@ -56,6 +68,8 @@ function buildPrompt(params: { payload: CausalRequestPayload; fallback: CausalIm
 - meta: ${meta ? JSON.stringify(meta).slice(0, 400) : "N/A"}
 - round estimates: ${roundText}
 - fallback suggestion (参考にして良い): ${JSON.stringify(fallback)}
+
+${ragSection}
 
 必ず以下のJSON構造のみで返してください:
 {
