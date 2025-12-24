@@ -9,6 +9,7 @@ import { getAnalysis } from "@/app/lib/store";
 import { getFeatures } from "@/app/lib/features";
 import { hasFreeCoachUsed, markFreeCoachUsed } from "@/app/lib/freeCoachUsageStore";
 import type { AnalysisId, SwingAnalysis } from "@/app/golf/types";
+import { retrieveCoachKnowledge } from "@/app/coach/rag/retrieve";
 
 export const runtime = "nodejs";
 
@@ -115,6 +116,8 @@ function buildPrompt(analysis: SwingAnalysis) {
     })
     .join("\n");
 
+  const rag = retrieveCoachKnowledge(`${summary}\n${phaseText}`, { maxChunks: 2, maxChars: 700, minScore: 1 });
+
   return `
 あなたはゴルフスイング診断アプリの「体験版AIコーチ」です。
 目的: 診断結果を補助するため、ユーザーが最優先で直すべき改善ポイントを1つだけ示し、定型ドリルを1つ提示する。
@@ -128,6 +131,8 @@ function buildPrompt(analysis: SwingAnalysis) {
   3) 別のクラブでも同じ問題は出ますか？
 - keyImprovement は1つだけ（短く、具体的に）。
 - recommendedDrill は定型ドリル文（短く、回数/狙いが含まれる）。
+
+${rag.contextText ? `\n【KnowledgeBase（参考情報）】\n${rag.contextText}\n` : ""}
 
 診断サマリ:
 ${summary || "N/A"}

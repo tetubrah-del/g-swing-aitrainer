@@ -180,7 +180,7 @@ async function analyzeSinglePhase(
 
 export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisResponse | { error: string }>> {
   const body = (await req.json().catch(() => null)) as
-    | { analysisId?: string; backswing?: unknown; top?: unknown; downswing?: unknown; impact?: unknown }
+    | { analysisId?: string; address?: unknown; backswing?: unknown; top?: unknown; downswing?: unknown; impact?: unknown; finish?: unknown }
     | null;
   const analysisIdRaw = body?.analysisId ?? null;
   if (!isValidAnalysisId(analysisIdRaw)) {
@@ -188,12 +188,14 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
   }
   const analysisId = analysisIdRaw as AnalysisId;
 
+  const addressIndices = normalizeIndices(body?.address);
   const backswingIndices = normalizeIndices(body?.backswing);
   const topIndices = normalizeIndices(body?.top);
   const downswingIndices = normalizeIndices(body?.downswing);
   const impactIndices = normalizeIndices(body?.impact);
+  const finishIndices = normalizeIndices(body?.finish);
 
-  if (!backswingIndices.length && !topIndices.length && !downswingIndices.length && !impactIndices.length) {
+  if (!addressIndices.length && !backswingIndices.length && !topIndices.length && !downswingIndices.length && !impactIndices.length && !finishIndices.length) {
     return json({ error: "no overrides" }, { status: 400 });
   }
 
@@ -222,10 +224,20 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
 
   const meta = stored.meta ?? null;
   const phaseUpdates: Partial<
-    Record<"backswing" | "top" | "downswing" | "impact", { score: number; good: string[]; issues: string[]; advice: string[] }>
+    Record<"address" | "backswing" | "top" | "downswing" | "impact" | "finish", { score: number; good: string[]; issues: string[]; advice: string[] }>
   > = {};
 
   try {
+    if (addressIndices.length) {
+      const picked = pickFrames(addressIndices);
+      if (!picked.length) return json({ error: "invalid address frames" }, { status: 400 });
+      phaseUpdates.address = await analyzeSinglePhase(picked, {
+        phaseLabel: "アドレス",
+        handedness: meta?.handedness,
+        clubType: meta?.clubType,
+        level: meta?.level,
+      });
+    }
     if (backswingIndices.length) {
       const picked = pickFrames(backswingIndices);
       if (!picked.length) return json({ error: "invalid backswing frames" }, { status: 400 });
@@ -266,6 +278,16 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
         level: meta?.level,
       });
     }
+    if (finishIndices.length) {
+      const picked = pickFrames(finishIndices);
+      if (!picked.length) return json({ error: "invalid finish frames" }, { status: 400 });
+      phaseUpdates.finish = await analyzeSinglePhase(picked, {
+        phaseLabel: "フィニッシュ",
+        handedness: meta?.handedness,
+        clubType: meta?.clubType,
+        level: meta?.level,
+      });
+    }
   } catch (err) {
     console.error("[reanalyze-phases] vision failed", err);
     return json({ error: "reanalyze failed" }, { status: 502 });
@@ -275,10 +297,12 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
     ...stored.result,
     phases: {
       ...stored.result.phases,
+      ...(phaseUpdates.address ? { address: phaseUpdates.address } : null),
       ...(phaseUpdates.backswing ? { backswing: phaseUpdates.backswing } : null),
       ...(phaseUpdates.top ? { top: phaseUpdates.top } : null),
       ...(phaseUpdates.downswing ? { downswing: phaseUpdates.downswing } : null),
       ...(phaseUpdates.impact ? { impact: phaseUpdates.impact } : null),
+      ...(phaseUpdates.finish ? { finish: phaseUpdates.finish } : null),
     },
   };
 

@@ -6,6 +6,7 @@ import { readEmailSessionFromRequest } from "@/app/lib/emailSession";
 import { readActiveAuthFromRequest } from "@/app/lib/activeAuth";
 import { findUserByEmail, getUserById } from "@/app/lib/userStore";
 import { getFeatures } from "@/app/lib/features";
+import { retrieveCoachKnowledge } from "@/app/coach/rag/retrieve";
 
 export const runtime = "nodejs";
 
@@ -15,6 +16,16 @@ const client = new OpenAI({
 
 const DEFAULT_PERSONA =
   "あなたはPGAティーチングプロ相当の専属AIゴルフコーチです。常に前向きで「褒めて伸ばす」スタンスを保ち、まず良い点を1つ短く認めたうえで、改善テーマを1つに絞って指導してください。診断結果を踏まえ、専門用語（フェースtoパス、ダイナミックロフト、アタックアングル、シャローイング、Pポジション等）を積極的に使い、再現性の根拠（クラブパス/フェース/回旋/地面反力/リリース機序）まで踏み込んで説明してください。メインの改善テーマは1つに絞るが、そのテーマを深掘りして「なぜできていないのか（直接原因/背景原因）」「どう確認するか（切り分けテスト）」「どう矯正するか」を具体的に示します。";
+
+const personaForMode = (persona: string, mode: "initial" | "followup"): string => {
+  const base = (persona || "").trim();
+  if (!base) return DEFAULT_PERSONA;
+  if (mode === "initial") return base;
+  // Follow-ups: avoid conflicting instruction that forces praise before answering.
+  return base
+    .replace(/まず良い点を1つ短く認めたうえで、/g, "")
+    .replace(/まず良い点を1つ短く認めたうえで/g, "");
+};
 
 const confidenceFromNumber = (value?: number | null): CoachConfidenceLevel => {
   if (typeof value !== "number" || Number.isNaN(value)) return "medium";
@@ -33,6 +44,16 @@ const sanitizeCoachMessage = (text: string): string => {
   let out = (text || "").trim();
   if (!out) return out;
 
+  // Force plain text (avoid Markdown headings/lists that confuse the chat UI).
+  out = out.replace(/^\s*#{2,6}\s+/gm, ""); // "### Heading" -> "Heading"
+  out = out.replace(/^\s*[-*•]\s+/gm, ""); // "- item" -> "item"
+  out = out.replace(/^\s*\d+\.\s+/gm, ""); // "1. item" -> "item"
+  out = out.replace(/^\s*>\s+/gm, ""); // blockquote
+  out = out.replace(/^\s*```[\s\S]*?```/gm, (m) => m.replace(/```/g, "")); // unwrap code fences
+  out = out.replace(/\*\*(.*?)\*\*/g, "$1"); // bold
+  out = out.replace(/__(.*?)__/g, "$1"); // bold (underscore)
+  out = out.replace(/`([^`]+)`/g, "$1"); // inline code
+
   // Remove confusing internal English "confidence" mentions if the model echoes the prompt.
   out = out.replace(/^.*\bconfidence\b.*$/gim, "");
   out = out.replace(/\bconfidence\b/gi, "");
@@ -40,6 +61,21 @@ const sanitizeCoachMessage = (text: string): string => {
   out = out.replace(/^\s*結論[:：]\s*/m, "");
   out = out.replace(/\n{3,}/g, "\n\n");
   out = out.replace(/[ \t]{2,}/g, " ");
+  return out.trim();
+};
+
+const stripLeadingFluffForFollowup = (text: string): string => {
+  let out = (text || "").trim();
+  if (!out) return out;
+  // Remove "good idea" / praise-only first sentence that doesn't answer.
+  out = out.replace(
+    /^(?:それは|たしかに|確かに)?(?:とても|かなり|すごく|非常に)?(?:良い|いい|素晴らしい|ナイス)(?:考え|視点|質問|指摘)です[。．]\s*/u,
+    ""
+  );
+  out = out.replace(
+    /^(?:ダウンスイング|トップ|アドレス|インパクト|切り返し|体幹|腕|手元|フェース|シャフト)(?:で|の)?(?:.*?)(?:良い|いい)考えです[。．]\s*/u,
+    ""
+  );
   return out.trim();
 };
 
@@ -75,6 +111,19 @@ const isDiagnosticQuestion = (text?: string | null): boolean => {
   );
 };
 
+const wantsMoreContextQuestion = (text?: string | null): boolean => {
+  const t = (text || "").trim();
+  if (!t) return false;
+  return /どうしたら|どうすれば|何をすれば|直し方|治し方|改善|対処|コツ|方法/i.test(t);
+};
+
+const isExplainConceptWord = (text?: string | null): boolean => {
+  const t = (text || "").trim();
+  if (!t) return false;
+  return /(シャローイング|タメ|ハンドファースト|インサイドアウト|フェースローテーション|ボディターン)/i.test(t) ||
+    /\b(shallowing|lag|hand\s*first|inside[-\s]?out|face\s*rotation|body\s*turn)\b/i.test(t);
+};
+
 const isWhyQuestion = (text?: string | null): boolean => {
   const t = (text || "").trim();
   if (!t) return false;
@@ -108,6 +157,23 @@ const buildPrompt = (payload: CoachChatRequest) => {
   const nextAction = payload.analysisContext?.nextAction || "次の練習内容は未設定";
   const primary = payload.analysisContext?.primaryFactor || "テーマ未設定";
   const summary = payload.summaryText?.slice(0, 600) || "前回要約なし";
+
+  const ragQuery = [
+    payload.userMessage || "",
+    payload.focusPhase ? `focusPhase: ${payload.focusPhase}` : "",
+    primary ? `primary: ${primary}` : "",
+    payload.phaseContextText || "",
+    payload.analysisContext?.summary || "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+  const rag = retrieveCoachKnowledge(ragQuery, { maxChunks: 4, maxChars: 1200, minScore: 1 });
+  const ragSection = rag.contextText
+    ? `
+【KnowledgeBase（RAG: app/coach/rag/KNOWLEDGE.md から関連段落を抽出）】
+${rag.contextText}
+`
+    : "";
   const profile = payload.userProfileSummary || "ユーザープロフィール情報なし";
   const recent = formatRecentMessages(payload.recentMessages);
   const maxVisionFramesForMeta = Number(process.env.OPENAI_COACH_VISION_MAX_FRAMES ?? 8);
@@ -117,15 +183,23 @@ const buildPrompt = (payload: CoachChatRequest) => {
   const phaseContextText = payload.phaseContextText?.slice(0, 1200) || "N/A";
   const hasVision = !!payload.visionFrames?.length;
   const debugVision = !!payload.debugVision;
+  const explainMode = isExplainConceptWord(payload.userMessage);
   const frameRefRule = hasVision
     ? `
 共通ルール（フレーム参照の表記）:
-- ユーザーに見せる表記は「#番号(秒)」に統一する（例: #12(1.49秒)）。
-- 「frameIndex(#12)」や「フレーム1/2/3（送付順）」のような内部表記は書かない。
-- 秒は可能なら小数2桁で書く（例: 1.49秒）。秒が不明な場合のみ #番号だけでよい。
+- フレーム参照は必ず「frameIndex(#番号)」で書く（例: frameIndex(#12)）。※UI側で #12(1.49秒) の表示に自動変換される。
+- 「#1/#2」など“送付順”の番号は絶対に使わない（実フレーム番号と混同して事故るため）。
+- 秒は自分で推測して書かない（必要なら frameIndex(#番号) のみでよい）。
 `
     : "";
-  const wantsGranularBreakdown = (payload.mode !== "initial" && !!payload.userMessage?.trim()) || isDiagnosticQuestion(payload.userMessage);
+  const wantsGranularBreakdown =
+    payload.mode !== "initial" &&
+    (isDiagnosticQuestion(payload.userMessage) ||
+      isWhyQuestion(payload.userMessage) ||
+      wantsMoreContextQuestion(payload.userMessage) ||
+      isHandPositionQuestion(payload.userMessage) ||
+      isBallFlightQuestion(payload.userMessage) ||
+      isWristStiffExpression(payload.userMessage));
   const asksWhy = isWhyQuestion(payload.userMessage);
   const mentionsWristStiff = isWristStiffExpression(payload.userMessage);
   const asksHandPosition = isHandPositionQuestion(payload.userMessage);
@@ -136,6 +210,25 @@ const buildPrompt = (payload: CoachChatRequest) => {
       : confidence === "medium"
         ? "断定しすぎず、ただし結論は1つに絞って明確に言い切る。"
         : "判断材料が不足している前提で、仮説として述べつつ次回動画で確認すべき1点を示す。";
+
+  const explainModeRule = explainMode
+    ? `
+追加ルール（説明用モード: 誤解されやすい概念）:
+- まずユーザー意図を「概念理解/自己スイング照合/修正・練習」の3段階で内部判別する。概念ワードが入っている場合、最初は必ず“説明用モード”で開始（診断・否定・矯正から入らない）。
+- 禁止: 最初の回答で「あなたはできていない/不足している」と断定する。
+- 禁止: フレーム番号・秒数・解析ログを冒頭で出す（本人接続に入るまで出さない）。
+- 禁止: 「クラブを寝かせる/手で操作する」表現を主因として使う（クラブ操作の指示をしない）。
+- 強制構造（この順番を崩さない）:
+  1) 概念定義: 30秒で分かる説明。専門用語は言い換え/比喩を必ず添える。
+  2) 誤解の否定: よくある誤解を2〜3個、はっきり否定（人格否定は禁止）。
+  3) 成立条件: 因果で説明（操作対象は「体の順序・関係性」に限定）。
+  4) 本人接続: データがある場合のみ控えめに（断定禁止）。この段階で初めて frameIndex(#番号) を使ってよい。
+  5) 最小ドリル: ドリルは必ず1つだけ。併せて「やらないこと」を1つ以上明示する。
+- トーン: 上から教えない。「いい質問です」「多くの人が誤解します」を入れてよい。最後は「まずはここまで理解できればOK」で締める。
+- 回答前セルフチェック:
+  □ 概念説明が先にあるか？ □ 誤解の否定をしているか？ □ 寝かせる操作を推奨していないか？ □ いきなり診断していないか？ □ ドリルは1つだけか？
+`
+    : "";
 
   const analysisContext = hasDiagnosis
     ? `診断ID: ${payload.analysisContext?.analysisId}
@@ -197,7 +290,7 @@ ${phaseContextText}
   1) 判定（4段階: OK / ほぼOK / 一部NG / NG）＋判断材料（十分/普通/不足）＋その理由（1文）
   2) できている範囲（通常:最大2点 / 詳細:最大3点）
   3) できていない範囲（通常:最大2点 / 詳細:最大3点）
-  4) 境界（どこから崩れ始めるか）: OK→NGに切り替わる「変化点」を特定（例: Top→Downの序盤/中盤/終盤、または address→top→downswing→impact→finish）。必ず #番号(秒) を添える
+  4) 境界（どこから崩れ始めるか）: OK→NGに切り替わる「変化点」を特定（例: Top→Downの序盤/中盤/終盤、または address→top→downswing→impact→finish）。必ず frameIndex(#番号) を添える
   5) なぜできていないか（原因と機序）: 「直接原因→背景原因→切り分けテスト」の順で、それぞれ1〜2文で“文章として”説明する（専門用語OK）
   6) 修正ドリル（通常:1個 / 詳細:2個）: 「できていない範囲」を改善する最短手段に直結させる（メカニズムと対応づける）
   7) 切り分けチェック（次回動画で確認する1点）: 何を見れば「OK側/NG側」を判別できるかを1つだけ具体化
@@ -207,7 +300,7 @@ ${phaseContextText}
   ・一部NG: フェーズ内に「OK区間」と「NG区間」が混在し、ミスにつながる崩れが観察できる（プレー影響は中）
   ・NG: フェーズ全体で狙いの動きが作れておらず、ミスの主因になっている可能性が高い
 - 根拠の書き方:
-  ・画像あり: 各指摘に必ず #番号(秒) を付け、観察した事実（手元高さ/シャフト角/フェース向き/体の開き等）を書く
+  ・画像あり: 各指摘に必ず frameIndex(#番号) を付け、観察した事実（手元高さ/シャフト角/フェース向き/体の開き等）を書く
   ・画像なし: PhaseEvaluationContext または ユーザー申告（ボール傾向/違和感/ミス）を根拠にし、「仮説/要確認」を明示する
 `
     : "";
@@ -227,7 +320,7 @@ ${phaseContextText}
 - まず「コック（手首の角度/手元とシャフトの関係）」として翻訳して、浅い/深いの両方を候補に出す。
 - 浅い寄り: トップでコックが作れずシャフトが立ちやすい、切り返しでほどけやすい → フェース管理が不安定。
 - 深い寄り: コックが深すぎてレイドオフ/手元が遅れ、ほどけ方が極端 → タイミングが不安定。
-- 画像あり: 該当フェーズの #番号(秒) を必ず添えて「どちら寄りか」を判断する（判断不可なら不可と明言し、必要な撮影/フレーム条件を1つだけ提示）。
+- 画像あり: 該当フェーズの frameIndex(#番号) を必ず添えて「どちら寄りか」を判断する（判断不可なら不可と明言し、必要な撮影/フレーム条件を1つだけ提示）。
 - 画像なし: どちらが近いかを見分ける質問を1つだけ入れる（例: トップで左手首は掌屈/背屈どちら寄り？ インパクトで手元が浮く/詰まる？）。
 `
     : "";
@@ -241,20 +334,20 @@ ${phaseContextText}
   ・手元が腰（ベルトライン）より上/下か
   ・手元が右腿前/体の中心線付近/外側（離れ）か
   ・インパクト直前で手元が浮く（胸側に上がる）/沈む（腰側に残る）傾向
-- 画像あり: DS/IMP の #番号(秒) を最低1つは添えて、手元について“観察できた事実”を1つ書く。
+- 画像あり: DS/IMP の frameIndex(#番号) を最低1つは添えて、手元について“観察できた事実”を1つ書く。
 - どうしても判定が難しい場合: 「なぜ難しいか（小さすぎ/ブレ/遮蔽/基準線不足など）」＋「判別できる撮影条件（1つだけ）」を必ず書く。
 `
     : "";
 
   const visionRule = hasVision
     ? debugVision
-      ? `重要: このリクエストにはスイングのフレーム画像が含まれます。画像が与えられているのに『画像を確認できない』と言うのは禁止。冒頭に必ず「画像参照ログ」を置き、各フレームについて(1) #番号(秒)とラベル (2)手元が見えるか(見える/一部隠れ/ブレ/画角外) (3)判断可否(可/不可)と理由 を1行で列挙する。そのうえで、見える範囲で結論を出す。
-注意: 「フレーム1/2/3」は送付画像の順番で、元動画の番号ではありません。根拠に使う番号は #番号(秒) に従ってください。
+      ? `重要: このリクエストにはスイングのフレーム画像が含まれます。画像が与えられているのに『画像を確認できない』と言うのは禁止。冒頭に必ず「画像参照ログ」を置き、各フレームについて(1) frameIndex(#番号)とラベル (2)手元が見えるか(見える/一部隠れ/ブレ/画角外) (3)判断可否(可/不可)と理由 を1行で列挙する。そのうえで、見える範囲で結論を出す。
+注意: 「フレーム1/2/3」は送付画像の順番で、元動画の番号ではありません。根拠に使う番号は frameIndex(#番号) に従ってください。
 判断できない場合は『何が見えないか』と『必要な撮影条件（正面/後方/高さ/該当フェーズ周辺のフレームが手元を含む等）』を具体的に述べる。
 ${focusPhase ? "追加制約: PhaseFocus が指定されている場合、回答の根拠は PhaseEvaluationContext と該当フェーズのフレーム観察を最優先にする。別フェーズの断定はしない（必要なら「別フェーズの可能性」として短く補足）。" : ""}`
       : `重要: このリクエストにはスイングのフレーム画像が含まれます。画像が与えられているのに『画像を確認できない/見えない』と断言するのは禁止。
 判断できない場合は「なぜ判断できないか（ブレ/画角/遮蔽/基準線不足など）」と「次に判別できる撮影条件（1つだけ）」を必ず書く。
-注意: 「フレーム1/2/3」は送付画像の順番で、元動画の番号ではありません。必要なら根拠として #番号(秒) を文章中に添えてください（デバッグ用の「画像参照ログ」の列挙は出力しない）。
+注意: 「フレーム1/2/3」は送付画像の順番で、元動画の番号ではありません。必要なら根拠として frameIndex(#番号) を文章中に添えてください（デバッグ用の「画像参照ログ」の列挙は出力しない）。
 ${focusPhase ? "追加制約: PhaseFocus が指定されている場合、回答の根拠は PhaseEvaluationContext と該当フェーズのフレーム観察を最優先にする。別フェーズの断定はしない（必要なら「別フェーズの可能性」として短く補足）。" : ""}`
     : "画像は与えられていないので、一般論に寄りすぎない範囲で仮説として回答し、不足情報があれば質問する。";
 
@@ -262,9 +355,11 @@ ${focusPhase ? "追加制約: PhaseFocus が指定されている場合、回答
     if (!payload.detailMode) {
       return payload.mode === "initial"
         ? "初回メッセージを生成。構成: 1) 1行結論 2) 主要原因（専門用語OK） 3) ドリル1つ（回数/狙い） 4) 次回動画チェックポイント1つ 5) 質問1つ。"
-        : asksWhy
-          ? "最新のユーザー発話に対し、短めに要点回答。ただし『なぜ』が含まれる場合は「直接原因1行＋背景原因1行＋切り分けテスト1行」を必ず入れる。必ずドリル1つとチェックポイント1つを含める。"
-          : "最新のユーザー発話に対し、短めに要点回答。必ずドリル1つとチェックポイント1つを含める。";
+        : wantsGranularBreakdown
+          ? "最新のユーザー発話に対し、納得感が出るように因果を2段階（直接原因→背景原因）で説明し、最後に「次の一手（ドリル）」と「次回動画の合格条件」を必ず1つずつ入れる。最初の1文は必ず質問へ直接回答（Yes/No/場合分け）で短く言い切る。"
+          : asksWhy
+            ? "最新のユーザー発話に対し、結論→直接原因→背景原因→切り分け（テスト/観察）までを短い段落でつなげて答える。必ずドリル1つとチェックポイント1つを含める。"
+            : "最新のユーザー発話に対し、結論→理由→やること（ドリル）→チェックポイントの順で短い段落で答える。";
     }
     return payload.mode === "initial"
       ? "初回メッセージを生成。構成: 1) 1行結論 2) 症状→メカニズム（専門用語OK） 3) 具体ドリル2つ（回数/狙い） 4) 次回動画チェックポイント2つ（P位置/フェース/パス等） 5) 追加で聞くべき質問1つ。"
@@ -274,6 +369,8 @@ ${focusPhase ? "追加制約: PhaseFocus が指定されている場合、回答
   return `
 【SystemPersona】
 ${payload.systemPersona || DEFAULT_PERSONA}
+
+${ragSection}
 
 【UserProfileSummary】
 ${profile}
@@ -303,17 +400,20 @@ ${latestUserMessage || "（直近の質問なし）"}
 	 ${cannotJudgeRule}
  ${handPositionRule}
  ${ballFlightRule}
+ ${explainModeRule}
 
  制約:
 - まずユーザー質問に1文で直接答える。答えられない場合はその旨を簡潔に伝える。
-- 最初の1文で、やるべき/やらないべき/今のままで良いを断定的に言い切る（「良い考えです」「〜と思います」で濁さない）。
+- 説明用モードの概念質問では、共感→概念定義から入り（例:「いい質問です。〜とは…」）、診断/矯正は最後の本人接続まで保留する。
+- それ以外は、最初の1文で、やるべき/やらないべき/今のままで良いを断定的に言い切る（「良い考えです」「〜と思います」で濁さない）。
 - メインの改善テーマは必ず「最新のユーザー質問」に合わせて1つに絞る（primaryFactorは文脈として参照してよい）。
 - PhaseFocusが指定されている場合、必ずそのフェーズに寄せて説明する（別フェーズへ話題が飛ばない）。
 - 判断材料が不足の場合は「参考推定」「次回動画で確認」を必ず含める。
 - 「confidence」「high/medium/low」など英単語の確度表現はユーザーに出さない。
 - 返答は日本語。口語寄りで自然につなげる（短い段落区切りはOKだが、Markdown見出し（###）や「-」箇条書きは使わない）。
+- 説明用モード: 目安 220〜1100文字、ドリル1つ＋チェックポイント1つ（「やらないこと」を必ず入れる）。
 - 通常モード: 目安 120〜700文字、ドリル1つ＋チェックポイント1つ。
-- 詳細モード: 目安 300〜2200文字、ドリル2つ＋チェックポイント2つ。
+- 詳細モード: 目安 300〜2200文字、ドリル2つ＋チェックポイント2つ（ただし説明用モードでは常にドリル1つ）。
 - フレーム参照ONの場合: 画像で観察できる事実（手元/フェース/体の向き/軌道の傾向など）を根拠として必ず1つ挙げる。見えない場合は見えないと明言する。
 `;
 };
@@ -348,7 +448,6 @@ const buildFallback = (payload: CoachChatRequest) => {
 export async function POST(req: NextRequest) {
   try {
     const payload = (await req.json().catch(() => ({}))) as CoachChatRequest;
-    const persona = payload.systemPersona || DEFAULT_PERSONA;
 
     const emailSession = readEmailSessionFromRequest(req);
     const activeAuth = readActiveAuthFromRequest(req) ?? (emailSession ? "email" : null);
@@ -392,33 +491,75 @@ export async function POST(req: NextRequest) {
 
     const prompt = buildPrompt(payload);
 
+    // PRO default: gpt-4o (quality first). Debug UI can switch to the cheaper base model.
     const baseModel = process.env.OPENAI_COACH_MODEL || "gpt-4o-mini";
-    const detailedModel = process.env.OPENAI_COACH_MODEL_DETAILED || baseModel;
+    const detailedModel = process.env.OPENAI_COACH_MODEL_DETAILED || "gpt-4o";
     const hasVision = !!payload.visionFrames?.length;
     // Vision frames can be sent even in cost-saving mode; do not automatically switch models just because images exist.
     const useDetailedModel = !!payload.detailMode;
     const model = useDetailedModel ? detailedModel : baseModel;
-    const maxTokens = useDetailedModel ? 900 : 420;
+    const explainMode = isExplainConceptWord(payload.userMessage);
+    const wantsLongAnswer =
+      payload.mode !== "initial" &&
+      (isDiagnosticQuestion(payload.userMessage) ||
+        isWhyQuestion(payload.userMessage) ||
+        wantsMoreContextQuestion(payload.userMessage) ||
+        explainMode);
+    const maxTokens = useDetailedModel ? (wantsLongAnswer ? 1100 : 900) : wantsLongAnswer ? 650 : 420;
 
     const maxVisionFrames = Number(process.env.OPENAI_COACH_VISION_MAX_FRAMES ?? 8);
     const frames = (payload.visionFrames ?? []).slice(0, Number.isFinite(maxVisionFrames) ? maxVisionFrames : 4);
     const visionHardRule = hasVision
       ? payload.debugVision
-        ? "厳守(画像): 画像が与えられているのに『画像を確認できない/見えない』と断言するのは禁止。冒頭に必ず「画像参照ログ」を置き、各画像について (1) #番号(秒)とラベル (2)手元/骨盤など質問対象が見えるか(見える/一部隠れ/小さすぎ/ブレ/画角外) (3)判断可否(可/不可)と理由 を1行で列挙する。もし結論が出せない場合は『なぜ判断できないか』と『次に判別できる撮影条件（1つだけ）』を必ず書く。"
-        : "厳守(画像): 画像が与えられているのに『画像を確認できない/見えない』と断言するのは禁止。判断が難しい場合は『なぜ判断できないか（ブレ/画角/遮蔽/基準線不足など）』と『次に判別できる撮影条件（1つだけ）』を必ず書く。フレーム参照は #番号(秒) を使い、デバッグ用の「画像参照ログ」の列挙は出力しない。"
+        ? "厳守(画像): 画像が与えられているのに『画像を確認できない/見えない』と断言するのは禁止。冒頭に必ず「画像参照ログ」を置き、各画像について (1) frameIndex(#番号)とラベル (2)手元/骨盤など質問対象が見えるか(見える/一部隠れ/小さすぎ/ブレ/画角外) (3)判断可否(可/不可)と理由 を1行で列挙する。もし結論が出せない場合は『なぜ判断できないか』と『次に判別できる撮影条件（1つだけ）』を必ず書く。"
+        : "厳守(画像): 画像が与えられているのに『画像を確認できない/見えない』と断言するのは禁止。判断が難しい場合は『なぜ判断できないか（ブレ/画角/遮蔽/基準線不足など）』と『次に判別できる撮影条件（1つだけ）』を必ず書く。フレーム参照は frameIndex(#番号) を使い、デバッグ用の「画像参照ログ」の列挙は出力しない。"
       : "";
+
+  const followUpStyleRule =
+    payload.mode === "initial"
+      ? "厳守: 良い点を1つ短く褒めてから本題に入る。"
+      : explainMode
+        ? "厳守: 説明用モードでは「共感→概念定義」から入り（例:「いい質問です。〜とは…」）、診断/矯正を先にしない。フレーム番号・秒数・解析ログを冒頭に出さない。"
+        : "厳守: ラリー（会話）では、ユーザー質問に関係ない前置き/称賛/一般論を入れない（「良い考えです」も禁止）。1文目は必ず結論から入り、Yes/No/場合分けのいずれかで短く答える。";
+
+    const explainModeSystemRule = explainMode
+      ? "追加厳守(説明用モード): 概念定義→誤解の否定→成立条件（因果）→（データがある場合のみ）本人接続→最小ドリル1つ＋やらないこと、の順で出力する。ドリル/チェックポイントは常に1つずつ。"
+      : "";
+
+    const drillCheckpointRule = explainMode
+      ? "ドリル1つ（回数/狙い）と次回動画チェックポイント1つ（合格条件）を必ず入れる（説明用モードは常にこれ）。"
+      : payload.detailMode
+        ? "ドリル2つ（回数/狙い）と次回動画チェックポイント2つ（合格条件）を必ず入れる。"
+        : "ドリル1つ（回数/狙い）と次回動画チェックポイント1つ（合格条件）を必ず入れる。";
 
     type OpenAIRequestMessageContent =
       | { type: "text"; text: string }
       | { type: "image_url"; image_url: { url: string; detail?: "low" | "high" } };
 
-    const userContent: OpenAIRequestMessageContent[] = [
-      { type: "text", text: prompt },
-      ...frames.map((f) => ({
+    const frameListText =
+      hasVision && frames.length
+        ? `\n【提供フレーム（実フレーム番号）】\n${frames.map((f, i) => {
+            const idx = typeof f.frameIndex === "number" ? f.frameIndex : i + 1;
+            const ts = typeof f.timestampSec === "number" ? `${f.timestampSec.toFixed(2)}s` : "ts:N/A";
+            const label = f.label ? String(f.label) : "label:N/A";
+            return `- frameIndex(#${idx}) ${label} @${ts}`;
+          }).join("\n")}\n`
+        : "";
+
+    const userContent: OpenAIRequestMessageContent[] = [{ type: "text", text: `${prompt}${frameListText}` }];
+    frames.forEach((f, i) => {
+      const idx = typeof f.frameIndex === "number" ? f.frameIndex : i + 1;
+      const ts = typeof f.timestampSec === "number" ? `${f.timestampSec.toFixed(2)}s` : "ts:N/A";
+      const label = f.label ? String(f.label) : "label:N/A";
+      userContent.push({ type: "text", text: `画像: frameIndex(#${idx}) ${label} @${ts}` });
+      userContent.push({
         type: "image_url" as const,
         image_url: { url: f.url, detail: "high" as const },
-      })),
-    ];
+      });
+    });
+
+    const personaRaw = (payload.systemPersona || DEFAULT_PERSONA).trim();
+    const persona = personaForMode(personaRaw, payload.mode === "initial" ? "initial" : "followup");
 
     const completion = await client.chat.completions.create({
       model,
@@ -430,15 +571,17 @@ export async function POST(req: NextRequest) {
           role: "system",
           content:
             payload.detailMode
-              ? `厳守: (1) 最新のユーザー質問にまず1文で答える（できない場合はできないと述べる）。 (2) 良い点を1つ短く褒める。 (3) メインテーマは1つ（primaryFactorに紐づける）が、原因・根拠・矯正は深掘りする。 (4) ドリル2つ（回数/狙い）と次回動画チェックポイント2つ（合格条件）を必ず入れる。 (5) 判断材料が不足なら参考推定として扱い、次回動画での確認点を明示する。 (6) 「confidence」「high/medium/low」は出力しない。 ${visionHardRule}`
-              : `厳守: (1) 最新のユーザー質問にまず1文で答える（できない場合はできないと述べる）。 (2) 良い点を1つ短く褒める。 (3) メインテーマは1つ（primaryFactorに紐づける）。 (4) ドリル1つ（回数/狙い）と次回動画チェックポイント1つ（合格条件）を必ず入れる。 (5) 判断材料が不足なら参考推定として扱い、次回動画での確認点を明示する。 (6) 「confidence」「high/medium/low」は出力しない。 ${visionHardRule}`,
+              ? `厳守: (1) 最新のユーザー質問にまず1文で答える（できない場合はできないと述べる）。 (2) ${followUpStyleRule} (3) メインテーマは1つ（primaryFactorに紐づける）が、原因・根拠・矯正は深掘りする。 (4) ${drillCheckpointRule} (5) 判断材料が不足なら参考推定として扱い、次回動画での確認点を明示する。 (6) 「confidence」「high/medium/low」は出力しない。 ${explainModeSystemRule} ${visionHardRule}`
+              : `厳守: (1) 最新のユーザー質問にまず1文で答える（できない場合はできないと述べる）。 (2) ${followUpStyleRule} (3) メインテーマは1つ（primaryFactorに紐づける）。 (4) ${drillCheckpointRule} (5) 判断材料が不足なら参考推定として扱い、次回動画での確認点を明示する。 (6) 「confidence」「high/medium/low」は出力しない。 ${explainModeSystemRule} ${visionHardRule}`,
         },
         { role: "user", content: userContent },
       ],
     });
 
     const aiMessage = completion.choices?.[0]?.message?.content?.trim();
-    const message = sanitizeCoachMessage(aiMessage && aiMessage.length > 0 ? aiMessage : buildFallback(payload));
+    const cleaned = sanitizeCoachMessage(aiMessage && aiMessage.length > 0 ? aiMessage : buildFallback(payload));
+    const message =
+      payload.mode === "initial" ? cleaned : stripLeadingFluffForFollowup(cleaned) || cleaned;
 
     const body: {
       message: string;

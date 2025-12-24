@@ -95,13 +95,29 @@ const pickVisionFrames = (
   const manual = report?.analysisId ? loadPhaseOverride(report.analysisId) : null;
 
   const stageByIndex = new Map<number, string>();
-  const phaseFrameRange1Based: Record<NonNullable<typeof focusPhase>, [number, number]> = {
-    address: [1, 2],
-    backswing: [2, 4],
-    top: [4, 6],
-    downswing: [8, 8],
-    impact: [9, 9],
-    finish: [10, 16],
+  const phaseFrameRange1Based = (count: number): Record<NonNullable<typeof focusPhase>, [number, number]> => {
+    // Fallback when stage metadata is missing. Use proportional ranges rather than fixed "16-frame" assumptions.
+    const clamp1 = (v: number) => Math.max(1, Math.min(Math.max(1, count), Math.round(v)));
+    const aStart = 1;
+    const aEnd = clamp1(Math.max(1, count * 0.12));
+    const bStart = clamp1(Math.max(aEnd, count * 0.12));
+    const bEnd = clamp1(Math.max(bStart, count * 0.35));
+    const tStart = clamp1(Math.max(bEnd, count * 0.35));
+    const tEnd = clamp1(Math.max(tStart, count * 0.5));
+    const dStart = clamp1(Math.max(tEnd, count * 0.5));
+    const dEnd = clamp1(Math.max(dStart, count * 0.72));
+    const iStart = clamp1(Math.max(dEnd, count * 0.72));
+    const iEnd = clamp1(Math.max(iStart, count * 0.78));
+    const fStart = clamp1(Math.max(iEnd, count * 0.78));
+    const fEnd = count;
+    return {
+      address: [aStart, aEnd],
+      backswing: [bStart, bEnd],
+      top: [tStart, tEnd],
+      downswing: [dStart, dEnd],
+      impact: [iStart, iEnd],
+      finish: [fStart, fEnd],
+    };
   };
   const phaseStageMap: Record<NonNullable<typeof focusPhase>, string[]> = {
     address: ['address', 'address_to_backswing'],
@@ -165,6 +181,19 @@ const pickVisionFrames = (
 
   // When focusPhase is specified, never fill with unrelated stages.
   if (focusPhase) {
+    // Prefer stage-metadata-aligned indices for the requested phase (more reliable than fixed index ranges).
+    const allowedStages = new Set(phaseStageMap[focusPhase] ?? []);
+    const stageOrderForPhase = phasePreferredOrder[focusPhase] ?? preferredOrder;
+    const stageAligned: number[] = [];
+    stageOrderForPhase.forEach((stage) => {
+      if (!allowedStages.has(stage)) return;
+      const candidates = (byStage[stage] ?? []).sort((a, b) => a - b);
+      for (const idx of candidates) {
+        if (stageAligned.length >= max) break;
+        if (!stageAligned.includes(idx)) stageAligned.push(idx);
+      }
+    });
+
     const manualIndices1Based =
       focusPhase === 'downswing'
         ? manual?.downswing
@@ -185,7 +214,20 @@ const pickVisionFrames = (
       if (pickedManual.length) return pickedManual;
     }
 
-    const [start1, end1] = phaseFrameRange1Based[focusPhase] ?? [1, Math.min(2, frames.length)];
+    if (stageAligned.length) {
+      return stageAligned
+        .slice(0, max)
+        .sort((a, b) => a - b)
+        .map((i) => ({
+          ...(frames[i] as { url: string; timestampSec?: number }),
+          frameIndex: i + 1,
+          label: stageByIndex.get(i) ?? `phase:${focusPhase}`,
+        }))
+        .filter((f) => typeof f?.url === 'string' && f.url.startsWith('data:image/'));
+    }
+
+    const ranges = phaseFrameRange1Based(frames.length);
+    const [start1, end1] = ranges[focusPhase] ?? [1, Math.min(2, frames.length)];
     const start = Math.max(0, start1 - 1);
     const end = Math.min(frames.length - 1, end1 - 1);
 
@@ -208,8 +250,8 @@ const pickVisionFrames = (
     const phaseRangePick = buildRangePick();
 
     // If stage metadata exists and aligns, prefer those indices within the phase range.
-    const allowedStages = new Set(phaseStageMap[focusPhase] ?? []);
-    const stageAlignedInRange = phaseRangePick.filter((idx) => allowedStages.has(stageByIndex.get(idx) ?? 'unknown'));
+    const allowedStages2 = new Set(phaseStageMap[focusPhase] ?? []);
+    const stageAlignedInRange = phaseRangePick.filter((idx) => allowedStages2.has(stageByIndex.get(idx) ?? 'unknown'));
     const base = stageAlignedInRange.length ? stageAlignedInRange : phaseRangePick;
 
     // If the report has fewer frames than the expected range, fall back to the last frames (closest to downswing/impact).
@@ -481,6 +523,72 @@ const replaceFrameIndexRefs = (
     .replace(/frameIndex（#(\d+)）/g, (_, n) => toDisplay(String(n)));
 };
 
+const extractReferencedFrames = (
+  text: string,
+  sequenceFrames: Array<{ url: string; timestampSec?: number }>
+): Array<{ index: number; url: string; timestampSec?: number }> => {
+  const raw = (text || '').trim();
+  if (!raw) return [];
+  const frames = Array.isArray(sequenceFrames) ? sequenceFrames : [];
+  if (!frames.length) return [];
+
+  // Ignore debug meta line if present.
+  const cleaned = raw.replace(/^送信フレーム:.*$/gim, '');
+
+  const maxIndex = Math.min(frames.length, 16);
+  const indices = new Set<number>();
+  const explicitIndexHasTimestamp = new Set<number>();
+
+  const findClosestByTimestamp = (sec: number): number | null => {
+    if (!Number.isFinite(sec)) return null;
+    let bestIdx = -1;
+    let bestDiff = Number.POSITIVE_INFINITY;
+    for (let i = 0; i < Math.min(frames.length, 16); i += 1) {
+      const t = frames[i]?.timestampSec;
+      if (typeof t !== 'number' || !Number.isFinite(t)) continue;
+      const diff = Math.abs(t - sec);
+      if (diff < bestDiff) {
+        bestDiff = diff;
+        bestIdx = i;
+      }
+    }
+    // If it's too far, don't trust the match.
+    if (bestIdx < 0 || bestDiff > 0.35) return null;
+    return bestIdx + 1; // 1-based
+  };
+
+  // Prefer timestamp-based refs: "#1(2.62秒)" or "#1(2.62s)" etc.
+  const tsRe = /#(\d{1,2})\s*(?:\(|（)\s*(\d+(?:\.\d+)?)\s*(?:秒|s)\s*(?:\)|）)/g;
+  let m: RegExpExecArray | null;
+  while ((m = tsRe.exec(cleaned))) {
+    const rawIdx = Number(m[1]);
+    const sec = Number(m[2]);
+    const resolved = findClosestByTimestamp(sec);
+    if (resolved && resolved >= 1 && resolved <= maxIndex) indices.add(resolved);
+    if (Number.isFinite(rawIdx) && rawIdx >= 1 && rawIdx <= 16) explicitIndexHasTimestamp.add(rawIdx);
+  }
+
+  // Fallback: direct "#n" refs as sequence indices.
+  const idxRe = /#(\d{1,2})\b/g;
+  while ((m = idxRe.exec(cleaned))) {
+    const n = Number(m[1]);
+    if (!Number.isFinite(n)) continue;
+    // If the same "#n" was used as a timestamp reference, don't also treat it as a direct sequence index.
+    if (explicitIndexHasTimestamp.has(n)) continue;
+    if (n < 1 || n > maxIndex) continue;
+    indices.add(n);
+  }
+
+  return Array.from(indices)
+    .sort((a, b) => a - b)
+    .map((idx1) => {
+      const f = frames[idx1 - 1];
+      if (!f || typeof f.url !== "string" || !f.url.startsWith("data:image/")) return null;
+      return { index: idx1, url: f.url, timestampSec: f.timestampSec };
+    })
+    .filter((v): v is { index: number; url: string; timestampSec?: number } => !!v);
+};
+
 const CoachPage = () => {
   useMeUserState();
   const { state: userState } = useUserState();
@@ -570,10 +678,12 @@ const CoachPage = () => {
     setMessages(storedMessages);
     setSummary(loadThreadSummary(activeThread?.threadId ?? null));
     setShowQuickReplies(!hasDismissedQuickReplies(activeThread?.threadId ?? null));
-    const storedDetail = loadDetailModePreference(activeThread?.threadId ?? null);
-    const nextDetailMode = storedDetail ?? !!userState.hasProAccess;
+    // PRO default is always "detailMode=true" (gpt-4o) for product experience.
+    // Only allow overriding via local preference when the debug UI is enabled.
+    const storedDetail = debugUI ? loadDetailModePreference(activeThread?.threadId ?? null) : null;
+    const nextDetailMode = debugUI ? storedDetail ?? true : true;
     setDetailMode(nextDetailMode);
-    if (activeThread?.threadId && storedDetail == null) {
+    if (debugUI && activeThread?.threadId && storedDetail == null) {
       saveDetailMode(activeThread.threadId, nextDetailMode);
     }
     // Always keep vision mode ON for product behavior; images improve grounding and manual DS/IMP selection boosts trust.
@@ -583,7 +693,7 @@ const CoachPage = () => {
     // Vision enhance/crop mode: default OFF to match legacy behavior; can be toggled for experimentation.
     const storedEnhance = loadVisionEnhanceMode(activeThread?.threadId ?? null);
     setVisionEnhanceMode(storedEnhance);
-  }, [userState.userId, userState.hasProAccess, analysisIdFromQuery]);
+  }, [userState.userId, userState.hasProAccess, analysisIdFromQuery, debugUI]);
 
   useEffect(() => {
     // Keep a server-truth set of diagnosis IDs for member accounts, and use it to filter stale local histories.
@@ -1516,6 +1626,12 @@ const CoachPage = () => {
                   {!isCollapsed && (
                     <div className="space-y-2">
 		                      {section.messages.map((msg, messageIdx) => {
+                            const framesForThisSection =
+                              section.analysisId && section.analysisId === contextReport?.analysisId
+                                ? contextReport?.result?.sequence?.frames ?? []
+                                : section.analysisId
+                                  ? getReportById(section.analysisId)?.result?.sequence?.frames ?? []
+                                  : [];
 		                        const showInlineQuickReplies =
 		                          quickReplyVisible &&
 		                          idx === groupedSections.length - 1 &&
@@ -1523,7 +1639,12 @@ const CoachPage = () => {
 		                          msg.role === 'assistant';
 		                        return (
 		                          <div key={`${msg.createdAt}-${messageIdx}`} className="space-y-2">
-		                            <MessageBubble message={msg} debugVision={debugVision} />
+		                            <MessageBubble
+                                message={msg}
+                                debugVision={debugVision}
+                                analysisId={msg.analysisId ?? section.analysisId ?? analysisContext?.analysisId ?? null}
+                                sequenceFrames={framesForThisSection}
+                              />
 		                            {showInlineQuickReplies && (
 		                              <div className="flex flex-wrap gap-2">
 		                                {QUICK_REPLIES.map((item) => (
@@ -1615,7 +1736,17 @@ const CoachPage = () => {
   );
 };
 
-const MessageBubble = ({ message, debugVision }: { message: CoachMessage; debugVision: boolean }) => {
+const MessageBubble = ({
+  message,
+  debugVision,
+  analysisId,
+  sequenceFrames,
+}: {
+  message: CoachMessage;
+  debugVision: boolean;
+  analysisId: string | null;
+  sequenceFrames: Array<{ url: string; timestampSec?: number }>;
+}) => {
   const isAssistant = message.role === 'assistant';
   const isUser = message.role === 'user';
   const tone = isAssistant
@@ -1624,6 +1755,10 @@ const MessageBubble = ({ message, debugVision }: { message: CoachMessage; debugV
       ? 'border-slate-700 bg-slate-800/70 text-slate-50'
       : 'border-slate-800 bg-slate-900/40 text-slate-400';
   const content = debugVision ? message.content : stripVisionDebugBlocks(message.content);
+  const referencedFrames = useMemo(
+    () => (isAssistant ? extractReferencedFrames(content, sequenceFrames) : []),
+    [content, isAssistant, sequenceFrames]
+  );
 
   return (
     <div className={`rounded-xl border px-3 py-2 shadow-sm ${tone}`}>
@@ -1632,6 +1767,33 @@ const MessageBubble = ({ message, debugVision }: { message: CoachMessage; debugV
         <span>{new Date(message.createdAt).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' })}</span>
       </div>
       <p className="whitespace-pre-wrap text-sm leading-relaxed">{content}</p>
+      {isAssistant && referencedFrames.length > 0 && (
+        <div className="mt-3">
+          <div className="grid grid-cols-3 gap-2">
+            {referencedFrames.map((f) => (
+              <a
+                key={f.index}
+                href={analysisId ? `/golf/result/${encodeURIComponent(analysisId)}#sequence-frame-${f.index}` : undefined}
+                className="block overflow-hidden rounded-lg border border-slate-700 bg-slate-950/40"
+              >
+                <div className="relative aspect-video w-full bg-slate-900">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img src={f.url} alt={`ref-frame-${f.index}`} className="h-full w-full object-contain bg-slate-950" />
+                  <div className="absolute left-1 top-1 rounded bg-slate-950/70 px-1.5 py-0.5 text-[10px] text-slate-100">
+                    #{f.index}
+                  </div>
+                  {typeof f.timestampSec === 'number' ? (
+                    <div className="absolute right-1 top-1 rounded bg-slate-950/70 px-1.5 py-0.5 text-[10px] text-slate-200 tabular-nums">
+                      {f.timestampSec.toFixed(2)}s
+                    </div>
+                  ) : null}
+                </div>
+              </a>
+            ))}
+          </div>
+          <p className="mt-2 text-[11px] text-slate-400">この回答で参照したフレーム</p>
+        </div>
+      )}
     </div>
   );
 };

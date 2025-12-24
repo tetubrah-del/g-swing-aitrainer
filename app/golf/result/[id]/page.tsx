@@ -1,12 +1,12 @@
 'use client';
 
 import Link from 'next/link';
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useParams, usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { buildCoachContext } from '@/app/coach/utils/context';
 import { saveBootstrapContext } from '@/app/coach/utils/storage';
 import { useMeUserState } from '@/app/golf/hooks/useMeUserState';
-import { clearPhaseOverride, loadPhaseOverride, togglePhaseOverride } from '@/app/golf/utils/phaseOverrideStorage';
+import { clearPhaseOverride, loadPhaseOverride, savePhaseOverride } from '@/app/golf/utils/phaseOverrideStorage';
 import type {
   CausalImpactExplanation,
   GolfAnalysisResponse,
@@ -26,6 +26,7 @@ import { buildRuleBasedCausalImpact } from '@/app/golf/utils/causalImpact';
 import { saveSwingTypeResult } from '@/app/golf/utils/swingTypeStorage';
 import { useUserState } from '@/app/golf/state/userState';
 import ProUpsellModal from '@/app/components/ProUpsellModal';
+import PhaseFrameSelector from './PhaseFrameSelector';
 
 type SwingTypeBadge = {
   label: string;
@@ -250,7 +251,7 @@ const attachFrameRange = (
   comment: string,
   phaseKey: string,
   sequenceStages?: SequenceStageFeedback[],
-  manual?: { backswing?: number[]; top?: number[]; downswing?: number[]; impact?: number[] }
+  manual?: { address?: number[]; backswing?: number[]; top?: number[]; downswing?: number[]; impact?: number[]; finish?: number[] }
 ): string => {
   try {
     const range = getFrameRange(phaseKey, sequenceStages, manual);
@@ -464,7 +465,14 @@ const GolfResultPage = () => {
   const [, setSelectedSwingType] = useState<SwingTypeKey | null>(null);
   const [expandedAlt, setExpandedAlt] = useState<SwingTypeKey | null>(null);
   const [highlightFrames, setHighlightFrames] = useState<number[]>([]);
-  const [manualPhase, setManualPhase] = useState<{ backswing?: number[]; top?: number[]; downswing?: number[]; impact?: number[] }>({});
+  const [manualPhase, setManualPhase] = useState<{
+    address?: number[];
+    backswing?: number[];
+    top?: number[];
+    downswing?: number[];
+    impact?: number[];
+    finish?: number[];
+  }>({});
   const [isPhaseReevalLoading, setIsPhaseReevalLoading] = useState(false);
   const [phaseReevalError, setPhaseReevalError] = useState<string | null>(null);
   const [phaseOverrideAppliedSig, setPhaseOverrideAppliedSig] = useState<string | null>(null);
@@ -1047,17 +1055,33 @@ const GolfResultPage = () => {
     if (!data?.analysisId) return;
     const stored = loadPhaseOverride(data.analysisId);
     if (!stored) return;
-    setManualPhase({ backswing: stored.backswing, top: stored.top, downswing: stored.downswing, impact: stored.impact });
+    setManualPhase({
+      address: stored.address,
+      backswing: stored.backswing,
+      top: stored.top,
+      downswing: stored.downswing,
+      impact: stored.impact,
+      finish: stored.finish,
+    });
   }, [data?.analysisId]);
 
   const phaseOverrideSig = useMemo(() => {
+    const ad = (manualPhase.address ?? []).join(",");
     const bs = (manualPhase.backswing ?? []).join(",");
     const top = (manualPhase.top ?? []).join(",");
     const ds = (manualPhase.downswing ?? []).join(",");
     const imp = (manualPhase.impact ?? []).join(",");
-    if (!bs && !top && !ds && !imp) return "";
-    return `bs:${bs}|top:${top}|ds:${ds}|imp:${imp}`;
-  }, [manualPhase.backswing, manualPhase.downswing, manualPhase.impact, manualPhase.top]);
+    const fin = (manualPhase.finish ?? []).join(",");
+    if (!ad && !bs && !top && !ds && !imp && !fin) return "";
+    return `ad:${ad}|bs:${bs}|top:${top}|ds:${ds}|imp:${imp}|fin:${fin}`;
+  }, [
+    manualPhase.address,
+    manualPhase.backswing,
+    manualPhase.downswing,
+    manualPhase.finish,
+    manualPhase.impact,
+    manualPhase.top,
+  ]);
 
   useEffect(() => {
     if (!data?.analysisId || typeof window === "undefined") return;
@@ -1067,11 +1091,13 @@ const GolfResultPage = () => {
 
   const runPhaseReeval = async () => {
     if (!data?.analysisId) return;
+    const address = manualPhase.address ?? [];
     const backswing = manualPhase.backswing ?? [];
     const top = manualPhase.top ?? [];
     const downswing = manualPhase.downswing ?? [];
     const impact = manualPhase.impact ?? [];
-    if (!backswing.length && !top.length && !downswing.length && !impact.length) return;
+    const finish = manualPhase.finish ?? [];
+    if (!address.length && !backswing.length && !top.length && !downswing.length && !impact.length && !finish.length) return;
 
     try {
       setIsPhaseReevalLoading(true);
@@ -1079,7 +1105,7 @@ const GolfResultPage = () => {
       const res = await fetch("/api/golf/reanalyze-phases", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ analysisId: data.analysisId, backswing, top, downswing, impact }),
+        body: JSON.stringify({ analysisId: data.analysisId, address, backswing, top, downswing, impact, finish }),
       });
       const json = (await res.json().catch(() => null)) as GolfAnalysisResponse | { error?: string } | null;
       if (!res.ok) {
@@ -1108,6 +1134,83 @@ const GolfResultPage = () => {
       setIsPhaseReevalLoading(false);
     }
   };
+
+  const analysisId = data?.analysisId ?? '';
+
+  const sequenceFrames = useMemo(() => {
+    return (data?.result?.sequence?.frames ?? []) as Array<{ url: string; timestampSec?: number }>;
+  }, [data?.result?.sequence?.frames]);
+
+  const sequenceStages = useMemo(() => {
+    return (data?.result?.sequence?.stages ?? []) as SequenceStageFeedback[];
+  }, [data?.result?.sequence?.stages]);
+
+  const initialConfirmedSelections = useMemo(
+    () => ({
+      AD: manualPhase.address ?? [],
+      BS: manualPhase.backswing ?? [],
+      TOP: manualPhase.top ?? [],
+      DS: manualPhase.downswing ?? [],
+      IMP: manualPhase.impact ?? [],
+      FIN: manualPhase.finish ?? [],
+    }),
+    [manualPhase.address, manualPhase.backswing, manualPhase.downswing, manualPhase.finish, manualPhase.impact, manualPhase.top],
+  );
+
+  const phaseSelectorSyncKey = useMemo(() => {
+    return `${analysisId}:${phaseOverrideSig}`;
+  }, [analysisId, phaseOverrideSig]);
+
+  const selectorFrames = useMemo(() => {
+    const src = (sequenceFrames ?? []).slice(0, 16);
+    return src.map((f, idx) => ({
+      index: idx + 1,
+      imageUrl: f.url,
+      timestampSec: f.timestampSec,
+    }));
+  }, [sequenceFrames]);
+
+  const handleConfirmedSelectionsChange = useCallback(
+    (next: { AD: number[]; BS: number[]; TOP: number[]; DS: number[]; IMP: number[]; FIN: number[] }) => {
+      setManualPhase({
+        address: next.AD,
+        backswing: next.BS,
+        top: next.TOP,
+        downswing: next.DS,
+        impact: next.IMP,
+        finish: next.FIN,
+      });
+      if (!analysisId) return;
+      savePhaseOverride(analysisId, {
+        address: next.AD,
+        backswing: next.BS,
+        top: next.TOP,
+        downswing: next.DS,
+        impact: next.IMP,
+        finish: next.FIN,
+      });
+    },
+    [analysisId],
+  );
+
+  const handleResetAllPhases = useCallback(() => {
+    if (!analysisId) return;
+    clearPhaseOverride(analysisId);
+    setManualPhase({});
+    if (typeof window !== 'undefined') {
+      window.localStorage.removeItem(`golf_phase_override_applied_${analysisId}`);
+    }
+    setPhaseOverrideAppliedSig(null);
+  }, [analysisId]);
+
+  const isReevaluateEnabled =
+    !isPhaseReevalLoading &&
+    (!!manualPhase.address?.length ||
+      !!manualPhase.backswing?.length ||
+      !!manualPhase.top?.length ||
+      !!manualPhase.downswing?.length ||
+      !!manualPhase.impact?.length ||
+      !!manualPhase.finish?.length);
 
   // ▼ early return は Hooks の後に置く
   if (isLoading) {
@@ -1146,8 +1249,6 @@ const GolfResultPage = () => {
       </main>
     );
   }
-  const sequenceFrames = result.sequence?.frames ?? [];
-  const sequenceStages = (result.sequence?.stages ?? []) as SequenceStageFeedback[];
   const comparison = result.comparison;
   const previousScoreDelta = previousHistory ? result.totalScore - previousHistory.swingScore : null;
   const previousAnalyzedAt =
@@ -1159,13 +1260,6 @@ const GolfResultPage = () => {
       !!manualPhase.impact?.length &&
       phaseOverrideSig.length > 0 &&
       phaseOverrideSig === phaseOverrideAppliedSig);
-  const autoBackswingRange = getFrameRange('backswing', sequenceStages, undefined);
-  const autoTopRange = getFrameRange('top', sequenceStages, undefined);
-  const showAutoPhaseWarning =
-    sequenceFrames.length > 0 &&
-    (!manualPhase.backswing?.length || !manualPhase.top?.length) &&
-    ((autoBackswingRange != null && (autoBackswingRange[0] === 1 || autoBackswingRange[1] - autoBackswingRange[0] >= 3)) ||
-      (autoTopRange != null && (autoTopRange[0] === 1 || autoTopRange[1] - autoTopRange[0] >= 3)));
 
   return (
     <main className="min-h-screen bg-slate-950 text-slate-50 flex justify-center">
@@ -1437,182 +1531,24 @@ const GolfResultPage = () => {
             <div className="flex items-center justify-between">
               <div>
                 <h2 className="text-sm font-semibold">連続フレーム診断</h2>
-                <p className="text-xs text-slate-400">抽出された14〜16フレームをそのまま診断に使用しています。</p>
               </div>
-              <span className="text-xs text-slate-300">
-                {sequenceFrames.length ? `${sequenceFrames.length}枚のフレーム` : 'ステージコメントのみ'}
-              </span>
+              {sequenceFrames.length === 0 ? <span className="text-xs text-slate-300">ステージコメントのみ</span> : null}
             </div>
 
-            <div
-              id="manual-phase-selector"
-              className="flex flex-wrap items-center gap-2 rounded-lg border border-slate-800 bg-slate-950/40 px-3 py-2 text-xs text-slate-300"
-            >
-              <span className="text-slate-400">手動指定:</span>
-              <span className="text-violet-200">
-                バックスイング{' '}
-                {manualPhase.backswing?.length ? manualPhase.backswing.map((v) => `#${v}`).join(' / ') : '未設定'}
-              </span>
-              <span className="text-amber-200">
-                トップ {manualPhase.top?.length ? manualPhase.top.map((v) => `#${v}`).join(' / ') : '未設定'}
-              </span>
-              <span className="text-sky-200">
-                ダウンスイング{' '}
-                {manualPhase.downswing?.length ? manualPhase.downswing.map((v) => `#${v}`).join(' / ') : '未設定'}
-              </span>
-              <span className="text-rose-200">
-                インパクト {manualPhase.impact?.length ? manualPhase.impact.map((v) => `#${v}`).join(' / ') : '未設定'}
-              </span>
-              <button
-                type="button"
-                disabled={
-                  isPhaseReevalLoading ||
-                  (!manualPhase.backswing?.length &&
-                    !manualPhase.top?.length &&
-                    !manualPhase.downswing?.length &&
-                    !manualPhase.impact?.length)
-                }
-                className="rounded-md border border-emerald-700/50 bg-emerald-950/25 px-2 py-1 text-[11px] text-emerald-100 hover:bg-emerald-900/30 disabled:opacity-60"
-                onClick={() => void runPhaseReeval()}
-                title="手動指定したフレームを使って、フェーズ評価コメントを再計算します"
-              >
-                {isPhaseReevalLoading ? '再評価中…' : 'この指定で再評価'}
-              </button>
-              <button
-                type="button"
-                className="ml-auto rounded-md border border-slate-700 bg-slate-900/40 px-2 py-1 text-[11px] text-slate-200 hover:bg-slate-900/70"
-                onClick={() => {
-                  if (!data?.analysisId) return;
-                  clearPhaseOverride(data.analysisId);
-                  setManualPhase({});
-                  if (typeof window !== "undefined") {
-                    window.localStorage.removeItem(`golf_phase_override_applied_${data.analysisId}`);
-                  }
-                  setPhaseOverrideAppliedSig(null);
-                }}
-              >
-                リセット
-              </button>
-            </div>
             {phaseReevalError && <p className="text-xs text-rose-300">再評価エラー: {phaseReevalError}</p>}
-            {showAutoPhaseWarning && (
-              <p className="text-xs text-amber-200">
-                バックスイング/トップの抽出がズレている可能性があります（自動目安: BS {autoBackswingRange ? `#${autoBackswingRange[0]}〜#${autoBackswingRange[1]}` : 'N/A'} / TOP {autoTopRange ? `#${autoTopRange[0]}〜#${autoTopRange[1]}` : 'N/A'}）。必要ならBS/TOPも手動指定して再評価してください。
-              </p>
-            )}
-
             {sequenceFrames.length > 0 && (
-              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                {sequenceFrames.map((frame, idx) => {
-                  const frameNumber = idx + 1;
-                  const highlighted = highlightFrames.includes(frameNumber);
-                  const isManualBackswing = manualPhase.backswing?.includes(frameNumber) ?? false;
-                  const isManualTop = manualPhase.top?.includes(frameNumber) ?? false;
-                  const isManualDownswing = manualPhase.downswing?.includes(frameNumber) ?? false;
-                  const isManualImpact = manualPhase.impact?.includes(frameNumber) ?? false;
-                  return (
-                    <div
-                      key={`${frame.url}-${idx}`}
-                      id={`sequence-frame-${frameNumber}`}
-                      className={`rounded-lg p-2 space-y-2 transition-all ${
-                        highlighted
-                          ? 'border-emerald-400 bg-slate-900/60 shadow-[0_0_0_2px_rgba(16,185,129,0.3)]'
-                          : 'border border-slate-800 bg-slate-950/50'
-                      }`}
-                    >
-                    <div className="flex items-center justify-between text-xs text-slate-300 gap-2">
-                      <div className="flex items-center gap-2">
-                        <span className={`font-semibold ${highlighted ? 'text-emerald-200' : ''}`}>#{frameNumber}</span>
-                        {isManualDownswing && (
-                          <span className="rounded px-1.5 py-0.5 text-[10px] border border-sky-500/60 text-sky-200 bg-sky-900/20">
-                            DS
-                          </span>
-                        )}
-                        {isManualImpact && (
-                          <span className="rounded px-1.5 py-0.5 text-[10px] border border-rose-500/60 text-rose-200 bg-rose-900/20">
-                            IMP
-                          </span>
-                        )}
-                        {isManualBackswing && (
-                          <span className="rounded px-1.5 py-0.5 text-[10px] border border-violet-500/60 text-violet-200 bg-violet-900/20">
-                            BS
-                          </span>
-                        )}
-                        {isManualTop && (
-                          <span className="rounded px-1.5 py-0.5 text-[10px] border border-amber-500/60 text-amber-200 bg-amber-900/20">
-                            TOP
-                          </span>
-                        )}
-                      </div>
-                      {typeof frame.timestampSec === 'number' && <span>{frame.timestampSec.toFixed(2)}s</span>}
-                    </div>
-                    <div
-                      className={`aspect-video w-full overflow-hidden rounded-md bg-slate-900 ${
-                        isManualImpact
-                          ? 'border border-rose-500'
-                          : isManualDownswing
-                            ? 'border border-sky-500'
-                            : highlighted
-                              ? 'border border-emerald-400'
-                              : 'border border-slate-800'
-                      }`}
-                    >
-                      {/* eslint-disable-next-line @next/next/no-img-element */}
-                      <img
-                        src={frame.url}
-                        alt={`sequence-frame-${frameNumber}`}
-                        className="h-full w-full object-contain bg-slate-950"
-                      />
-                    </div>
-                    <div className="grid grid-cols-2 gap-2">
-                      <button
-                        type="button"
-                        className="rounded-md border border-sky-600/50 bg-sky-950/40 px-2 py-1 text-[11px] text-sky-100 hover:bg-sky-900/30"
-                        onClick={() => {
-                          if (!data?.analysisId) return;
-                          const next = togglePhaseOverride(data.analysisId, { downswing: frameNumber });
-                          setManualPhase({ backswing: next?.backswing, top: next?.top, downswing: next?.downswing, impact: next?.impact });
-                        }}
-                      >
-                        {isManualDownswing ? 'ダウンスイング解除' : 'ダウンスイングにする'}
-                      </button>
-                      <button
-                        type="button"
-                        className="rounded-md border border-rose-600/50 bg-rose-950/40 px-2 py-1 text-[11px] text-rose-100 hover:bg-rose-900/30"
-                        onClick={() => {
-                          if (!data?.analysisId) return;
-                          const next = togglePhaseOverride(data.analysisId, { impact: frameNumber });
-                          setManualPhase({ backswing: next?.backswing, top: next?.top, downswing: next?.downswing, impact: next?.impact });
-                        }}
-                      >
-                        {isManualImpact ? 'インパクト解除' : 'インパクトにする'}
-                      </button>
-                      <button
-                        type="button"
-                        className="rounded-md border border-violet-600/50 bg-violet-950/40 px-2 py-1 text-[11px] text-violet-100 hover:bg-violet-900/30"
-                        onClick={() => {
-                          if (!data?.analysisId) return;
-                          const next = togglePhaseOverride(data.analysisId, { backswing: frameNumber });
-                          setManualPhase({ backswing: next?.backswing, top: next?.top, downswing: next?.downswing, impact: next?.impact });
-                        }}
-                      >
-                        {isManualBackswing ? 'BS解除' : 'バックスイングにする'}
-                      </button>
-                      <button
-                        type="button"
-                        className="rounded-md border border-amber-600/50 bg-amber-950/40 px-2 py-1 text-[11px] text-amber-100 hover:bg-amber-900/30"
-                        onClick={() => {
-                          if (!data?.analysisId) return;
-                          const next = togglePhaseOverride(data.analysisId, { top: frameNumber });
-                          setManualPhase({ backswing: next?.backswing, top: next?.top, downswing: next?.downswing, impact: next?.impact });
-                        }}
-                      >
-                        {isManualTop ? 'TOP解除' : 'トップにする'}
-                      </button>
-                    </div>
-                  </div>
-                  );
-                })}
+              <div id="manual-phase-selector">
+                <PhaseFrameSelector
+                  frames={selectorFrames}
+                  initialConfirmedSelections={initialConfirmedSelections}
+                  syncKey={phaseSelectorSyncKey}
+                  highlightedFrames={highlightFrames}
+                  isReevaluating={isPhaseReevalLoading}
+                  isReevaluateEnabled={isReevaluateEnabled}
+                  onConfirmedSelectionsChange={handleConfirmedSelectionsChange}
+                  onReevaluate={() => void runPhaseReeval()}
+                  onResetAll={handleResetAllPhases}
+                />
               </div>
             )}
 
@@ -1658,34 +1594,21 @@ const GolfResultPage = () => {
           </section>
         )}
 
-        {!userState.hasProAccess && previousHistory && (
-          <section className="rounded-xl bg-slate-900/50 border border-slate-700 p-4 space-y-2 relative">
-            <div className="opacity-40">
-              <h2 className="text-sm font-semibold">前回比 改善ポイント / 悪化ポイント（PRO）</h2>
-              <p className="text-xs text-slate-300 mt-1">比較・推移は PRO で確認できます。</p>
-            </div>
-            <button
-              type="button"
-              className="absolute inset-0 rounded-xl"
-              aria-label="PRO案内"
-              onClick={() => setProModalOpen(true)}
-            />
-          </section>
-        )}
-
-        <ProUpsellModal
-          open={proModalOpen}
-          onClose={() => setProModalOpen(false)}
-          title="比較・推移はPROで確認できます"
-          message="履歴の推移グラフや前回比の比較が利用できます。"
-          ctaHref={userState.isAuthenticated ? '/pricing' : `/golf/register?next=${encodeURIComponent('/pricing')}`}
-          ctaLabel={userState.isAuthenticated ? 'PROにアップグレード' : '登録してPROを見る'}
-        />
-
         {/* フェーズごとの評価 */}
         {shouldShowPhaseEvaluation ? (
         <section className="rounded-xl bg-slate-900/70 border border-slate-700 p-4 space-y-4">
           <h2 className="text-sm font-semibold">フェーズ別評価</h2>
+          {isPhaseReevalLoading && (
+            <div className="rounded-lg border border-emerald-500/30 bg-emerald-900/10 p-3">
+              <div className="flex items-center justify-between gap-3">
+                <p className="text-sm font-semibold text-emerald-100">評価を生成中…</p>
+                <p className="text-[11px] text-emerald-200/90">少し時間がかかる場合があります</p>
+              </div>
+              <div className="mt-2 h-2 w-full overflow-hidden rounded-full bg-slate-800">
+                <div className="h-full w-full bg-gradient-to-r from-emerald-400 via-emerald-200 to-emerald-400 opacity-70 animate-pulse" />
+              </div>
+            </div>
+          )}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
             {phaseList.map(({ key, label, data }) => {
               if (!data) {
@@ -1821,23 +1744,43 @@ const GolfResultPage = () => {
         ) : (
           <section className="rounded-xl bg-slate-900/70 border border-slate-700 p-4 space-y-3">
             <h2 className="text-sm font-semibold">フェーズ別評価</h2>
-            <p className="text-sm text-slate-300">
-              ダウンスイングとインパクトを「連続フレーム診断」で手動指定して、「この指定で再評価」を押すと表示されます。
-            </p>
-            <div className="flex justify-end">
-              <button
-                type="button"
-                className="rounded-md border border-slate-700 bg-slate-900/40 px-3 py-2 text-xs text-slate-100 hover:bg-slate-900/70"
-                onClick={() => {
-                  const el = typeof document !== 'undefined' ? document.getElementById('manual-phase-selector') : null;
-                  if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                }}
-              >
-                手動指定へ移動
-              </button>
-            </div>
+            {isPhaseReevalLoading && (
+              <div className="rounded-lg border border-emerald-500/30 bg-emerald-900/10 p-3">
+                <div className="flex items-center justify-between gap-3">
+                  <p className="text-sm font-semibold text-emerald-100">評価を生成中…</p>
+                  <p className="text-[11px] text-emerald-200/90">少し時間がかかる場合があります</p>
+                </div>
+                <div className="mt-2 h-2 w-full overflow-hidden rounded-full bg-slate-800">
+                  <div className="h-full w-full bg-gradient-to-r from-emerald-400 via-emerald-200 to-emerald-400 opacity-70 animate-pulse" />
+                </div>
+              </div>
+            )}
           </section>
         )}
+
+        {!userState.hasProAccess && previousHistory && (
+          <section className="rounded-xl bg-slate-900/50 border border-slate-700 p-4 space-y-2 relative">
+            <div className="opacity-40">
+              <h2 className="text-sm font-semibold">前回比 改善ポイント / 悪化ポイント（PRO）</h2>
+              <p className="text-xs text-slate-300 mt-1">比較・推移は PRO で確認できます。</p>
+            </div>
+            <button
+              type="button"
+              className="absolute inset-0 rounded-xl"
+              aria-label="PRO案内"
+              onClick={() => setProModalOpen(true)}
+            />
+          </section>
+        )}
+
+        <ProUpsellModal
+          open={proModalOpen}
+          onClose={() => setProModalOpen(false)}
+          title="比較・推移はPROで確認できます"
+          message="履歴の推移グラフや前回比の比較が利用できます。"
+          ctaHref={userState.isAuthenticated ? '/pricing' : `/golf/register?next=${encodeURIComponent('/pricing')}`}
+          ctaLabel={userState.isAuthenticated ? 'PROにアップグレード' : '登録してPROを見る'}
+        />
 
         {/* スイングタイプ（AI判定・型の解説） */}
         <section className="rounded-xl bg-slate-900/70 border border-slate-700 p-4 space-y-4">

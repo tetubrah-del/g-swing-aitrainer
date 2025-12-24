@@ -1,4 +1,5 @@
 import { GolfAnalyzeMeta, SwingAnalysis } from "@/app/golf/types";
+import { retrieveCoachKnowledge } from "@/app/coach/rag/retrieve";
 
 function toJapaneseHandedness(handedness: GolfAnalyzeMeta["handedness"]): string {
   return handedness === "left" ? "左打ち" : "右打ち";
@@ -35,6 +36,29 @@ function toJapaneseLevel(level: GolfAnalyzeMeta["level"]): string {
 }
 
 export function genPrompt(meta?: GolfAnalyzeMeta, previousReport?: SwingAnalysis | null): string {
+  const ragSeedQuery = [
+    "診断思考フロー",
+    "因果",
+    "優先度",
+    "上流",
+    "結果は修正しない",
+    "インパクトゾーン",
+    "リリース",
+    "タメ",
+    "フェース管理",
+    "ハンドファースト",
+  ].join(" ");
+  const rag = retrieveCoachKnowledge(ragSeedQuery, { maxChunks: 3, maxChars: 1200, minScore: 1 });
+  const ragSection = rag.contextText
+    ? [
+        "【CoachingPrinciples（RAG: app/coach/rag/KNOWLEDGE.md から抽出）】",
+        rag.contextText,
+        "",
+        "上の原則に従い、観測→因果→最上流の1点→ドリル（1つ）という順序で、結果（形）を直す指導は避けること。",
+        "",
+      ].join("\n")
+    : "";
+
   const systemPrompt = [
     "あなたはプロのゴルフスイングコーチです。",
     "ユーザーがアップロードしたスイング画像・動画をもとに、6つのフェーズごとに日本語でスイング分析を行ってください。",
@@ -127,5 +151,5 @@ export function genPrompt(meta?: GolfAnalyzeMeta, previousReport?: SwingAnalysis
     userPrompt.push("", "【前回の診断結果（比較用）】", JSON.stringify(previousReport, null, 2));
   }
 
-  return `${systemPrompt}\n\n${userPrompt.join("\n")}`;
+  return `${systemPrompt}\n\n${ragSection}${userPrompt.join("\n")}`;
 }
