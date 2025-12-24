@@ -51,10 +51,13 @@ const formatRecentMessages = (messages?: CoachMessage[]): string => {
     .join("\n");
 };
 
-const formatVisionFramesMeta = (frames?: Array<{ url: string; timestampSec?: number; label?: string; frameIndex?: number }>) => {
+const formatVisionFramesMeta = (
+  frames?: Array<{ url: string; timestampSec?: number; label?: string; frameIndex?: number }>,
+  limit: number = 8
+) => {
   if (!frames?.length) return "N/A";
   return frames
-    .slice(0, 6)
+    .slice(0, Math.max(1, Math.floor(limit)))
     .map((f, idx) => {
       const ts = typeof f.timestampSec === "number" ? `${f.timestampSec.toFixed(2)}s` : "ts:N/A";
       const stage = f.label ? ` ${f.label}` : "";
@@ -107,7 +110,8 @@ const buildPrompt = (payload: CoachChatRequest) => {
   const summary = payload.summaryText?.slice(0, 600) || "前回要約なし";
   const profile = payload.userProfileSummary || "ユーザープロフィール情報なし";
   const recent = formatRecentMessages(payload.recentMessages);
-  const framesMeta = formatVisionFramesMeta(payload.visionFrames);
+  const maxVisionFramesForMeta = Number(process.env.OPENAI_COACH_VISION_MAX_FRAMES ?? 8);
+  const framesMeta = formatVisionFramesMeta(payload.visionFrames, maxVisionFramesForMeta);
   const latestUserMessage = payload.userMessage?.slice(0, 400) || "";
   const focusPhase = payload.focusPhase || null;
   const phaseContextText = payload.phaseContextText?.slice(0, 1200) || "N/A";
@@ -396,7 +400,7 @@ export async function POST(req: NextRequest) {
     const model = useDetailedModel ? detailedModel : baseModel;
     const maxTokens = useDetailedModel ? 900 : 420;
 
-    const maxVisionFrames = Number(process.env.OPENAI_COACH_VISION_MAX_FRAMES ?? 6);
+    const maxVisionFrames = Number(process.env.OPENAI_COACH_VISION_MAX_FRAMES ?? 8);
     const frames = (payload.visionFrames ?? []).slice(0, Number.isFinite(maxVisionFrames) ? maxVisionFrames : 4);
     const visionHardRule = hasVision
       ? payload.debugVision
