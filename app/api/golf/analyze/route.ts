@@ -16,6 +16,7 @@ import {
   MOCK_GOLF_ANALYSIS_RESULT,
   UserUsageState,
 } from "@/app/golf/types";
+import { buildPhaseComparison } from "@/app/golf/utils/phaseComparison";
 import { askVisionAPI } from "@/app/lib/vision/askVisionAPI";
 import { extractPhaseFrames, PhaseFrame, PhaseKey, PhaseFrames } from "@/app/lib/vision/extractPhaseFrames";
 import { detectPhases } from "@/app/lib/vision/detectPhases";
@@ -1355,6 +1356,10 @@ export async function POST(req: NextRequest) {
           ? { frames: [], stages: stagesWithMotion ?? parsed.sequenceStages }
           : undefined,
     };
+
+    if (previousReport) {
+      result.comparison = buildPhaseComparison(previousReport, result);
+    }
 
     // -------------------------------
     // P1/P2: swing style detection (torso/arm/mixed) without altering scores

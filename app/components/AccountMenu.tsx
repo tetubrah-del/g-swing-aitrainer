@@ -44,7 +44,7 @@ function AccountMenuInner() {
   const showLogout = userState.isAuthenticated || userState.email || userState.userId;
 
   return (
-    <div className="fixed right-4 top-4 z-50">
+    <div className="fixed right-4 top-4 z-50 hidden md:block">
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}

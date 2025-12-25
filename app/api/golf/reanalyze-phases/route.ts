@@ -1,7 +1,8 @@
 // app/api/golf/reanalyze-phases/route.ts
 
 import { NextRequest, NextResponse } from "next/server";
-import { AnalysisId, GolfAnalysisResponse } from "@/app/golf/types";
+import { AnalysisId, GolfAnalysisResponse, SwingAnalysis } from "@/app/golf/types";
+import { buildPhaseComparison } from "@/app/golf/utils/phaseComparison";
 import { getAnalysis, saveAnalysis } from "@/app/lib/store";
 import { readAnonymousFromRequest } from "@/app/lib/anonymousToken";
 import { readEmailSessionFromRequest } from "@/app/lib/emailSession";
@@ -165,7 +166,7 @@ async function loadAuthorizedAnalysis(req: NextRequest, analysisId: AnalysisId) 
     }
   }
 
-  return { stored, account, error: null as const };
+  return { stored, account, error: null };
 }
 
 async function analyzeSinglePhase(
@@ -307,7 +308,17 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
   };
 
   const nextTotal = computeTotalScoreFromPhases(nextResult.phases as Record<string, { score?: number }>);
-  const finalResult = { ...nextResult, totalScore: nextTotal };
+  let previousReport: SwingAnalysis | null = null;
+  const previousAnalysisId = stored.meta?.previousAnalysisId ?? null;
+  if (typeof previousAnalysisId === "string" && previousAnalysisId !== analysisId) {
+    const previousLoaded = await loadAuthorizedAnalysis(req, previousAnalysisId as AnalysisId);
+    if (!previousLoaded.error && "stored" in previousLoaded) {
+      previousReport = previousLoaded.stored.result ?? null;
+    }
+  }
+
+  const phaseComparison = previousReport ? buildPhaseComparison(previousReport, nextResult as SwingAnalysis) : null;
+  const finalResult = { ...nextResult, totalScore: nextTotal, comparison: phaseComparison ?? nextResult.comparison };
 
   const updated = { ...stored, result: finalResult };
   await saveAnalysis(updated);

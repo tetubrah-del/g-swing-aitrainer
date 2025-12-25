@@ -124,6 +124,12 @@ const isExplainConceptWord = (text?: string | null): boolean => {
     /\b(shallowing|lag|hand\s*first|inside[-\s]?out|face\s*rotation|body\s*turn)\b/i.test(t);
 };
 
+const isBodyTurnQuestion = (text?: string | null): boolean => {
+  const t = (text || "").trim();
+  if (!t) return false;
+  return /ボディターン|ボディターンスイング/i.test(t) || /\bbody\s*turn\b/i.test(t);
+};
+
 const isWhyQuestion = (text?: string | null): boolean => {
   const t = (text || "").trim();
   if (!t) return false;
@@ -526,6 +532,16 @@ export async function POST(req: NextRequest) {
       ? "追加厳守(説明用モード): 概念定義→誤解の否定→成立条件（因果）→（データがある場合のみ）本人接続→最小ドリル1つ＋やらないこと、の順で出力する。ドリル/チェックポイントは常に1つずつ。"
       : "";
 
+    const bodyTurnGuardRule = isBodyTurnQuestion(payload.userMessage)
+      ? `追加厳守(ボディターン質問ズレ防止):
+- 主語ロック: 回答の主軸は最後まで「ボディターン（体の使い方・順序・回転の質）」に固定。フェース/シャロー/ハンドファースト/球筋は“主語の説明のための補足”としてのみ使用し、主回答にしない。
+- 階層順: ①スイングタイプ（ボディターン）→②動作原理（順序・役割分担・位相差/減速）→③結果（フェース/軌道等）の順で話す。③から開始しない。
+- 強制フレーム: ①到達段階定義 ②多くの人に足りない本質 ③今回（診断データ）に当てはめた不足 ④下位概念は“結果”として短く触れる。
+- 禁止: 「体をもっと回しましょう」「回転量の指示」「腕を止める指示」「フェース管理が大事です」を主張として置く。
+- フェースに触れる場合は必ず「フェースが不安定なのは原因ではなく、ボディターンの◯◯が不足した“結果”です」の形に限定。
+- 回答前セルフチェック: □主語はボディターンか □下位概念が主役になってないか □順序/質を語っているか □専門家として一段深いか`
+      : "";
+
     const drillCheckpointRule = explainMode
       ? "ドリル1つ（回数/狙い）と次回動画チェックポイント1つ（合格条件）を必ず入れる（説明用モードは常にこれ）。"
       : payload.detailMode
@@ -571,8 +587,8 @@ export async function POST(req: NextRequest) {
           role: "system",
           content:
             payload.detailMode
-              ? `厳守: (1) 最新のユーザー質問にまず1文で答える（できない場合はできないと述べる）。 (2) ${followUpStyleRule} (3) メインテーマは1つ（primaryFactorに紐づける）が、原因・根拠・矯正は深掘りする。 (4) ${drillCheckpointRule} (5) 判断材料が不足なら参考推定として扱い、次回動画での確認点を明示する。 (6) 「confidence」「high/medium/low」は出力しない。 ${explainModeSystemRule} ${visionHardRule}`
-              : `厳守: (1) 最新のユーザー質問にまず1文で答える（できない場合はできないと述べる）。 (2) ${followUpStyleRule} (3) メインテーマは1つ（primaryFactorに紐づける）。 (4) ${drillCheckpointRule} (5) 判断材料が不足なら参考推定として扱い、次回動画での確認点を明示する。 (6) 「confidence」「high/medium/low」は出力しない。 ${explainModeSystemRule} ${visionHardRule}`,
+              ? `厳守: (1) 最新のユーザー質問にまず1文で答える（できない場合はできないと述べる）。 (2) ${followUpStyleRule} (3) メインテーマは1つ（最新のユーザー質問の主語/テーマに紐づける。primaryFactorは文脈参照のみ）だが、原因・根拠・矯正は深掘りする。 (4) ${drillCheckpointRule} (5) 判断材料が不足なら参考推定として扱い、次回動画での確認点を明示する。 (6) 「confidence」「high/medium/low」は出力しない。 ${explainModeSystemRule} ${bodyTurnGuardRule} ${visionHardRule}`
+              : `厳守: (1) 最新のユーザー質問にまず1文で答える（できない場合はできないと述べる）。 (2) ${followUpStyleRule} (3) メインテーマは1つ（最新のユーザー質問の主語/テーマに紐づける。primaryFactorは文脈参照のみ）。 (4) ${drillCheckpointRule} (5) 判断材料が不足なら参考推定として扱い、次回動画での確認点を明示する。 (6) 「confidence」「high/medium/low」は出力しない。 ${explainModeSystemRule} ${bodyTurnGuardRule} ${visionHardRule}`,
         },
         { role: "user", content: userContent },
       ],

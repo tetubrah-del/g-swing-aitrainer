@@ -2,13 +2,13 @@
 
 import { ReactNode } from "react";
 import { UserStateProvider } from "@/app/golf/state/userState";
-import AccountMenu from "@/app/components/AccountMenu";
+import MobileBottomNav from "@/app/components/MobileBottomNav";
 
 export default function Providers({ children }: { children: ReactNode }) {
   return (
     <UserStateProvider>
-      <AccountMenu />
-      {children}
+      <div className="min-h-dvh pb-[calc(4.25rem+env(safe-area-inset-bottom))]">{children}</div>
+      <MobileBottomNav />
     </UserStateProvider>
   );
 }
