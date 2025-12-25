@@ -140,7 +140,7 @@ export default function AccountBillingPageClient() {
             <div className="mt-6 flex flex-wrap gap-3">
               <Link
                 href="/pricing"
-                className="rounded-xl border border-slate-700 bg-slate-950/30 px-4 py-3 text-sm text-slate-100 hover:border-emerald-400/60"
+                className="rounded-xl bg-emerald-500 px-4 py-3 text-sm font-medium text-slate-950 hover:bg-emerald-400"
               >
                 プランを見る
               </Link>
@@ -148,7 +148,7 @@ export default function AccountBillingPageClient() {
                 type="button"
                 disabled={portalLoading}
                 onClick={openPortal}
-                className="rounded-xl bg-emerald-500 px-4 py-3 text-sm font-medium text-slate-950 hover:bg-emerald-400 disabled:opacity-60"
+                className="rounded-xl border border-slate-700 bg-slate-950/30 px-4 py-3 text-sm text-slate-100 hover:border-emerald-400/60 disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:border-slate-700"
               >
                 {portalLoading ? "開いています…" : "支払い/解約を管理"}
               </button>

@@ -1555,45 +1555,6 @@ const GolfResultPage = () => {
           </section>
         )}
 
-        {userState.hasProAccess && comparison && (comparison.improved.length > 0 || comparison.regressed.length > 0) && (
-          <section className="rounded-xl bg-slate-900/70 border border-slate-700 p-4 space-y-3">
-            <h2 className="text-sm font-semibold">前回比 改善ポイント / 悪化ポイント</h2>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-              <div className="rounded-lg border border-emerald-700/50 bg-emerald-900/20 p-3 space-y-2">
-                <div className="flex items-center justify-between">
-                  <p className="text-sm font-semibold text-emerald-300">改善ポイント</p>
-                  <span className="text-xs text-emerald-200">{comparison.improved.length} 件</span>
-                </div>
-                {comparison.improved.length > 0 ? (
-                  <ul className="list-disc pl-4 text-sm space-y-1 text-emerald-50">
-                    {comparison.improved.map((item, idx) => (
-                      <li key={idx}>{item}</li>
-                    ))}
-                  </ul>
-                ) : (
-                  <p className="text-xs text-emerald-100">改善点は報告されていません。</p>
-                )}
-              </div>
-
-              <div className="rounded-lg border border-rose-700/50 bg-rose-900/20 p-3 space-y-2">
-                <div className="flex items-center justify-between">
-                  <p className="text-sm font-semibold text-rose-200">悪化ポイント</p>
-                  <span className="text-xs text-rose-100">{comparison.regressed.length} 件</span>
-                </div>
-                {comparison.regressed.length > 0 ? (
-                  <ul className="list-disc pl-4 text-sm space-y-1 text-rose-50">
-                    {comparison.regressed.map((item, idx) => (
-                      <li key={idx}>{item}</li>
-                    ))}
-                  </ul>
-                ) : (
-                  <p className="text-xs text-rose-100">悪化ポイントは報告されていません。</p>
-                )}
-              </div>
-            </div>
-          </section>
-        )}
-
         {/* フェーズごとの評価 */}
         {shouldShowPhaseEvaluation ? (
         <section className="rounded-xl bg-slate-900/70 border border-slate-700 p-4 space-y-4">
@@ -1758,6 +1719,56 @@ const GolfResultPage = () => {
           </section>
         )}
 
+        {userState.hasProAccess &&
+          (isPhaseReevalLoading ? (
+            <section className="rounded-xl bg-slate-900/70 border border-slate-700 p-4 space-y-3">
+              <h2 className="text-sm font-semibold">前回比 改善ポイント / 悪化ポイント</h2>
+              <div className="rounded-lg border border-slate-800 bg-slate-950/40 p-3 text-xs text-slate-300">
+                フェーズ別評価の生成に合わせて比較を作成中…
+              </div>
+            </section>
+          ) : (
+            comparison &&
+            (comparison.improved.length > 0 || comparison.regressed.length > 0) && (
+              <section className="rounded-xl bg-slate-900/70 border border-slate-700 p-4 space-y-3">
+                <h2 className="text-sm font-semibold">前回比 改善ポイント / 悪化ポイント</h2>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  <div className="rounded-lg border border-emerald-700/50 bg-emerald-900/20 p-3 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <p className="text-sm font-semibold text-emerald-300">改善ポイント</p>
+                      <span className="text-xs text-emerald-200">{comparison.improved.length} 件</span>
+                    </div>
+                    {comparison.improved.length > 0 ? (
+                      <ul className="list-disc pl-4 text-sm space-y-1 text-emerald-50">
+                        {comparison.improved.map((item, idx) => (
+                          <li key={idx}>{item}</li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p className="text-xs text-emerald-100">改善点は報告されていません。</p>
+                    )}
+                  </div>
+
+                  <div className="rounded-lg border border-rose-700/50 bg-rose-900/20 p-3 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <p className="text-sm font-semibold text-rose-200">悪化ポイント</p>
+                      <span className="text-xs text-rose-100">{comparison.regressed.length} 件</span>
+                    </div>
+                    {comparison.regressed.length > 0 ? (
+                      <ul className="list-disc pl-4 text-sm space-y-1 text-rose-50">
+                        {comparison.regressed.map((item, idx) => (
+                          <li key={idx}>{item}</li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p className="text-xs text-rose-100">悪化ポイントは報告されていません。</p>
+                    )}
+                  </div>
+                </div>
+              </section>
+            )
+          ))}
+
         {!userState.hasProAccess && previousHistory && (
           <section className="rounded-xl bg-slate-900/50 border border-slate-700 p-4 space-y-2 relative">
             <div className="opacity-40">
@@ -1800,7 +1811,10 @@ const GolfResultPage = () => {
                     <span className="text-sm font-semibold">{bestType.label}</span>
                     <span className="text-[11px] text-emerald-100">{bestType.reason}</span>
                   </div>
-                  <span className="text-xs font-semibold text-emerald-50">{Math.round(bestType.matchScore * 100)}%</span>
+                  <span className="flex items-center gap-1 text-xs font-semibold text-emerald-50">
+                    <span className="text-[10px] font-medium text-emerald-100/80">適合性</span>
+                    <span>{Math.round(bestType.matchScore * 100)}%</span>
+                  </span>
                 </div>
               </div>
 
@@ -1925,7 +1939,10 @@ const GolfResultPage = () => {
                         </span>
                         <span className="text-[11px] text-slate-400">{reasonText}</span>
                       </div>
-                      <span className="text-xs font-semibold text-emerald-200">{Math.round(match.matchScore * 100)}%</span>
+                      <span className="flex items-center gap-1 text-xs font-semibold text-emerald-200">
+                        <span className="text-[10px] font-medium text-slate-400">適合性</span>
+                        <span>{Math.round(match.matchScore * 100)}%</span>
+                      </span>
                     </button>
                     {isOpen && detail && (
                       <div className="border-t border-slate-800 px-3 py-3 space-y-2 animate-accordion">
