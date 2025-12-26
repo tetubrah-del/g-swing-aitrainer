@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import type { UserUsageState } from "@/app/golf/types";
+import { formatPlanLabel } from "@/app/lib/planLabel";
 
 type BillingStatusResponse = {
   provider: "none" | "stripe" | "apple" | "google" | "revenuecat" | null;
@@ -109,7 +110,7 @@ export default function AccountBillingPageClient() {
         {userState && (
           <div className="mt-6 rounded-2xl border border-slate-800 bg-slate-900/30 p-6">
             <div className="text-sm text-slate-300">現在のプラン</div>
-            <div className="mt-1 text-lg font-medium">{userState.plan ?? "-"}</div>
+            <div className="mt-1 text-lg font-medium">{formatPlanLabel(userState.plan)}</div>
             <div className="mt-1 text-xs text-slate-400">
               PRO判定: {userState.hasProAccess ? "有効" : "無効"}
               {userState.entitlements?.billingProvider ? ` / provider: ${userState.entitlements.billingProvider}` : ""}

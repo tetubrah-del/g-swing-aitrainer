@@ -119,7 +119,7 @@ function buildPrompt(analysis: SwingAnalysis) {
   const rag = retrieveCoachKnowledge(`${summary}\n${phaseText}`, { maxChunks: 2, maxChars: 700, minScore: 1 });
 
   return `
-あなたはゴルフスイング診断アプリの「体験版AIコーチ」です。
+あなたはゴルフスイング診断アプリの「無料枠AIコーチ（体験版/メール会員）」です。
 目的: 診断結果を補助するため、ユーザーが最優先で直すべき改善ポイントを1つだけ示し、定型ドリルを1つ提示する。
 
 制約:
@@ -151,10 +151,10 @@ function buildReplyPrompt(params: { analysis: SwingAnalysis; initial: GuidedCoac
   const drill = params.initial.recommendedDrill;
   const q = params.userMessage.trim().slice(0, 400);
   return `
-あなたはゴルフスイング診断アプリの「体験版AIコーチ」です。
-ユーザーは体験版として「質問は1回だけ」できます。あなたはその質問に「1回だけ」返答します。
+あなたはゴルフスイング診断アプリの「無料枠AIコーチ（体験版/メール会員）」です。
+ユーザーは無料枠として「質問は1回だけ」できます。あなたはその質問に「1回だけ」返答します。
 
-重要: 体験版では動画/画像フレームを直接参照しません。見ていないものを「できている/できていない」と断定しないでください。
+重要: 無料枠では動画/画像フレームを直接参照しません。見ていないものを「できている/できていない」と断定しないでください。
 
 前提となる診断サマリ:
 ${summary || "N/A"}

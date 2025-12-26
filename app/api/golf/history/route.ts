@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import crypto from "node:crypto";
 import { auth } from "@/auth";
 import { listAnalyses } from "@/app/lib/store";
-import { findUserByEmail, getUserById } from "@/app/lib/userStore";
+import { findUserByEmail, getUserById, linkAnonymousIdToUser } from "@/app/lib/userStore";
 import { readAnonymousFromRequest, setAnonymousTokenOnResponse } from "@/app/lib/anonymousToken";
 import { readEmailSessionFromRequest } from "@/app/lib/emailSession";
 import { readActiveAuthFromRequest, setActiveAuthOnResponse } from "@/app/lib/activeAuth";
@@ -78,7 +78,18 @@ export async function GET(req: NextRequest) {
   }
   const isLoggedIn = !!account;
   const resolvedUserId: string | null = account?.userId ?? null;
-  const anonymousUserId: string | null = isLoggedIn ? null : tokenAnonymous ?? null;
+  const tokenAnonId: string | null = tokenAnonymous ?? null;
+
+  // If the user logs in after using the app anonymously, attach those records to keep history across upgrade.
+  if (resolvedUserId && tokenAnonId) {
+    try {
+      await linkAnonymousIdToUser(resolvedUserId, tokenAnonId);
+    } catch {
+      // ignore: history should still load even if merge fails
+    }
+  }
+
+  const anonymousUserId: string | null = isLoggedIn ? null : tokenAnonId;
 
   const now = Date.now();
   const isPro = !!account?.proAccess && (account.proAccessExpiresAt == null || account.proAccessExpiresAt > now);

@@ -896,7 +896,7 @@ const GolfUploadPage = () => {
         </h1>
         <div className="flex justify-center">
           <Link
-            href="/golf/upload-impact"
+            href="/golf/upload"
             className="text-xs text-emerald-200/90 hover:text-emerald-100 underline underline-offset-4"
           >
             インパクトを手動指定して解析する（周辺16枚）

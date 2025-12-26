@@ -7,6 +7,7 @@ import { signOut } from "next-auth/react";
 import dynamic from "next/dynamic";
 import { useUserState, DEFAULT_USER_USAGE_STATE } from "@/app/golf/state/userState";
 import { resetMeUserStateCache } from "@/app/golf/hooks/useMeUserState";
+import { formatPlanLabel } from "@/app/lib/planLabel";
 
 function AccountMenuInner() {
   const router = useRouter();
@@ -54,9 +55,9 @@ function AccountMenuInner() {
       </button>
 
       {open && (
-        <div className="mt-2 w-56 overflow-hidden rounded-xl border border-slate-800 bg-slate-950/95 backdrop-blur shadow-xl">
+          <div className="mt-2 w-56 overflow-hidden rounded-xl border border-slate-800 bg-slate-950/95 backdrop-blur shadow-xl">
           <div className="px-3 py-2 text-[11px] text-slate-400 border-b border-slate-800">
-            {userState.plan ? `プラン: ${userState.plan}` : "プラン: -"}
+            {userState.plan ? `プラン: ${formatPlanLabel(userState.plan)}` : "プラン: -"}
           </div>
           <nav className="flex flex-col">
             <Link onClick={close} href="/golf/upload" className="px-3 py-2 text-sm text-slate-100 hover:bg-slate-900/60">

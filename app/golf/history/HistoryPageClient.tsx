@@ -303,11 +303,11 @@ export default function HistoryPage() {
               </div>
 
               <div className="rounded-lg border border-slate-800 bg-slate-900/40 p-4 relative">
-                <div className="opacity-40 space-y-2">
-                  <p className="text-sm font-semibold text-slate-100">過去の履歴一覧（PRO）</p>
-                  <p className="text-xs text-slate-300">
-                    PROなら推移グラフ・履歴の蓄積・前回比の比較ができ、AIコーチもフリーチャット＋診断画像参照で深掘りできます。
-                  </p>
+                <p className="text-sm font-semibold text-slate-100">過去の履歴一覧（PRO）</p>
+                <p className="mt-1 text-xs font-semibold text-slate-100">
+                  PROなら推移グラフ・履歴の蓄積・前回比の比較ができ、AIコーチもフリーチャット＋診断画像参照で深掘りできます。
+                </p>
+                <div className="mt-3 opacity-40 space-y-2">
                   <div className="grid gap-2">
                     {[0, 1].map((i) => (
                       <div key={i} className="rounded-lg border border-slate-800 bg-slate-950/20 p-3 text-xs text-slate-300">

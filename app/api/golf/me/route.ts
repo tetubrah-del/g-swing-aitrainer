@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/auth";
 import { buildUserUsageState } from "@/app/lib/membership";
-import { findUserByEmail, getUserById, upsertGoogleUser } from "@/app/lib/userStore";
+import { findUserByEmail, getUserById, linkAnonymousIdToUser, upsertGoogleUser } from "@/app/lib/userStore";
 import { readAnonymousFromRequest, setAnonymousTokenOnResponse } from "@/app/lib/anonymousToken";
 import { readEmailSessionFromRequest } from "@/app/lib/emailSession";
 import { readActiveAuthFromRequest, setActiveAuthOnResponse } from "@/app/lib/activeAuth";
@@ -48,6 +48,16 @@ export async function GET(request: NextRequest) {
   }
 
   const anonId = tokenAnonymous ?? null;
+
+  // If a logged-in user is using a device anonymous token, link it so pre-login analyses remain in history after upgrade.
+  if (account?.userId && anonId) {
+    try {
+      await linkAnonymousIdToUser(account.userId, anonId);
+    } catch {
+      // ignore: never fail /me due to merge
+    }
+  }
+
   const userState = await buildUserUsageState({
     user: account,
     anonymousUserId: anonId,

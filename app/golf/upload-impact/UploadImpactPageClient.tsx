@@ -2,8 +2,8 @@
 
 import Link from "next/link";
 import Image from "next/image";
-import { useRouter } from "next/navigation";
-import { FormEvent, useMemo, useState } from "react";
+import { usePathname, useRouter } from "next/navigation";
+import { FormEvent, useEffect, useMemo, useState } from "react";
 import type { UserUsageState } from "@/app/golf/types";
 import { getAnonymousUserId } from "@/app/golf/utils/historyStorage";
 import { setActiveAnalysisPointer } from "@/app/golf/utils/reportStorage";
@@ -30,6 +30,7 @@ type AnalyzeResponse = {
 export default function UploadImpactPageClient() {
   useMeUserState();
   const router = useRouter();
+  const pathname = usePathname();
   const { state: userState, setUserState } = useUserState();
 
   const [file, setFile] = useState<File | null>(null);
@@ -41,8 +42,11 @@ export default function UploadImpactPageClient() {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [quotaExceeded, setQuotaExceeded] = useState(false);
+  const [limitInfo, setLimitInfo] = useState<UserUsageState["monthlyAnalysis"] | null>(null);
 
   const anonymousUserId = useMemo(() => getAnonymousUserId(), []);
+  const registerUrl = `/golf/register?next=${encodeURIComponent(pathname || "/golf/upload")}`;
+  const isLoggedIn = !!(userState.isAuthenticated || userState.email || userState.userId);
 
   const headers = useMemo(() => {
     const out: Record<string, string> = {};
@@ -51,6 +55,14 @@ export default function UploadImpactPageClient() {
     if (userState.authProvider) out["x-auth-provider"] = userState.authProvider;
     return out;
   }, [userState.authProvider, userState.email, userState.userId]);
+
+  useEffect(() => {
+    if (!userState.hasProAccess && userState.monthlyAnalysis) {
+      setLimitInfo(userState.monthlyAnalysis ?? null);
+    } else if (userState.hasProAccess) {
+      setLimitInfo(null);
+    }
+  }, [userState]);
 
   const resetSelection = () => {
     setPreviewFrames(null);
@@ -136,6 +148,9 @@ export default function UploadImpactPageClient() {
           if (data?.userState) {
             setUserState(data.userState);
             primeMeUserStateCache(data.userState);
+            if (!data.userState.hasProAccess && data.userState.monthlyAnalysis) {
+              setLimitInfo(data.userState.monthlyAnalysis ?? null);
+            }
           }
           setQuotaExceeded(true);
           const reason = data?.error;
@@ -173,20 +188,65 @@ export default function UploadImpactPageClient() {
       <div className="w-full max-w-5xl rounded-2xl bg-slate-900/70 border border-slate-700 p-6 space-y-6">
         <header className="flex items-end justify-between gap-4">
           <div>
-            <h1 className="text-2xl font-semibold">AIゴルフスイング診断（インパクト手動指定）</h1>
+            <h1 className="text-2xl font-semibold">AIゴルフスイング診断</h1>
             <p className="text-xs text-slate-400 mt-1">プレビューから「ボールに当たった瞬間」を1枚タップ → その周辺16枚で解析します。</p>
           </div>
-          <Link
-            href="/golf/upload"
-            className="rounded-md border border-slate-700 px-3 py-2 text-sm text-slate-100 hover:border-emerald-400 hover:text-emerald-200"
-          >
-            通常の診断へ
-          </Link>
         </header>
+
+        {!userState.hasProAccess && limitInfo && (
+          <div className="rounded-lg border border-amber-400/60 bg-amber-500/10 px-4 py-3 text-sm text-amber-50">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <div className="text-xs text-amber-200">無料診断の利用状況（今月）</div>
+                <div className="mt-1 font-medium">
+                  {limitInfo.used ?? 0} / {limitInfo.limit ?? "-"} 回（残り {limitInfo.remaining ?? "-"} 回）
+                </div>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {!isLoggedIn && (
+                  <button
+                    type="button"
+                    className="rounded-md border border-amber-200/60 bg-white/10 px-3 py-2 text-xs font-semibold hover:bg-white/15"
+                    onClick={() => router.push(registerUrl)}
+                  >
+                    メール会員登録（無料）
+                  </button>
+                )}
+                {(limitInfo.remaining ?? 0) === 0 && (
+                  <button
+                    type="button"
+                    className="rounded-md border border-emerald-200/60 bg-emerald-500/15 px-3 py-2 text-xs font-semibold text-emerald-50 hover:bg-emerald-500/25"
+                    onClick={() => router.push("/pricing")}
+                  >
+                    PROにアップグレード
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
 
         {error && (
           <div className={`rounded-lg border px-4 py-3 text-sm ${quotaExceeded ? "border-amber-400/60 bg-amber-500/10 text-amber-50" : "border-rose-400/60 bg-rose-500/10 text-rose-50"}`}>
-            {error}
+            <div>{error}</div>
+            {quotaExceeded && (
+              <div className="mt-3 flex flex-wrap gap-2">
+                {!isLoggedIn && (
+                  <Link
+                    href={registerUrl}
+                    className="rounded-md bg-emerald-500 hover:bg-emerald-400 px-3 py-2 text-xs font-semibold text-slate-900"
+                  >
+                    メール会員登録（無料）
+                  </Link>
+                )}
+                <Link
+                  href="/pricing"
+                  className="rounded-md border border-emerald-200/60 bg-emerald-500/15 px-3 py-2 text-xs font-semibold text-emerald-50 hover:bg-emerald-500/25"
+                >
+                  PROにアップグレード
+                </Link>
+              </div>
+            )}
           </div>
         )}
 
