@@ -6,6 +6,7 @@ import path from "node:path";
 type VerificationRecord = {
   tokenHash: string;
   email: string;
+  nickname: string | null;
   anonymousUserId: string | null;
   createdAt: number;
   expiresAt: number;
@@ -23,9 +24,11 @@ async function loadFromDisk() {
       if (!value || typeof value !== "object") return;
       if (typeof value.email !== "string") return;
       if (typeof value.expiresAt !== "number") return;
+      const nickname = typeof value.nickname === "string" ? value.nickname : null;
       records.set(tokenHash, {
         tokenHash,
         email: value.email,
+        nickname,
         anonymousUserId: typeof value.anonymousUserId === "string" ? value.anonymousUserId : null,
         createdAt: typeof value.createdAt === "number" ? value.createdAt : Date.now(),
         expiresAt: value.expiresAt,
@@ -61,6 +64,7 @@ const generateToken = (): string => crypto.randomBytes(32).toString("base64url")
 
 export async function createEmailVerification(params: {
   email: string;
+  nickname: string | null;
   anonymousUserId: string | null;
   ttlMs?: number;
 }): Promise<{ token: string; expiresAt: number }> {
@@ -72,6 +76,7 @@ export async function createEmailVerification(params: {
   records.set(tokenHash, {
     tokenHash,
     email: params.email,
+    nickname: params.nickname,
     anonymousUserId: params.anonymousUserId,
     createdAt: now,
     expiresAt,
@@ -83,6 +88,7 @@ export async function createEmailVerification(params: {
 
 export async function consumeEmailVerification(token: string): Promise<{
   email: string;
+  nickname: string | null;
   anonymousUserId: string | null;
 }> {
   await loadPromise;
@@ -94,5 +100,5 @@ export async function consumeEmailVerification(token: string): Promise<{
   record.usedAt = Date.now();
   records.set(tokenHash, record);
   await persistToDisk();
-  return { email: record.email, anonymousUserId: record.anonymousUserId };
+  return { email: record.email, nickname: record.nickname ?? null, anonymousUserId: record.anonymousUserId };
 }

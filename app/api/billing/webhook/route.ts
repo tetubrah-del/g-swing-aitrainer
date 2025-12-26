@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import type Stripe from "stripe";
 import { getStripe } from "@/app/lib/billing/stripe";
 import { updateStripeCustomerForUser, updateStripeSubscriptionForUser } from "@/app/lib/userStore";
+import { getReferralCodeAtRegistration, recordPayment } from "@/app/lib/referralTracking";
 
 export const runtime = "nodejs";
 
@@ -87,9 +88,34 @@ export async function POST(request: NextRequest) {
 
       case "invoice.paid":
       case "invoice.payment_failed":
-      case "invoice.finalized":
-        // subscription.updated に寄せる（必要なら後で精緻化）
+      case "invoice.finalized": {
+        if (event.type !== "invoice.paid") {
+          // subscription.updated に寄せる（必要なら後で精緻化）
+          break;
+        }
+
+        const invoice = event.data.object as Stripe.Invoice;
+        const subscriptionId =
+          typeof invoice.subscription === "string" ? invoice.subscription : invoice.subscription?.id ?? null;
+        if (!subscriptionId) break;
+
+        const subscription = await stripe.subscriptions.retrieve(subscriptionId);
+        const userId = extractUserIdFromSubscription(subscription);
+        if (!userId) break;
+
+        const amount = typeof invoice.amount_paid === "number" ? invoice.amount_paid : 0;
+        const paidAtSec =
+          typeof invoice.status_transitions?.paid_at === "number"
+            ? invoice.status_transitions.paid_at
+            : typeof invoice.created === "number"
+              ? invoice.created
+              : null;
+        const paidAtMs = paidAtSec ? paidAtSec * 1000 : Date.now();
+
+        const referralCode = getReferralCodeAtRegistration(userId);
+        recordPayment({ userId, amount, referralCode, paidAtMs });
         break;
+      }
       default:
         break;
     }

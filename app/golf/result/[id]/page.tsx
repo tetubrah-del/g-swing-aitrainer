@@ -27,6 +27,7 @@ import { saveSwingTypeResult } from '@/app/golf/utils/swingTypeStorage';
 import { useUserState } from '@/app/golf/state/userState';
 import ProUpsellModal from '@/app/components/ProUpsellModal';
 import PhaseFrameSelector from './PhaseFrameSelector';
+import { clearDiagnostics, loadDiagnostics, saveDiagnostics } from '@/app/golf/utils/diagnosticsStorage';
 
 type SwingTypeBadge = {
   label: string;
@@ -135,6 +136,25 @@ type RoundEstimateMetrics = {
   fwKeep: string;
   gir: string;
   ob: string;
+};
+
+const computeFallbackRoundEstimates = (totalScore: number): RoundEstimateMetrics => {
+  const mid = Math.round(105 - totalScore * 0.28);
+  const spread = 3;
+  const clamp = (v: number, min: number, max: number) => Math.min(max, Math.max(min, v));
+  const low = clamp(mid - spread, 60, 115);
+  const high = clamp(mid + spread, 60, 115);
+
+  const fwKeep = clamp(50 + totalScore * 0.18, 40, 75);
+  const gir = clamp(32 + totalScore * 0.18, 25, 65);
+  const ob = clamp(3.2 - totalScore * 0.012, 0.5, 4);
+
+  return {
+    strokeRange: `${low}〜${high}`,
+    fwKeep: `${fwKeep.toFixed(0)}%`,
+    gir: `${gir.toFixed(0)}%`,
+    ob: `${ob.toFixed(1)} 回`,
+  };
 };
 
 const buildLocalCausalImpact = (
@@ -482,6 +502,10 @@ const GolfResultPage = () => {
   const [hasSeededCoachContext, setHasSeededCoachContext] = useState(false);
   const [fallbackNote, setFallbackNote] = useState<string | null>(null);
   const [proModalOpen, setProModalOpen] = useState(false);
+  const [diagnosticsStatus, setDiagnosticsStatus] = useState<'idle' | 'generating' | 'ready'>('idle');
+  const [isRoundEstimateLoading, setIsRoundEstimateLoading] = useState(false);
+  const [shareBusy, setShareBusy] = useState(false);
+  const [shareMessage, setShareMessage] = useState<string | null>(null);
 
   useEffect(() => {
     const id = getAnonymousUserId();
@@ -499,6 +523,166 @@ const GolfResultPage = () => {
     router.replace(nextUrl);
     return () => clearTimeout(timer);
   }, [pathname, router, searchParams]);
+
+  const createShareUrl = useCallback(
+    async (snsType: 'twitter' | 'instagram' | 'copy'): Promise<string> => {
+      setShareBusy(true);
+      setShareMessage(null);
+      try {
+        const totalScoreRaw = data?.result?.totalScore as unknown;
+        const totalScore =
+          typeof totalScoreRaw === 'number'
+            ? totalScoreRaw
+            : typeof totalScoreRaw === 'string'
+              ? Number(totalScoreRaw)
+              : null;
+        const normalizedScore = Number.isFinite(totalScore as number) ? (totalScore as number) : null;
+
+        const createdAtRaw = data?.createdAt as unknown;
+        const createdAt =
+          typeof createdAtRaw === 'number'
+            ? createdAtRaw
+            : typeof createdAtRaw === 'string'
+              ? Number(createdAtRaw)
+              : null;
+        const normalizedCreatedAt = Number.isFinite(createdAt as number) ? (createdAt as number) : null;
+
+        const clamp = (n: number, min: number, max: number) => Math.max(min, Math.min(max, n));
+        const allFrames = (data?.result?.sequence?.frames ?? [])
+          .slice(0, 16)
+          .map((f) => f.url)
+          .filter((u): u is string => typeof u === 'string' && u.length > 0);
+
+        const normalizeIndices = (indices: number[]) => {
+          const max = allFrames.length || 16;
+          const normalized = indices
+            .filter((n) => typeof n === 'number' && Number.isFinite(n))
+            .map((n) => clamp(Math.round(n), 1, max));
+          return Array.from(new Set(normalized)).sort((a, b) => a - b);
+        };
+
+        const manualSelectedIndices = normalizeIndices([
+          ...(manualPhase.address ?? []),
+          ...(manualPhase.backswing ?? []),
+          ...(manualPhase.top ?? []),
+          ...(manualPhase.downswing ?? []),
+          ...(manualPhase.impact ?? []),
+          ...(manualPhase.finish ?? []),
+        ]);
+
+        const stageSelectedIndices = normalizeIndices(
+          (data?.result?.sequence?.stages ?? []).flatMap((s) => (Array.isArray(s.keyFrameIndices) ? s.keyFrameIndices : []))
+        );
+
+        const baseIndices = manualSelectedIndices.length ? manualSelectedIndices : stageSelectedIndices;
+        const baseFrames = baseIndices.map((n) => allFrames[n - 1]).filter((u): u is string => typeof u === 'string' && u.length > 0);
+
+        const fillToEight = (frames: string[]) => {
+          const uniq = Array.from(new Set(frames));
+          if (uniq.length >= 8) return uniq.slice(0, 8);
+          for (const u of allFrames) {
+            if (uniq.length >= 8) break;
+            if (!uniq.includes(u)) uniq.push(u);
+          }
+          return uniq;
+        };
+
+        const selectedFrames = baseFrames.length ? fillToEight(baseFrames) : fillToEight(allFrames);
+
+        const sharePayload = {
+          analysisId: id,
+          totalScore: normalizedScore,
+          createdAt: normalizedCreatedAt,
+          phases: data?.result?.phases ?? null,
+          summary: data?.result?.summary ?? null,
+          recommendedDrills: Array.isArray(data?.result?.recommendedDrills) ? data!.result!.recommendedDrills : [],
+          selectedFrames,
+        };
+        const res = await fetch('/api/share/event', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            analysisId: id,
+            snsType,
+            totalScore: normalizedScore,
+            createdAt: normalizedCreatedAt,
+            sharePayload,
+          }),
+        });
+        const json = (await res.json().catch(() => ({}))) as { shareUrl?: string; error?: string };
+        if (!res.ok || !json.shareUrl) throw new Error(json.error || '共有リンクの作成に失敗しました');
+        return json.shareUrl;
+      } finally {
+        setShareBusy(false);
+      }
+    },
+    [data, id, manualPhase.address, manualPhase.backswing, manualPhase.downswing, manualPhase.finish, manualPhase.impact, manualPhase.top]
+  );
+
+  const copyToClipboard = useCallback(async (text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      try {
+        const el = document.createElement('textarea');
+        el.value = text;
+        el.style.position = 'fixed';
+        el.style.left = '-1000px';
+        document.body.appendChild(el);
+        el.focus();
+        el.select();
+        const ok = document.execCommand('copy');
+        document.body.removeChild(el);
+        return ok;
+      } catch {
+        return false;
+      }
+    }
+  }, []);
+
+  const handleCopyShare = useCallback(async () => {
+    try {
+      const shareUrl = await createShareUrl('copy');
+      const ok = await copyToClipboard(shareUrl);
+      setShareMessage(ok ? 'リンクをコピーしました' : 'リンクをコピーできませんでした');
+    } catch (e) {
+      setShareMessage(e instanceof Error ? e.message : '共有に失敗しました');
+    }
+  }, [copyToClipboard, createShareUrl]);
+
+  const handleTwitterShare = useCallback(async () => {
+    try {
+      const shareUrl = await createShareUrl('twitter');
+      const intent = new URL('https://twitter.com/intent/tweet');
+      intent.searchParams.set('url', shareUrl);
+      intent.searchParams.set('text', 'ゴルフAIスイング診断の結果を共有します');
+      window.open(intent.toString(), '_blank', 'noopener,noreferrer');
+    } catch (e) {
+      setShareMessage(e instanceof Error ? e.message : '共有に失敗しました');
+    }
+  }, [createShareUrl]);
+
+  const handleInstagramShare = useCallback(async () => {
+    try {
+      const shareUrl = await createShareUrl('instagram');
+      if (typeof navigator !== 'undefined' && 'share' in navigator) {
+        try {
+          // Instagram web share is limited; navigator.share falls back to OS share sheet on mobile.
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          await (navigator as any).share({ url: shareUrl, text: 'ゴルフAIスイング診断の結果' });
+          return;
+        } catch {
+          // fall back to copy
+        }
+      }
+      await copyToClipboard(shareUrl);
+      window.open('https://www.instagram.com/', '_blank', 'noopener,noreferrer');
+      setShareMessage('リンクをコピーしました（Instagramを開きました）');
+    } catch (e) {
+      setShareMessage(e instanceof Error ? e.message : '共有に失敗しました');
+    }
+  }, [copyToClipboard, createShareUrl]);
 
   useEffect(() => {
     if (!id) return;
@@ -730,164 +914,21 @@ const GolfResultPage = () => {
   }, [data?.result?.totalScore]);
 
   const fallbackRoundEstimates = useMemo<RoundEstimateMetrics>(() => {
-    const totalScore = data?.result?.totalScore ?? 0;
-    // 少し厳しめに換算して、実力より甘く出ないよう調整
-    const mid = Math.round(105 - totalScore * 0.28); // スコアが高いほどストロークは小さい想定
-    const spread = 3;
-    const clamp = (v: number, min: number, max: number) => Math.min(max, Math.max(min, v));
-    const low = clamp(mid - spread, 60, 115);
-    const high = clamp(mid + spread, 60, 115);
-
-    // 簡易推定（少し厳しめ）
-    const fwKeep = clamp(50 + totalScore * 0.18, 40, 75); // フェアウェイキープ率
-    const gir = clamp(32 + totalScore * 0.18, 25, 65); // パーオン率
-    const ob = clamp(3.2 - totalScore * 0.012, 0.5, 4); // 推定OB数/18H
-
-    return {
-      strokeRange: `${low}〜${high}`,
-      fwKeep: `${fwKeep.toFixed(0)}%`,
-      gir: `${gir.toFixed(0)}%`,
-      ob: `${ob.toFixed(1)} 回`,
-    };
+    return computeFallbackRoundEstimates(data?.result?.totalScore ?? 0);
   }, [data?.result?.totalScore]);
 
   const [roundEstimates, setRoundEstimates] = useState<RoundEstimateMetrics>(fallbackRoundEstimates);
 
   useEffect(() => {
     setRoundEstimates(fallbackRoundEstimates);
-    if (!data?.result) return;
-
-    let cancelled = false;
-    const run = async () => {
-      try {
-        const res = await fetch('/api/golf/round-estimate', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            totalScore: data.result.totalScore,
-            phases: data.result.phases,
-            meta: data.meta,
-          }),
-        });
-
-        if (!res.ok) {
-          const body = await res.json().catch(() => ({}));
-          throw new Error(body.error || 'round-estimate failed');
-        }
-
-        const json = (await res.json()) as Partial<{
-          strokeRange: string;
-          fwKeep: string;
-          gir: string;
-          ob: string;
-        }>;
-
-        if (cancelled) return;
-        setRoundEstimates({
-          strokeRange: typeof json.strokeRange === 'string' ? json.strokeRange : fallbackRoundEstimates.strokeRange,
-          fwKeep: typeof json.fwKeep === 'string' ? json.fwKeep : fallbackRoundEstimates.fwKeep,
-          gir: typeof json.gir === 'string' ? json.gir : fallbackRoundEstimates.gir,
-          ob: typeof json.ob === 'string' ? json.ob : fallbackRoundEstimates.ob,
-        });
-      } catch (err) {
-        console.warn('[round-estimate fetch failed]', err);
-        if (!cancelled) setRoundEstimates(fallbackRoundEstimates);
-      }
-    };
-
-    run();
-    return () => {
-      cancelled = true;
-    };
-  }, [data?.result, data?.meta, fallbackRoundEstimates]);
+  }, [fallbackRoundEstimates]);
 
   useEffect(() => {
     if (!data?.result) return;
-    if (data.causalImpact) {
-      setCausalImpact(data.causalImpact);
-      setIsCausalLoading(false);
-      return;
-    }
-
-    let cancelled = false;
-    const localFallback = buildLocalCausalImpact(data.result, roundEstimates);
-
-    const run = async () => {
-      try {
-        setIsCausalLoading(true);
-        const res = await fetch('/api/golf/causal-explanation', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            analysisId: data.analysisId,
-            totalScore: data.result.totalScore,
-            phases: data.result.phases,
-            summary: data.result.summary,
-            meta: data.meta,
-            roundEstimates,
-          }),
-        });
-
-        if (!res.ok) {
-          const body = await res.json().catch(() => ({}));
-          throw new Error(body.error || 'causal-explanation failed');
-        }
-
-        const json = (await res.json()) as Partial<{ causalImpact: CausalImpactExplanation }>;
-        if (cancelled) return;
-        setCausalImpact(json.causalImpact ?? localFallback);
-        setSwingTypeResult(deriveSwingTypeResult(data.result, json.causalImpact ?? localFallback));
-      } catch (err) {
-        console.warn('[causal-explanation fetch failed]', err);
-        if (!cancelled) {
-          setCausalImpact(localFallback);
-          setSwingTypeResult(deriveSwingTypeResult(data.result, localFallback));
-        }
-      } finally {
-        if (!cancelled) setIsCausalLoading(false);
-      }
-    };
-
-    run();
-    return () => {
-      cancelled = true;
-    };
-  }, [data?.analysisId, data?.result, data?.meta, data?.causalImpact, roundEstimates]);
-
-  useEffect(() => {
-    if (!data?.result) return;
-    let cancelled = false;
-    const run = async () => {
-      try {
-        setIsSwingTypeLoading(true);
-        const res = await fetch('/api/golf/swing-type', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            analysis: data.result,
-            meta: data.meta,
-            causalImpact,
-          }),
-        });
-        if (!res.ok) {
-          const body = await res.json().catch(() => ({}));
-          throw new Error(body.error || 'swing-type failed');
-        }
-        const json = (await res.json()) as SwingTypeLLMResult;
-        if (cancelled) return;
-        setSwingTypeLLM(json);
-        setSelectedSwingType(json.swingTypeMatch?.[0]?.type ?? null);
-      } catch (err) {
-        console.warn('[swing-type fetch failed]', err);
-      } finally {
-        if (!cancelled) setIsSwingTypeLoading(false);
-      }
-    };
-    run();
-    return () => {
-      cancelled = true;
-    };
-  }, [data?.result, data?.meta, causalImpact]);
+    if (!data.causalImpact) return;
+    setCausalImpact(data.causalImpact);
+    setSwingTypeResult(deriveSwingTypeResult(data.result, data.causalImpact));
+  }, [data?.analysisId, data?.causalImpact, data?.result]);
 
   useEffect(() => {
     if (swingTypeLLM) {
@@ -1136,7 +1177,7 @@ const GolfResultPage = () => {
     setPhaseOverrideAppliedSig(window.localStorage.getItem(key));
   }, [data?.analysisId]);
 
-  const runPhaseReeval = async () => {
+  const runFullEvaluation = async () => {
     if (!data?.analysisId) return;
     const address = manualPhase.address ?? [];
     const backswing = manualPhase.backswing ?? [];
@@ -1147,8 +1188,14 @@ const GolfResultPage = () => {
     if (!address.length && !backswing.length && !top.length && !downswing.length && !impact.length && !finish.length) return;
 
     try {
+      setDiagnosticsStatus('generating');
       setIsPhaseReevalLoading(true);
       setPhaseReevalError(null);
+      setIsRoundEstimateLoading(false);
+      setIsCausalLoading(false);
+      setIsSwingTypeLoading(false);
+      setCausalImpact(null);
+      setSwingTypeLLM(null);
       const res = await fetch("/api/golf/reanalyze-phases", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1174,9 +1221,114 @@ const GolfResultPage = () => {
         setSwingTypes(deriveSwingTypes(next.result));
         setSwingTypeResult(deriveSwingTypeResult(next.result));
       }
+
+      if (!next.result) {
+        setDiagnosticsStatus('ready');
+        return;
+      }
+
+      const fallback = computeFallbackRoundEstimates(next.result.totalScore ?? 0);
+      setRoundEstimates(fallback);
+      setIsRoundEstimateLoading(true);
+      let resolvedRound = fallback;
+      try {
+        const roundRes = await fetch('/api/golf/round-estimate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            totalScore: next.result.totalScore,
+            phases: next.result.phases,
+            meta: next.meta,
+          }),
+        });
+        if (roundRes.ok) {
+          const roundJson = (await roundRes.json().catch(() => ({}))) as Partial<RoundEstimateMetrics>;
+          resolvedRound = {
+            strokeRange: typeof roundJson.strokeRange === 'string' ? roundJson.strokeRange : fallback.strokeRange,
+            fwKeep: typeof roundJson.fwKeep === 'string' ? roundJson.fwKeep : fallback.fwKeep,
+            gir: typeof roundJson.gir === 'string' ? roundJson.gir : fallback.gir,
+            ob: typeof roundJson.ob === 'string' ? roundJson.ob : fallback.ob,
+          };
+        }
+      } catch {
+        // ignore (use fallback)
+      } finally {
+        setIsRoundEstimateLoading(false);
+        setRoundEstimates(resolvedRound);
+      }
+
+      const localCausalFallback = buildLocalCausalImpact(next.result, resolvedRound);
+      let resolvedCausal = localCausalFallback;
+      if (next.causalImpact) {
+        resolvedCausal = next.causalImpact;
+      } else {
+        setIsCausalLoading(true);
+        try {
+          const causalRes = await fetch('/api/golf/causal-explanation', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              analysisId: next.analysisId,
+              totalScore: next.result.totalScore,
+              phases: next.result.phases,
+              summary: next.result.summary,
+              meta: next.meta,
+              roundEstimates: resolvedRound,
+            }),
+          });
+          if (causalRes.ok) {
+            const causalJson = (await causalRes.json().catch(() => ({}))) as Partial<{ causalImpact: CausalImpactExplanation }>;
+            resolvedCausal = causalJson.causalImpact ?? localCausalFallback;
+          }
+        } catch {
+          resolvedCausal = localCausalFallback;
+        } finally {
+          setIsCausalLoading(false);
+        }
+      }
+      setCausalImpact(resolvedCausal);
+      setSwingTypeResult(deriveSwingTypeResult(next.result, resolvedCausal));
+      setData({ ...next, causalImpact: resolvedCausal });
+
+      setIsSwingTypeLoading(true);
+      let resolvedSwingType: SwingTypeLLMResult | undefined;
+      try {
+        const stRes = await fetch('/api/golf/swing-type', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            analysis: next.result,
+            meta: next.meta,
+            causalImpact: resolvedCausal,
+          }),
+        });
+        if (stRes.ok) {
+          const stJson = (await stRes.json().catch(() => null)) as SwingTypeLLMResult | null;
+          if (stJson) {
+            setSwingTypeLLM(stJson);
+            setSelectedSwingType(stJson.swingTypeMatch?.[0]?.type ?? null);
+            resolvedSwingType = stJson;
+          }
+        }
+      } catch {
+        // ignore
+      } finally {
+        setIsSwingTypeLoading(false);
+      }
+
+      saveDiagnostics({
+        analysisId: next.analysisId,
+        phaseOverrideSig,
+        roundEstimates: resolvedRound,
+        causalImpact: resolvedCausal,
+        swingTypeLLM: resolvedSwingType,
+      });
+
+      setDiagnosticsStatus('ready');
     } catch (err) {
       const message = err instanceof Error ? err.message : "再評価に失敗しました";
       setPhaseReevalError(message);
+      setDiagnosticsStatus('idle');
     } finally {
       setIsPhaseReevalLoading(false);
     }
@@ -1243,11 +1395,13 @@ const GolfResultPage = () => {
   const handleResetAllPhases = useCallback(() => {
     if (!analysisId) return;
     clearPhaseOverride(analysisId);
+    clearDiagnostics(analysisId);
     setManualPhase({});
     if (typeof window !== 'undefined') {
       window.localStorage.removeItem(`golf_phase_override_applied_${analysisId}`);
     }
     setPhaseOverrideAppliedSig(null);
+    setDiagnosticsStatus('idle');
   }, [analysisId]);
 
   const isReevaluateEnabled =
@@ -1258,6 +1412,37 @@ const GolfResultPage = () => {
       !!manualPhase.downswing?.length ||
       !!manualPhase.impact?.length ||
       !!manualPhase.finish?.length);
+
+  const requiresManualEvaluation = sequenceFrames.length > 0;
+  useEffect(() => {
+    if (!analysisId) return;
+    if (!requiresManualEvaluation) {
+      setDiagnosticsStatus('ready');
+      return;
+    }
+
+    if (typeof window === 'undefined') return;
+    const appliedSig = window.localStorage.getItem(`golf_phase_override_applied_${analysisId}`);
+    if (appliedSig && appliedSig === phaseOverrideSig) {
+      const stored = loadDiagnostics(analysisId);
+      if (stored?.roundEstimates) setRoundEstimates(stored.roundEstimates);
+      if (stored?.causalImpact) {
+        setCausalImpact(stored.causalImpact);
+        if (data?.result) setSwingTypeResult(deriveSwingTypeResult(data.result, stored.causalImpact));
+      }
+      if (stored?.swingTypeLLM) {
+        setSwingTypeLLM(stored.swingTypeLLM);
+        setSelectedSwingType(stored.swingTypeLLM.swingTypeMatch?.[0]?.type ?? null);
+      }
+      setDiagnosticsStatus('ready');
+      return;
+    }
+
+    setDiagnosticsStatus('idle');
+  }, [analysisId, data?.result, phaseOverrideSig, requiresManualEvaluation]);
+
+  const isGeneratingAllDiagnostics =
+    diagnosticsStatus === 'generating' || isPhaseReevalLoading || isRoundEstimateLoading || isCausalLoading || isSwingTypeLoading;
 
   // ▼ early return は Hooks の後に置く
   if (isLoading) {
@@ -1407,6 +1592,49 @@ const GolfResultPage = () => {
           </p>
         )}
 
+        {/* 連続フレーム診断（再評価の起点） */}
+        {(sequenceFrames.length > 0 || sequenceStages.length > 0) && (
+          <section className="rounded-xl bg-slate-900/70 border border-slate-700 p-4 space-y-3">
+            <div className="flex items-center justify-between">
+              <div>
+                <h2 className="text-sm font-semibold">連続フレーム診断</h2>
+              </div>
+              {sequenceFrames.length === 0 ? <span className="text-xs text-slate-300">ステージコメントのみ</span> : null}
+            </div>
+
+            {phaseReevalError && <p className="text-xs text-rose-300">再評価エラー: {phaseReevalError}</p>}
+            {sequenceFrames.length > 0 && (
+              <div id="manual-phase-selector">
+                <PhaseFrameSelector
+                  frames={selectorFrames}
+                  initialConfirmedSelections={initialConfirmedSelections}
+                  syncKey={phaseSelectorSyncKey}
+                  highlightedFrames={highlightFrames}
+                  isReevaluating={isPhaseReevalLoading}
+                  isReevaluateEnabled={isReevaluateEnabled}
+                  onConfirmedSelectionsChange={handleConfirmedSelectionsChange}
+                  onReevaluate={() => void runFullEvaluation()}
+                  onResetAll={handleResetAllPhases}
+                />
+              </div>
+            )}
+          </section>
+        )}
+
+        {isGeneratingAllDiagnostics && (
+          <section className="rounded-xl border border-emerald-500/30 bg-emerald-900/10 p-4">
+            <div className="flex items-center justify-between gap-3">
+              <p className="text-lg font-semibold text-emerald-100">評価を生成中…</p>
+              <p className="text-[11px] text-emerald-200/90">少し時間がかかる場合があります</p>
+            </div>
+            <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-slate-800">
+              <div className="h-full w-full bg-gradient-to-r from-emerald-400 via-emerald-200 to-emerald-400 opacity-70 animate-pulse" />
+            </div>
+          </section>
+        )}
+
+        {diagnosticsStatus === 'ready' && (
+          <>
         {/* スコア */}
         <section className="grid grid-cols-1 sm:grid-cols-3 gap-4">
           <div className="rounded-xl bg-slate-900/70 border border-slate-700 p-4 sm:col-span-1">
@@ -1449,6 +1677,63 @@ const GolfResultPage = () => {
             <p className="text-xs text-slate-400">推定レベル診断</p>
             <p className="text-xl font-semibold mt-1">{levelEstimate.label}</p>
             <p className="text-sm text-slate-300 mt-1">{levelEstimate.detail}</p>
+          </div>
+        </section>
+
+        <section className="rounded-xl bg-slate-900/70 border border-slate-700 p-4">
+          <p className="text-sm font-semibold text-slate-100">📣 この診断結果を共有する</p>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={handleTwitterShare}
+              disabled={shareBusy}
+              className="rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 disabled:bg-slate-800/50 px-3 py-2 text-sm text-slate-100"
+            >
+              Xで共有
+            </button>
+            <button
+              type="button"
+              onClick={handleInstagramShare}
+              disabled={shareBusy}
+              className="rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 disabled:bg-slate-800/50 px-3 py-2 text-sm text-slate-100"
+            >
+              Instagramで共有
+            </button>
+            <button
+              type="button"
+              onClick={handleCopyShare}
+              disabled={shareBusy}
+              className="rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 disabled:bg-slate-800/50 px-3 py-2 text-sm text-slate-100"
+            >
+              リンクをコピー
+            </button>
+          </div>
+          {shareMessage && <p className="text-xs text-slate-300 mt-2">{shareMessage}</p>}
+        </section>
+
+        {/* 推定ラウンドスコア/推奨ドリル */}
+        <section className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div className="rounded-xl bg-slate-900/70 border border-slate-700 p-4">
+            <p className="text-xs text-slate-400">推定ラウンドスコア</p>
+            <p className="text-3xl font-bold mt-1">{roundEstimates.strokeRange}</p>
+            <p className="text-xs text-slate-400 mt-1">ラウンドスコアの目安レンジ（ストローク）</p>
+            <div className="mt-3 space-y-1 text-xs text-slate-300">
+              <p>推定フェアウェイキープ率: {roundEstimates.fwKeep}</p>
+              <p>推定パーオン率: {roundEstimates.gir}</p>
+              <p>推定OB数（18H換算）: {roundEstimates.ob}</p>
+            </div>
+          </div>
+          <div className="rounded-xl bg-slate-900/70 border border-slate-700 p-4">
+            <p className="text-xs text-slate-400">推奨ドリル</p>
+            {result.recommendedDrills && result.recommendedDrills.length > 0 ? (
+              <ul className="list-disc pl-5 space-y-1 text-sm mt-2">
+                {result.recommendedDrills.map((drill, i) => (
+                  <li key={i}>{drill}</li>
+                ))}
+              </ul>
+            ) : (
+              <p className="text-sm text-slate-300 mt-2">ドリル情報がありません。</p>
+            )}
           </div>
         </section>
 
@@ -1504,103 +1789,6 @@ const GolfResultPage = () => {
             <p className="text-sm text-slate-300">因果チェーンを準備中です。</p>
           )}
         </section>
-
-        {/* 推定ラウンドスコア＆推奨ドリル */}
-        <section className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div className="rounded-xl bg-slate-900/70 border border-slate-700 p-4">
-            <p className="text-xs text-slate-400">推定ラウンドスコア</p>
-            <p className="text-3xl font-bold mt-1">{roundEstimates.strokeRange}</p>
-            <p className="text-xs text-slate-400 mt-1">ラウンドスコアの目安レンジ（ストローク）</p>
-            <div className="mt-3 space-y-1 text-xs text-slate-300">
-              <p>推定フェアウェイキープ率: {roundEstimates.fwKeep}</p>
-              <p>推定パーオン率: {roundEstimates.gir}</p>
-              <p>推定OB数（18H換算）: {roundEstimates.ob}</p>
-            </div>
-          </div>
-          <div className="rounded-xl bg-slate-900/70 border border-slate-700 p-4">
-            <p className="text-xs text-slate-400">推奨ドリル</p>
-            {result.recommendedDrills && result.recommendedDrills.length > 0 ? (
-              <ul className="list-disc pl-5 space-y-1 text-sm mt-2">
-                {result.recommendedDrills.map((drill, i) => (
-                  <li key={i}>{drill}</li>
-                ))}
-              </ul>
-            ) : (
-              <p className="text-sm text-slate-300 mt-2">ドリル情報がありません。</p>
-            )}
-          </div>
-        </section>
-
-        {/* スイングタイプ */}
-        <section className="rounded-xl bg-slate-900/70 border border-slate-700 p-4 space-y-3">
-          <div className="flex items-center gap-2">
-            <span className="text-lg">🧬</span>
-            <div>
-              <p className="text-xs text-slate-400">あなたのスイングタイプ</p>
-              <p className="text-sm font-semibold text-slate-100">得意な動きと伸ばしたい方向性</p>
-            </div>
-          </div>
-          {swingTypeBadges.length > 0 ? (
-            <div className="space-y-3">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                {swingTypeBadges.map((badge, idx) => (
-                  <div
-                    key={`${badge.label}-${idx}`}
-                    className="flex items-center justify-between rounded-lg border border-slate-800 bg-slate-950/60 px-3 py-2"
-                  >
-                    <div className="flex items-center gap-2">
-                      <span className={badge.positive ? 'text-emerald-300' : 'text-amber-300'}>
-                        {badge.positive ? '✔' : '❌'}
-                      </span>
-                      <span className="text-sm text-slate-100">{badge.label}</span>
-                    </div>
-                    <div className="text-xs text-slate-300">
-                      {typeof badge.confidence === 'number' ? `${badge.confidence}%` : badge.value ?? ''}
-                    </div>
-                  </div>
-                ))}
-              </div>
-              <div className="text-xs text-slate-400 space-y-1">
-                {swingTypeBadges.map((badge, idx) => (
-                  <p key={`reason-${badge.label}-${idx}`}>
-                    ・{badge.label}：{badge.reason || '診断内容から推定しました'}
-                  </p>
-                ))}
-              </div>
-            </div>
-          ) : (
-            <p className="text-sm text-slate-300">タイプを分析しています…</p>
-          )}
-        </section>
-
-        {(sequenceFrames.length > 0 || sequenceStages.length > 0) && (
-          <section className="rounded-xl bg-slate-900/70 border border-slate-700 p-4 space-y-3">
-            <div className="flex items-center justify-between">
-              <div>
-                <h2 className="text-sm font-semibold">連続フレーム診断</h2>
-              </div>
-              {sequenceFrames.length === 0 ? <span className="text-xs text-slate-300">ステージコメントのみ</span> : null}
-            </div>
-
-            {phaseReevalError && <p className="text-xs text-rose-300">再評価エラー: {phaseReevalError}</p>}
-            {sequenceFrames.length > 0 && (
-              <div id="manual-phase-selector">
-                <PhaseFrameSelector
-                  frames={selectorFrames}
-                  initialConfirmedSelections={initialConfirmedSelections}
-                  syncKey={phaseSelectorSyncKey}
-                  highlightedFrames={highlightFrames}
-                  isReevaluating={isPhaseReevalLoading}
-                  isReevaluateEnabled={isReevaluateEnabled}
-                  onConfirmedSelectionsChange={handleConfirmedSelectionsChange}
-                  onReevaluate={() => void runPhaseReeval()}
-                  onResetAll={handleResetAllPhases}
-                />
-              </div>
-            )}
-
-          </section>
-        )}
 
         {/* フェーズごとの評価 */}
         {shouldShowPhaseEvaluation ? (
@@ -1840,6 +2028,48 @@ const GolfResultPage = () => {
           ctaLabel={userState.isAuthenticated ? 'PROにアップグレード' : '登録してPROを見る'}
         />
 
+        {/* あなたのスイングタイプ */}
+        <section className="rounded-xl bg-slate-900/70 border border-slate-700 p-4 space-y-3">
+          <div className="flex items-center gap-2">
+            <span className="text-lg">🧬</span>
+            <div>
+              <p className="text-xs text-slate-400">あなたのスイングタイプ</p>
+              <p className="text-sm font-semibold text-slate-100">得意な動きと伸ばしたい方向性</p>
+            </div>
+          </div>
+          {swingTypeBadges.length > 0 ? (
+            <div className="space-y-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                {swingTypeBadges.map((badge, idx) => (
+                  <div
+                    key={`${badge.label}-${idx}`}
+                    className="flex items-center justify-between rounded-lg border border-slate-800 bg-slate-950/60 px-3 py-2"
+                  >
+                    <div className="flex items-center gap-2">
+                      <span className={badge.positive ? "text-emerald-300" : "text-amber-300"}>
+                        {badge.positive ? "✔" : "❌"}
+                      </span>
+                      <span className="text-sm text-slate-100">{badge.label}</span>
+                    </div>
+                    <div className="text-xs text-slate-300">
+                      {typeof badge.confidence === "number" ? `${badge.confidence}%` : badge.value ?? ""}
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <div className="text-xs text-slate-400 space-y-1">
+                {swingTypeBadges.map((badge, idx) => (
+                  <p key={`reason-${badge.label}-${idx}`}>
+                    ・{badge.label}：{badge.reason || "診断内容から推定しました"}
+                  </p>
+                ))}
+              </div>
+            </div>
+          ) : (
+            <p className="text-sm text-slate-300">タイプを分析しています…</p>
+          )}
+        </section>
+
         {/* スイングタイプ（AI判定・型の解説） */}
         <section className="rounded-xl bg-slate-900/70 border border-slate-700 p-4 space-y-4">
           <div className="flex items-center gap-2">
@@ -2022,6 +2252,8 @@ const GolfResultPage = () => {
               })}
             </div>
           </section>
+        )}
+          </>
         )}
       </div>
     </main>

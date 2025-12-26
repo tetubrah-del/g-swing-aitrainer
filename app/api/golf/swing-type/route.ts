@@ -24,6 +24,7 @@ type RequestPayload = {
   analysis?: SwingAnalysis;
   meta?: unknown;
   causalImpact?: CausalImpactExplanation | null;
+  forceFallback?: boolean;
 };
 
 function clampScore(n: number) {
@@ -338,7 +339,7 @@ export async function POST(req: Request) {
     const body = (await req.json().catch(() => ({}))) as RequestPayload;
     const fallback = buildFallbackResult(body.analysis, body.causalImpact);
 
-    if (!client.apiKey) {
+    if (body.forceFallback === true || !client.apiKey) {
       return NextResponse.json(fallback, { status: 200 });
     }
 

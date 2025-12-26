@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { consumeEmailVerification } from "@/app/lib/emailVerificationStore";
-import { registerEmailUser } from "@/app/lib/userStore";
+import { findUserByEmail, registerEmailUser } from "@/app/lib/userStore";
 import { setEmailSessionOnResponse } from "@/app/lib/emailSession";
 import { readAnonymousFromRequest } from "@/app/lib/anonymousToken";
 import { setActiveAuthOnResponse } from "@/app/lib/activeAuth";
+import { recordRegistration } from "@/app/lib/referralTracking";
 
 const sanitizeNext = (next: string | null, fallback: string): string => {
   if (!next || !next.startsWith("/")) return fallback;
@@ -34,7 +35,15 @@ export async function GET(req: NextRequest) {
     const record = await consumeEmailVerification(token);
     const anonymousUserId = cookieAnonymous ?? record.anonymousUserId ?? null;
 
-    const account = await registerEmailUser({ email: record.email, anonymousUserId });
+    const wasExisting = !!(await findUserByEmail(record.email));
+    const account = await registerEmailUser({ email: record.email, nickname: record.nickname, anonymousUserId });
+    if (!wasExisting) {
+      const referral = req.cookies.get("referral_code")?.value ?? null;
+      recordRegistration({
+        userId: account.userId,
+        referralCode: referral && /^[A-Za-z0-9_-]{8,64}$/.test(referral) ? referral : null,
+      });
+    }
 
     const res = NextResponse.redirect(new URL(target, req.nextUrl.origin));
     if (account.email) {

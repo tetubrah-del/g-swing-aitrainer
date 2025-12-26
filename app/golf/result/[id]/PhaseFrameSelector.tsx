@@ -320,7 +320,7 @@ export function BottomActionBar({
   const hasTemp = tempSelectedFrames.length > 0;
   if (!hasTemp && !isReevaluateEnabled) return null;
 
-  const barLabel = hasTemp ? confirmLabel : 'この指定で評価';
+  const barLabel = hasTemp ? confirmLabel : 'フレームをリセットして再評価する';
 
   return (
     <div className="mt-3">
@@ -353,18 +353,18 @@ export function BottomActionBar({
               <>
                 <button
                   type="button"
-                  onClick={onReevaluate}
-                  disabled={!isReevaluateEnabled || isReevaluating}
-                  className="rounded-xl bg-emerald-500 px-4 py-2 text-sm font-semibold text-slate-950 disabled:opacity-60"
-                >
-                  {isReevaluating ? '評価中…' : '評価開始'}
-                </button>
-                <button
-                  type="button"
                   onClick={onResetAll}
                   className="rounded-xl border border-slate-700 bg-slate-900/40 px-4 py-2 text-sm text-slate-100"
                 >
                   リセット
+                </button>
+                <button
+                  type="button"
+                  onClick={onReevaluate}
+                  disabled={!isReevaluateEnabled || isReevaluating}
+                  className="rounded-xl bg-emerald-500 px-4 py-2 text-sm font-semibold text-slate-950 disabled:opacity-60"
+                >
+                  {isReevaluating ? '再評価中…' : '再評価'}
                 </button>
               </>
             )}

@@ -611,7 +611,6 @@ const CoachPage = () => {
   const [detailMode, setDetailMode] = useState(false);
   const [visionMode, setVisionMode] = useState(false);
   const [visionEnhanceMode, setVisionEnhanceMode] = useState(false);
-  const [lastDebug, setLastDebug] = useState<{ model?: string; framesSent?: number; detailMode?: boolean } | null>(null);
   const [lastVisionFrames, setLastVisionFrames] = useState<Array<{ label?: string; timestampSec?: number; frameIndex?: number }>>(
     []
   );
@@ -1275,7 +1274,6 @@ const CoachPage = () => {
           }),
         });
         const data = (await res.json()) as { message?: string; debug?: { model?: string; framesSent?: number; detailMode?: boolean } };
-        if (data?.debug) setLastDebug(data.debug);
         const messageTextRaw = data?.message || '次のステップを準備中です。';
         const messageText = replaceFrameIndexRefs(messageTextRaw, visionFrames);
         const displayText = debugVision ? messageText : stripVisionDebugBlocks(messageText);
@@ -1603,7 +1601,7 @@ const CoachPage = () => {
 	            )}
 	          </div>
 
-          <div className="mt-4 h-[65vh] sm:h-[70vh] overflow-y-auto px-4 pb-4 space-y-3" ref={chatRef}>
+          <div className="mt-4 max-h-[65vh] sm:max-h-[70vh] overflow-y-auto px-4 pb-4 space-y-3" ref={chatRef}>
             {groupedSections.map((section, idx) => {
               const key = `${section.analysisId ?? "section"}-${idx}`;
               const isCollapsed = collapsed[key] ?? false;
@@ -1708,9 +1706,6 @@ const CoachPage = () => {
                 {sending ? '送信中…' : '送信'}
               </button>
             </form>
-            <p className="mt-2 text-[11px] text-slate-500">
-              1テーマに絞って相談すると精度が上がります。低信頼度の場合は「参考推定」として次回動画で再確認します。
-            </p>
             {debugVision && visionMode && lastVisionFrames.length > 0 && (
               <p className="mt-1 text-[11px] text-slate-500">
                 送信フレーム:{' '}
@@ -1722,11 +1717,6 @@ const CoachPage = () => {
                     return `${stage}${idx}@${ts}`;
                   })
                   .join(' / ')}
-              </p>
-            )}
-            {process.env.NODE_ENV !== 'production' && lastDebug && (
-              <p className="mt-1 text-[10px] text-slate-600">
-                debug: model={lastDebug.model ?? 'n/a'} framesSent={String(lastDebug.framesSent ?? 'n/a')} detailMode={String(lastDebug.detailMode ?? 'n/a')}
               </p>
             )}
           </div>

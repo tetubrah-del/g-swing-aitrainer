@@ -69,6 +69,15 @@ function AccountMenuInner() {
             <Link onClick={close} href="/coach" className="px-3 py-2 text-sm text-slate-100 hover:bg-slate-900/60">
               AIコーチ
             </Link>
+            {userState.isAuthenticated && (
+              <Link
+                onClick={close}
+                href={`/account/profile?next=${encodeURIComponent(pathname || "/golf/upload")}`}
+                className="px-3 py-2 text-sm text-slate-100 hover:bg-slate-900/60"
+              >
+                プロフィール
+              </Link>
+            )}
             <Link
               onClick={close}
               href="/account/billing"
@@ -76,6 +85,15 @@ function AccountMenuInner() {
             >
               お支払い・解約
             </Link>
+            {userState.isMonitor === true && (
+              <Link
+                onClick={close}
+                href="/account/monitor"
+                className="px-3 py-2 text-sm text-slate-100 hover:bg-slate-900/60"
+              >
+                🧪 モニター（SNS共有の進捗を見る）
+              </Link>
+            )}
             {!showLogout ? (
               <Link
                 onClick={close}

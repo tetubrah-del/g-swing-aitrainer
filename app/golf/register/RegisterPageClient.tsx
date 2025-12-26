@@ -23,6 +23,8 @@ export default function RegisterPage() {
   const searchParams = useSearchParams();
   const next = searchParams.get("next");
   const [email, setEmail] = useState("");
+  const [nickname, setNickname] = useState("");
+  const [nicknameEdited, setNicknameEdited] = useState(false);
   const [status, setStatus] = useState<"idle" | "email" | "google">("idle");
   const [error, setError] = useState<string | null>(null);
   const [sent, setSent] = useState(false);
@@ -34,6 +36,18 @@ export default function RegisterPage() {
     setHydrated(true);
     setAnonymousUserId(getAnonymousUserId());
   }, []);
+
+  useEffect(() => {
+    if (nicknameEdited) return;
+    const trimmed = email.trim();
+    if (!trimmed) {
+      setNickname("");
+      return;
+    }
+    const local = trimmed.split("@")[0] ?? "";
+    const fallback = (local || trimmed).trim();
+    setNickname(fallback.slice(0, 24));
+  }, [email, nicknameEdited]);
 
   const handleEmailRegister = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -50,7 +64,12 @@ export default function RegisterPage() {
       const res = await fetch("/api/golf/register/email/request", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, anonymousUserId: anonymousUserId || getAnonymousUserId(), next }),
+        body: JSON.stringify({
+          email,
+          nickname,
+          anonymousUserId: anonymousUserId || getAnonymousUserId(),
+          next,
+        }),
       });
       const data = (await res.json().catch(() => ({}))) as { ok?: boolean; devLink?: string; error?: string };
       if (!res.ok || !data?.ok) {
@@ -164,6 +183,20 @@ export default function RegisterPage() {
                   placeholder="you@example.com"
                   className="w-full rounded-lg border border-slate-700 bg-slate-900/80 px-3 py-2 text-sm focus:border-emerald-400 focus:outline-none"
                 />
+              </div>
+              <div className="space-y-1">
+                <label className="text-sm font-medium text-slate-200">ニックネーム</label>
+                <input
+                  type="text"
+                  value={nickname}
+                  onChange={(e) => {
+                    setNicknameEdited(true);
+                    setNickname(e.target.value);
+                  }}
+                  placeholder="例) taro"
+                  className="w-full rounded-lg border border-slate-700 bg-slate-900/80 px-3 py-2 text-sm focus:border-emerald-400 focus:outline-none"
+                />
+                <p className="text-[11px] text-slate-400">初期値はメールアドレスの @ より前が入ります（後から変更できます）</p>
               </div>
               <button
                 type="submit"
