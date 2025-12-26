@@ -1,1 +1,5 @@
-export { default } from "../upload/page";
+import { permanentRedirect } from "next/navigation";
+
+export default function UploadBetaClosedPage() {
+  permanentRedirect("/golf/upload");
+}

@@ -7,6 +7,7 @@ import dynamic from "next/dynamic";
 import { signOut } from "next-auth/react";
 import { DEFAULT_USER_USAGE_STATE, useUserState } from "@/app/golf/state/userState";
 import { resetMeUserStateCache } from "@/app/golf/hooks/useMeUserState";
+import { formatPlanLabel } from "@/app/lib/planLabel";
 
 function MobileBottomNavInner() {
   const router = useRouter();
@@ -16,7 +17,7 @@ function MobileBottomNavInner() {
 
   const showLogout = userState.isAuthenticated || userState.email || userState.userId;
   const accountLabel = userState.email || (userState.isAuthenticated ? "ログイン中" : "ゲスト");
-  const planLabel = userState.plan ? `プラン: ${userState.plan}` : "プラン: -";
+  const planLabel = userState.plan ? `プラン: ${formatPlanLabel(userState.plan)}` : "プラン: -";
 
   const startsWithAny = useCallback(
     (prefixes: string[]) => {
@@ -28,8 +29,6 @@ function MobileBottomNavInner() {
 
   const diagnosisActive = startsWithAny([
     "/golf/upload",
-    "/golf/upload-beta",
-    "/golf/upload-impact",
     "/golf/result",
     "/golf/result-beta",
     "/golf/swing-type",

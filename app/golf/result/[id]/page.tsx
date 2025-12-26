@@ -604,8 +604,52 @@ const GolfResultPage = () => {
       setPreviousHistory(null);
       return;
     }
-    setPreviousHistory(pickPreviousHistory(ownerId, data.analysisId, currentResultCreatedAtTs));
-  }, [anonymousUserId, currentResultCreatedAtTs, data?.analysisId, userState.userId]);
+    if (!userState.hasProAccess) {
+      setPreviousHistory(pickPreviousHistory(ownerId, data.analysisId, currentResultCreatedAtTs));
+      return;
+    }
+
+    let cancelled = false;
+    const run = async () => {
+      try {
+        const res = await fetch("/api/golf/history", { cache: "no-store" });
+        const json = (await res.json().catch(() => null)) as
+          | { items?: Array<{ id?: string; createdAt?: number; score?: number | null }> }
+          | null;
+        const items = Array.isArray(json?.items) ? json!.items! : [];
+        const sorted = [...items]
+          .filter((it) => typeof it?.id === "string" && typeof it?.createdAt === "number" && typeof it?.score === "number")
+          .sort((a, b) => (b.createdAt as number) - (a.createdAt as number));
+
+        const currentTs = currentResultCreatedAtTs > 0 ? currentResultCreatedAtTs : Number.POSITIVE_INFINITY;
+        const prev = sorted.find((it) => it.id !== data.analysisId && (it.createdAt as number) <= currentTs) ?? null;
+
+        if (cancelled) return;
+        if (prev) {
+          setPreviousHistory({
+            analysisId: prev.id as string,
+            userId: ownerId,
+            createdAt: new Date(prev.createdAt as number).toISOString(),
+            swingScore: prev.score as number,
+            estimatedOnCourseScore: "-",
+            swingType: "-",
+            priorityIssue: "-",
+            nextAction: "-",
+          });
+          return;
+        }
+
+        setPreviousHistory(pickPreviousHistory(ownerId, data.analysisId, currentResultCreatedAtTs));
+      } catch {
+        if (!cancelled) setPreviousHistory(pickPreviousHistory(ownerId, data.analysisId, currentResultCreatedAtTs));
+      }
+    };
+
+    void run();
+    return () => {
+      cancelled = true;
+    };
+  }, [anonymousUserId, currentResultCreatedAtTs, data?.analysisId, userState.hasProAccess, userState.userId]);
 
   const handleRetry = () => {
     clearActiveAnalysisPointer();
@@ -990,11 +1034,14 @@ const GolfResultPage = () => {
     };
 
     saveSwingHistory(history);
-    setPreviousHistory(pickPreviousHistory(ownerId, history.analysisId, new Date(history.createdAt).getTime()));
+    if (!userState.hasProAccess) {
+      setPreviousHistory(pickPreviousHistory(ownerId, history.analysisId, new Date(history.createdAt).getTime()));
+    }
     setHasSavedHistory(true);
   }, [
     anonymousUserId,
     userState.userId,
+    userState.hasProAccess,
     bestType?.label,
     causalImpact,
     data?.analysisId,
