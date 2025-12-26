@@ -105,6 +105,7 @@ export type UserUsageState = {
 export interface UserAccount {
   userId: string;
   email: string | null;
+  nickname?: string | null;
   authProvider: AuthProvider | null;
   emailVerifiedAt?: number | null;
   createdAt: number;

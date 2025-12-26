@@ -8,6 +8,22 @@ import { attachUserToAnonymousAnalyses } from "@/app/lib/store";
 const users = new Map<string, UserAccount>();
 const STORE_PATH = path.join(os.tmpdir(), "golf-users.json");
 
+function deriveNicknameFromEmail(email: string | null | undefined): string | null {
+  if (!email) return null;
+  const trimmed = email.trim();
+  if (!trimmed) return null;
+  const local = trimmed.split("@")[0] ?? "";
+  const base = (local || trimmed).trim();
+  if (!base) return null;
+  return base.slice(0, 24);
+}
+
+function normalizeNickname(value: unknown, fallbackEmail?: string | null): string | null {
+  const raw = typeof value === "string" ? value.trim() : "";
+  if (raw) return raw.slice(0, 24);
+  return deriveNicknameFromEmail(fallbackEmail ?? null);
+}
+
 async function loadFromDisk() {
   try {
     const raw = await fs.readFile(STORE_PATH, "utf8");
@@ -17,6 +33,7 @@ async function loadFromDisk() {
       const normalized: UserAccount = {
         userId: value.userId || id,
         email: value.email ?? null,
+        nickname: normalizeNickname((value as Record<string, unknown>).nickname, value.email ?? null),
         authProvider: value.authProvider ?? null,
         emailVerifiedAt:
           value.emailVerifiedAt === null || typeof value.emailVerifiedAt === "number" ? value.emailVerifiedAt : null,
@@ -95,10 +112,30 @@ export async function saveUser(user: UserAccount) {
   await persistToDisk();
 }
 
+export async function updateUserNickname(params: { userId: string; nickname: string | null }) {
+  const user = await getUserById(params.userId);
+  if (!user) {
+    throw new Error("user not found");
+  }
+  const updated: UserAccount = {
+    ...user,
+    nickname: normalizeNickname(params.nickname, user.email ?? null),
+    updatedAt: Date.now(),
+  };
+  await saveUser(updated);
+  return updated;
+}
+
+export async function listUsers(): Promise<UserAccount[]> {
+  await loadPromise;
+  return Array.from(users.values());
+}
+
 export async function upsertGoogleUser(params: {
   googleSub?: string | null;
   email?: string | null;
   anonymousUserId?: string | null;
+  nickname?: string | null;
   proAccess?: boolean;
   proAccessReason?: ProAccessReason | null;
   proAccessExpiresAt?: number | null;
@@ -114,6 +151,7 @@ export async function upsertGoogleUser(params: {
     ({
       userId,
       email: params.email ?? null,
+      nickname: normalizeNickname(params.nickname, params.email ?? null),
       authProvider: "google",
       emailVerifiedAt: now,
       createdAt: now,
@@ -153,6 +191,7 @@ export async function upsertGoogleUser(params: {
   const user: UserAccount = {
     ...base,
     email: params.email ?? base.email,
+    nickname: normalizeNickname(params.nickname ?? base.nickname, params.email ?? base.email ?? null),
     authProvider: "google",
     emailVerifiedAt: base.emailVerifiedAt ?? now,
     updatedAt: now,
@@ -180,7 +219,11 @@ export async function upsertGoogleUser(params: {
   return user;
 }
 
-export async function registerEmailUser(params: { email: string; anonymousUserId?: string | null }): Promise<UserAccount> {
+export async function registerEmailUser(params: {
+  email: string;
+  nickname?: string | null;
+  anonymousUserId?: string | null;
+}): Promise<UserAccount> {
   await loadPromise;
   const now = Date.now();
   const normalizedEmail = params.email.trim().toLowerCase();
@@ -191,6 +234,7 @@ export async function registerEmailUser(params: { email: string; anonymousUserId
     ({
       userId: crypto.randomUUID(),
       email: normalizedEmail,
+      nickname: normalizeNickname(params.nickname, normalizedEmail),
       authProvider: "email",
       emailVerifiedAt: now,
       createdAt: now,
@@ -224,6 +268,7 @@ export async function registerEmailUser(params: { email: string; anonymousUserId
   const user: UserAccount = {
     ...base,
     email: normalizedEmail,
+    nickname: normalizeNickname(params.nickname ?? base.nickname, normalizedEmail),
     authProvider: base.authProvider ?? "email",
     emailVerifiedAt: base.emailVerifiedAt ?? now,
     updatedAt: now,

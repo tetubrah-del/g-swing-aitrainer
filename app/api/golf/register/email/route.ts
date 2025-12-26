@@ -4,6 +4,14 @@ import { sendVerificationEmail } from "@/app/lib/mailer";
 
 const isValidEmail = (email: string): boolean => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email);
 
+const normalizeNickname = (nickname: string | null, email: string): string | null => {
+  const trimmed = (nickname ?? "").trim();
+  if (trimmed) return trimmed.slice(0, 24);
+  const local = email.split("@")[0] ?? "";
+  const fallback = (local || email).trim();
+  return fallback ? fallback.slice(0, 24) : null;
+};
+
 const sanitizeNext = (next: string | null | undefined): string | null => {
   if (!next) return null;
   if (!next.startsWith("/")) return null;
@@ -14,10 +22,12 @@ export async function POST(req: NextRequest) {
   try {
     const body = (await req.json().catch(() => ({}))) as {
       email?: string;
+      nickname?: string | null;
       anonymousUserId?: string | null;
       next?: string | null;
     };
     const email = typeof body.email === "string" ? body.email.trim().toLowerCase() : "";
+    const nickname = typeof body.nickname === "string" ? body.nickname : null;
     const anonymousUserId = typeof body.anonymousUserId === "string" ? body.anonymousUserId.trim() : null;
     const next = sanitizeNext(typeof body.next === "string" ? body.next : null);
 
@@ -25,7 +35,11 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "valid email required" }, { status: 400 });
     }
 
-    const { token, expiresAt } = await createEmailVerification({ email, anonymousUserId });
+    const { token, expiresAt } = await createEmailVerification({
+      email,
+      anonymousUserId,
+      nickname: normalizeNickname(nickname, email),
+    });
 
     const verifyUrl = new URL("/api/golf/register/email/verify", req.nextUrl.origin);
     verifyUrl.searchParams.set("token", token);

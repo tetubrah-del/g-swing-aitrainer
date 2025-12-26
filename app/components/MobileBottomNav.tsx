@@ -92,6 +92,15 @@ function MobileBottomNavInner() {
               </div>
             </div>
             <nav className="flex flex-col">
+              {userState.isAuthenticated && (
+                <Link
+                  onClick={closeMore}
+                  href={`/account/profile?next=${encodeURIComponent(pathname || "/golf/upload")}`}
+                  className="px-4 py-3 text-sm text-slate-100 hover:bg-slate-900/60"
+                >
+                  プロフィール
+                </Link>
+              )}
               <Link
                 onClick={closeMore}
                 href="/account/billing"
@@ -99,6 +108,15 @@ function MobileBottomNavInner() {
               >
                 お支払い・解約
               </Link>
+              {userState.isMonitor === true && (
+                <Link
+                  onClick={closeMore}
+                  href="/account/monitor"
+                  className="px-4 py-3 text-sm text-slate-100 hover:bg-slate-900/60"
+                >
+                  🧪 モニター（SNS共有の進捗を見る）
+                </Link>
+              )}
               {!showLogout ? (
                 <Link
                   onClick={closeMore}
@@ -129,8 +147,8 @@ function MobileBottomNavInner() {
       )}
 
       <nav className="fixed inset-x-0 bottom-0 z-[60]">
-        <div className="border-t border-slate-800 bg-slate-950/90 backdrop-blur">
-          <div className="mx-auto flex max-w-3xl items-stretch justify-between px-2 pb-[env(safe-area-inset-bottom)]">
+        <div className="border-t border-slate-700/80 bg-slate-950/95 backdrop-blur shadow-[0_-10px_30px_rgba(0,0,0,0.65)]">
+          <div className="mx-auto flex max-w-3xl items-stretch justify-between gap-2 px-3 py-2 pb-[calc(env(safe-area-inset-bottom)+0.5rem)]">
             <TabLink href="/golf/upload" active={diagnosisActive} onNavigate={closeMore}>
               診断
             </TabLink>
@@ -144,8 +162,10 @@ function MobileBottomNavInner() {
               type="button"
               onClick={() => setMoreOpen((v) => !v)}
               className={[
-                "flex flex-1 flex-col items-center justify-center gap-1 py-3 text-xs",
-                moreOpen ? "text-emerald-200" : "text-slate-200",
+                "flex flex-1 flex-col items-center justify-center gap-1 rounded-xl border px-3 py-2.5 text-xs transition-colors",
+                moreOpen
+                  ? "border-white/20 bg-white text-slate-950 shadow-sm"
+                  : "border-white/10 bg-white/5 text-slate-200 hover:bg-white/10",
               ].join(" ")}
               aria-expanded={moreOpen}
               aria-controls="mobile-more-menu"
@@ -170,8 +190,10 @@ function TabLink(props: {
       href={props.href}
       onClick={props.onNavigate}
       className={[
-        "flex flex-1 flex-col items-center justify-center gap-1 py-3 text-xs",
-        props.active ? "text-emerald-200" : "text-slate-200",
+        "flex flex-1 flex-col items-center justify-center gap-1 rounded-xl border px-3 py-2.5 text-xs transition-colors",
+        props.active
+          ? "border-white/20 bg-white text-slate-950 shadow-sm"
+          : "border-white/10 bg-white/5 text-slate-200 hover:bg-white/10",
       ].join(" ")}
     >
       {props.children}
