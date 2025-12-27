@@ -100,6 +100,20 @@ function ensureSchema(db: TrackingDb) {
       updatedAt INTEGER NOT NULL
     );
   `);
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS CouponGrant (
+      id TEXT PRIMARY KEY,
+      userId TEXT NOT NULL,
+      code TEXT NOT NULL,
+      note TEXT,
+      expiresAt INTEGER,
+      createdAt INTEGER NOT NULL,
+      createdBy TEXT
+    );
+  `);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_coupongrant_user_createdAt ON CouponGrant(userId, createdAt);`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_coupongrant_code ON CouponGrant(code);`);
 }
 
 export function getTrackingDb(): TrackingDb {

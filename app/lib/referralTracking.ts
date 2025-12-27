@@ -234,3 +234,137 @@ export function getAdminMonitorRows(params: { userIds: string[] }): Array<{
   rows.sort((a, b) => b.revenue - a.revenue);
   return rows;
 }
+
+export function getUserPaymentSummary(userId: string): {
+  totalAmount: number;
+  firstPaidAt: number | null;
+  lastPaidAt: number | null;
+  paidMonths: number;
+} {
+  const db = getTrackingDb();
+  const row = db
+    .prepare(
+      "SELECT " +
+        "SUM(amount) as totalAmount, " +
+        "MIN(paidAt) as firstPaidAt, " +
+        "MAX(paidAt) as lastPaidAt, " +
+        "COUNT(DISTINCT strftime('%Y-%m', paidAt/1000, 'unixepoch')) as paidMonths " +
+        "FROM Payment WHERE userId = ?",
+    )
+    .get(userId) as
+    | { totalAmount?: number | null; firstPaidAt?: number | null; lastPaidAt?: number | null; paidMonths?: number | null }
+    | undefined;
+
+  return {
+    totalAmount: Number(row?.totalAmount ?? 0) || 0,
+    firstPaidAt: typeof row?.firstPaidAt === "number" ? row.firstPaidAt : null,
+    lastPaidAt: typeof row?.lastPaidAt === "number" ? row.lastPaidAt : null,
+    paidMonths: Number(row?.paidMonths ?? 0) || 0,
+  };
+}
+
+export function getReferralCodeForUser(userId: string): string | null {
+  const db = getTrackingDb();
+  const row = db
+    .prepare("SELECT code FROM ReferralCode WHERE userId = ? ORDER BY createdAt DESC LIMIT 1")
+    .get(userId) as { code?: string } | undefined;
+  const code = typeof row?.code === "string" ? row.code : null;
+  return code && code.trim().length ? code : null;
+}
+
+export function getMonitorPerformance(params: { userId: string; nowMs?: number }): {
+  userId: string;
+  referralCode: string | null;
+  sharesAll: number;
+  sharesThisMonth: number;
+  signupsAll: number;
+  paidAll: number;
+  revenueAll: number;
+} {
+  const db = getTrackingDb();
+  const now = params.nowMs ?? Date.now();
+
+  const start = new Date(now);
+  start.setUTCDate(1);
+  start.setUTCHours(0, 0, 0, 0);
+  const startTs = start.getTime();
+
+  const sharesAllRow = db.prepare("SELECT COUNT(*) as c FROM ShareEvent WHERE userId = ?").get(params.userId) as { c: number };
+  const sharesMonthRow = db
+    .prepare("SELECT COUNT(*) as c FROM ShareEvent WHERE userId = ? AND createdAt >= ?")
+    .get(params.userId, startTs) as { c: number };
+
+  const referralCode = getReferralCodeForUser(params.userId);
+
+  let signupsAll = 0;
+  let paidAll = 0;
+  let revenueAll = 0;
+
+  if (referralCode) {
+    const signupRows = db.prepare("SELECT userId FROM Registration WHERE referralCode = ?").all(referralCode) as Array<{ userId: string }>;
+    signupsAll = new Set(signupRows.map((r) => r.userId)).size;
+
+    const paymentRows = db
+      .prepare("SELECT userId, amount FROM Payment WHERE referralCode = ?")
+      .all(referralCode) as Array<{ userId: string; amount: number }>;
+    paidAll = new Set(paymentRows.map((r) => r.userId)).size;
+    revenueAll = paymentRows.reduce((sum, row) => sum + (Number.isFinite(row.amount) ? Number(row.amount) : 0), 0);
+  }
+
+  return {
+    userId: params.userId,
+    referralCode,
+    sharesAll: Number(sharesAllRow?.c ?? 0),
+    sharesThisMonth: Number(sharesMonthRow?.c ?? 0),
+    signupsAll,
+    paidAll,
+    revenueAll,
+  };
+}
+
+export type CouponGrantRow = {
+  id: string;
+  userId: string;
+  code: string;
+  note: string | null;
+  expiresAt: number | null;
+  createdAt: number;
+  createdBy: string | null;
+};
+
+export function listCouponGrants(userId: string): CouponGrantRow[] {
+  const db = getTrackingDb();
+  const rows = db
+    .prepare("SELECT id, userId, code, note, expiresAt, createdAt, createdBy FROM CouponGrant WHERE userId = ? ORDER BY createdAt DESC")
+    .all(userId) as Array<Partial<CouponGrantRow>>;
+  return rows.map((r) => ({
+    id: String(r.id ?? ""),
+    userId: String(r.userId ?? userId),
+    code: String(r.code ?? ""),
+    note: typeof r.note === "string" ? r.note : null,
+    expiresAt: typeof r.expiresAt === "number" ? r.expiresAt : null,
+    createdAt: typeof r.createdAt === "number" ? r.createdAt : 0,
+    createdBy: typeof r.createdBy === "string" ? r.createdBy : null,
+  }));
+}
+
+export function grantCoupon(params: {
+  userId: string;
+  code: string;
+  note?: string | null;
+  expiresAt?: number | null;
+  createdBy?: string | null;
+}): CouponGrantRow {
+  const db = getTrackingDb();
+  const id = generateId();
+  const createdAt = nowMs();
+  const note = typeof params.note === "string" && params.note.trim().length ? params.note.trim().slice(0, 200) : null;
+  const expiresAt = typeof params.expiresAt === "number" && Number.isFinite(params.expiresAt) ? Math.trunc(params.expiresAt) : null;
+  const createdBy =
+    typeof params.createdBy === "string" && params.createdBy.trim().length ? params.createdBy.trim().slice(0, 200) : null;
+
+  db.prepare("INSERT INTO CouponGrant (id, userId, code, note, expiresAt, createdAt, createdBy) VALUES (?, ?, ?, ?, ?, ?, ?)")
+    .run(id, params.userId, params.code, note, expiresAt, createdAt, createdBy);
+
+  return { id, userId: params.userId, code: params.code, note, expiresAt, createdAt, createdBy };
+}

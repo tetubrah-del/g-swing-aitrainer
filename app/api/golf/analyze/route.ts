@@ -34,7 +34,9 @@ import {
   findUserByEmail,
   getUserById,
   incrementFreeAnalysisCount,
+  isUserDisabled,
   linkAnonymousIdToUser,
+  updateUserLastAnalysisAt,
   upsertGoogleUser,
 } from "@/app/lib/userStore";
 import { canPerform } from "@/app/lib/permissions";
@@ -86,6 +88,7 @@ async function resolveUserContext(req: NextRequest): Promise<UserContext> {
   if (!account && sessionEmail) {
     account = await findUserByEmail(sessionEmail);
   }
+  if (account && isUserDisabled(account)) account = null;
   if (sessionUserId && sessionEmail && !account) {
     account = await upsertGoogleUser({ googleSub: sessionUserId, email: sessionEmail, anonymousUserId });
   }
@@ -106,6 +109,7 @@ async function resolveUserContext(req: NextRequest): Promise<UserContext> {
       }
     }
   }
+  if (account && isUserDisabled(account)) account = null;
 
   const now = Date.now();
 
@@ -1482,6 +1486,10 @@ export async function POST(req: NextRequest) {
     };
 
     await saveAnalysis(record);
+    // Track last diagnosis timestamp for admin views.
+    if (user.plan !== "anonymous" && typeof user.id === "string") {
+      await updateUserLastAnalysisAt({ userId: user.id, at: record.createdAt });
+    }
 
     const anonymousUsage = anonymousUserId ? await getAnonymousQuotaCount(anonymousUserId) : 0;
     let usedCount = Math.max(user.freeAnalysisCount ?? 0, anonymousUsage);

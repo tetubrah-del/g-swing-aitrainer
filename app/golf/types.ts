@@ -108,6 +108,11 @@ export interface UserAccount {
   nickname?: string | null;
   authProvider: AuthProvider | null;
   emailVerifiedAt?: number | null;
+  lastLoginAt?: number | null;
+  lastAnalysisAt?: number | null;
+  isDisabled?: boolean;
+  disabledAt?: number | null;
+  disabledReason?: string | null;
   createdAt: number;
   updatedAt: number;
   proAccess: boolean;

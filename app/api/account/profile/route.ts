@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/auth";
-import { findUserByEmail, getUserById, updateUserNickname } from "@/app/lib/userStore";
+import { findUserByEmail, getUserById, isUserDisabled, updateUserNickname } from "@/app/lib/userStore";
 import { readEmailSessionFromRequest } from "@/app/lib/emailSession";
 import { readActiveAuthFromRequest } from "@/app/lib/activeAuth";
 
@@ -26,6 +26,7 @@ async function resolveAccount(req: NextRequest) {
       account = await findUserByEmail(sessionEmail);
     }
   }
+  if (account && isUserDisabled(account)) account = null;
 
   if (!account && activeAuth !== "google" && emailSession) {
     const byId = await getUserById(emailSession.userId);
@@ -43,6 +44,7 @@ async function resolveAccount(req: NextRequest) {
       }
     }
   }
+  if (account && isUserDisabled(account)) account = null;
 
   return account;
 }
@@ -71,4 +73,3 @@ export async function PATCH(req: NextRequest) {
     nickname: updated.nickname ?? null,
   });
 }
-
