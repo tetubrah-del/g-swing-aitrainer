@@ -24,6 +24,11 @@ function normalizeNickname(value: unknown, fallbackEmail?: string | null): strin
   return deriveNicknameFromEmail(fallbackEmail ?? null);
 }
 
+export function isUserDisabled(user: UserAccount | null | undefined): boolean {
+  if (!user) return false;
+  return user.isDisabled === true || (typeof user.disabledAt === "number" && user.disabledAt > 0);
+}
+
 async function loadFromDisk() {
   try {
     const raw = await fs.readFile(STORE_PATH, "utf8");
@@ -37,6 +42,25 @@ async function loadFromDisk() {
         authProvider: value.authProvider ?? null,
         emailVerifiedAt:
           value.emailVerifiedAt === null || typeof value.emailVerifiedAt === "number" ? value.emailVerifiedAt : null,
+        lastLoginAt:
+          (value as Record<string, unknown>).lastLoginAt === null ||
+          typeof (value as Record<string, unknown>).lastLoginAt === "number"
+            ? ((value as Record<string, unknown>).lastLoginAt as number | null)
+            : null,
+        lastAnalysisAt:
+          (value as Record<string, unknown>).lastAnalysisAt === null ||
+          typeof (value as Record<string, unknown>).lastAnalysisAt === "number"
+            ? ((value as Record<string, unknown>).lastAnalysisAt as number | null)
+            : null,
+        isDisabled: (value as Record<string, unknown>).isDisabled === true,
+        disabledAt:
+          (value as Record<string, unknown>).disabledAt === null || typeof (value as Record<string, unknown>).disabledAt === "number"
+            ? ((value as Record<string, unknown>).disabledAt as number | null)
+            : null,
+        disabledReason:
+          typeof (value as Record<string, unknown>).disabledReason === "string"
+            ? String((value as Record<string, unknown>).disabledReason).slice(0, 200)
+            : null,
         createdAt: typeof value.createdAt === "number" ? value.createdAt : Date.now(),
         updatedAt: typeof value.updatedAt === "number" ? value.updatedAt : Date.now(),
         proAccess: value.proAccess === true,
@@ -126,6 +150,74 @@ export async function updateUserNickname(params: { userId: string; nickname: str
   return updated;
 }
 
+export async function updateUserLastLoginAt(params: { userId: string; at?: number | null }) {
+  const user = await getUserById(params.userId);
+  if (!user) return null;
+  const at =
+    typeof params.at === "number" && Number.isFinite(params.at) ? Math.trunc(params.at) : Date.now();
+  const next: UserAccount = {
+    ...user,
+    lastLoginAt: at,
+    updatedAt: Date.now(),
+  };
+  await saveUser(next);
+  return next;
+}
+
+export async function updateUserLastAnalysisAt(params: { userId: string; at?: number | null }) {
+  const user = await getUserById(params.userId);
+  if (!user) return null;
+  const at =
+    typeof params.at === "number" && Number.isFinite(params.at) ? Math.trunc(params.at) : Date.now();
+  const next: UserAccount = {
+    ...user,
+    lastAnalysisAt: at,
+    updatedAt: Date.now(),
+  };
+  await saveUser(next);
+  return next;
+}
+
+export async function disableUserAccount(params: { userId: string; reason?: string | null; anonymize?: boolean }) {
+  const user = await getUserById(params.userId);
+  if (!user) throw new Error("user not found");
+  const now = Date.now();
+  const reason = typeof params.reason === "string" && params.reason.trim().length ? params.reason.trim().slice(0, 200) : null;
+  const anonymize = params.anonymize === true;
+
+  const next: UserAccount = {
+    ...user,
+    isDisabled: true,
+    disabledAt: now,
+    disabledReason: reason,
+    lastLoginAt: user.lastLoginAt ?? null,
+    proAccess: false,
+    proAccessReason: null,
+    proAccessExpiresAt: null,
+    monitorExpiresAt: null,
+    plan: user.email ? "free" : "anonymous",
+    updatedAt: now,
+    ...(anonymize ? { email: null, nickname: null, authProvider: null } : null),
+  };
+  await saveUser(next);
+  return next;
+}
+
+export async function enableUserAccount(params: { userId: string }) {
+  const user = await getUserById(params.userId);
+  if (!user) throw new Error("user not found");
+  const now = Date.now();
+  const next: UserAccount = {
+    ...user,
+    isDisabled: false,
+    disabledAt: null,
+    disabledReason: null,
+    updatedAt: now,
+  };
+  await saveUser(next);
+  return next;
+}
+
 export async function listUsers(): Promise<UserAccount[]> {
   await loadPromise;
   return Array.from(users.values());
@@ -154,6 +246,11 @@ export async function upsertGoogleUser(params: {
       nickname: normalizeNickname(params.nickname, params.email ?? null),
       authProvider: "google",
       emailVerifiedAt: now,
+      lastLoginAt: now,
+      lastAnalysisAt: null,
+      isDisabled: false,
+      disabledAt: null,
+      disabledReason: null,
       createdAt: now,
       updatedAt: now,
       proAccess: false,
@@ -194,6 +291,11 @@ export async function upsertGoogleUser(params: {
     nickname: normalizeNickname(params.nickname ?? base.nickname, params.email ?? base.email ?? null),
     authProvider: "google",
     emailVerifiedAt: base.emailVerifiedAt ?? now,
+    lastLoginAt: now,
+    lastAnalysisAt: base.lastAnalysisAt ?? null,
+    isDisabled: base.isDisabled ?? false,
+    disabledAt: base.disabledAt ?? null,
+    disabledReason: base.disabledReason ?? null,
     updatedAt: now,
     proAccess: params.proAccess ?? base.proAccess ?? false,
     proAccessReason: params.proAccessReason ?? base.proAccessReason ?? null,
@@ -237,6 +339,11 @@ export async function registerEmailUser(params: {
       nickname: normalizeNickname(params.nickname, normalizedEmail),
       authProvider: "email",
       emailVerifiedAt: now,
+      lastLoginAt: now,
+      lastAnalysisAt: null,
+      isDisabled: false,
+      disabledAt: null,
+      disabledReason: null,
       createdAt: now,
       updatedAt: now,
       proAccess: false,
@@ -271,6 +378,11 @@ export async function registerEmailUser(params: {
     nickname: normalizeNickname(params.nickname ?? base.nickname, normalizedEmail),
     authProvider: base.authProvider ?? "email",
     emailVerifiedAt: base.emailVerifiedAt ?? now,
+    lastLoginAt: now,
+    lastAnalysisAt: base.lastAnalysisAt ?? null,
+    isDisabled: base.isDisabled ?? false,
+    disabledAt: base.disabledAt ?? null,
+    disabledReason: base.disabledReason ?? null,
     updatedAt: now,
     plan: nextPlan,
     anonymousIds: Array.from(anonymousIds),
@@ -302,6 +414,24 @@ export async function grantMonitorAccess(userId: string, expiresAt: number | nul
     updatedAt: now,
   };
   await saveUser(updated);
+}
+
+export async function revokeMonitorAccess(userId: string) {
+  const user = await getUserById(userId);
+  if (!user) throw new Error("user not found");
+  if (user.proAccessReason !== "monitor") return user;
+  const now = Date.now();
+  const next: UserAccount = {
+    ...user,
+    proAccess: false,
+    proAccessReason: null,
+    proAccessExpiresAt: null,
+    monitorExpiresAt: null,
+    plan: user.email ? "free" : "anonymous",
+    updatedAt: now,
+  };
+  await saveUser(next);
+  return next;
 }
 
 export async function linkAnonymousIdToUser(userId: string, anonymousUserId: string): Promise<UserAccount | null> {

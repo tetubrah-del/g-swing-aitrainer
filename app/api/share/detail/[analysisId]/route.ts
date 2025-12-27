@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getSharedAnalysisDetail, upsertSharedAnalysisDetail } from "@/app/lib/referralTracking";
 import { getAnalysis } from "@/app/lib/store";
 import { getUserById } from "@/app/lib/userStore";
+import { selectShareFrames } from "@/app/golf/utils/shareFrameSelection";
 
 export const runtime = "nodejs";
 
@@ -28,19 +29,11 @@ export async function GET(_req: NextRequest, context: { params: Promise<{ analys
               .map((n) => Math.max(1, Math.min(allFrames.length || 16, Math.round(n)))),
           ),
         ).sort((a, b) => a - b);
-        const baseFrames =
-          stageIndices.length > 0
-            ? stageIndices.map((n) => allFrames[n - 1]).filter((u): u is string => typeof u === "string" && u.length > 0)
-            : allFrames;
-        const selectedFrames: string[] = [];
-        for (const u of baseFrames) {
-          if (selectedFrames.length >= 8) break;
-          if (!selectedFrames.includes(u)) selectedFrames.push(u);
-        }
-        for (const u of allFrames) {
-          if (selectedFrames.length >= 8) break;
-          if (!selectedFrames.includes(u)) selectedFrames.push(u);
-        }
+        const selectedFrames = selectShareFrames({
+          allFrames,
+          stageIndices,
+          desiredCount: 7,
+        });
 
         let nickname: string | null = null;
         if (stored.userId) {

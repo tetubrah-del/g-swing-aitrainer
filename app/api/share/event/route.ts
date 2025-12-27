@@ -12,6 +12,7 @@ import { readEmailSessionFromRequest } from "@/app/lib/emailSession";
 import { readActiveAuthFromRequest } from "@/app/lib/activeAuth";
 import { findUserByEmail, getUserById } from "@/app/lib/userStore";
 import { getAnalysis } from "@/app/lib/store";
+import { selectShareFrames } from "@/app/golf/utils/shareFrameSelection";
 
 export const runtime = "nodejs";
 
@@ -113,19 +114,11 @@ export async function POST(req: NextRequest) {
               .map((n) => Math.max(1, Math.min(allFrames.length || 16, Math.round(n)))),
           ),
         ).sort((a, b) => a - b);
-        const baseFrames =
-          stageIndices.length > 0
-            ? stageIndices.map((n) => allFrames[n - 1]).filter((u): u is string => typeof u === "string" && u.length > 0)
-            : allFrames;
-        const selectedFrames: string[] = [];
-        for (const u of baseFrames) {
-          if (selectedFrames.length >= 8) break;
-          if (!selectedFrames.includes(u)) selectedFrames.push(u);
-        }
-        for (const u of allFrames) {
-          if (selectedFrames.length >= 8) break;
-          if (!selectedFrames.includes(u)) selectedFrames.push(u);
-        }
+        const selectedFrames = selectShareFrames({
+          allFrames,
+          stageIndices,
+          desiredCount: 7,
+        });
 
         upsertSharedAnalysisDetail(analysisId, {
           analysisId,

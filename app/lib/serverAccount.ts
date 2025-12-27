@@ -2,7 +2,7 @@ import { cookies } from "next/headers";
 import { auth } from "@/auth";
 import { verifyEmailSession } from "@/app/lib/emailSession";
 import { verifyAnonymousToken } from "@/app/lib/anonymousToken";
-import { findUserByEmail, getUserById } from "@/app/lib/userStore";
+import { findUserByEmail, getUserById, isUserDisabled } from "@/app/lib/userStore";
 
 export async function getServerAuthContext(): Promise<{
   accountUserId: string | null;
@@ -31,19 +31,19 @@ export async function getServerAuthContext(): Promise<{
     const sessionEmail = session?.user?.email ?? null;
     if (sessionUserId) {
       const user = await getUserById(sessionUserId);
-      if (user) {
+      if (user && !isUserDisabled(user)) {
         accountUserId = user.userId;
         email = user.email ?? sessionEmail ?? null;
       } else if (sessionEmail) {
         const byEmail = await findUserByEmail(sessionEmail);
-        if (byEmail) {
+        if (byEmail && !isUserDisabled(byEmail)) {
           accountUserId = byEmail.userId;
           email = byEmail.email ?? sessionEmail;
         }
       }
     } else if (sessionEmail) {
       const byEmail = await findUserByEmail(sessionEmail);
-      if (byEmail) {
+      if (byEmail && !isUserDisabled(byEmail)) {
         accountUserId = byEmail.userId;
         email = byEmail.email ?? sessionEmail;
       }
@@ -52,7 +52,7 @@ export async function getServerAuthContext(): Promise<{
 
   if (!accountUserId && effectiveActiveAuth !== "google" && emailSession) {
     const byId = await getUserById(emailSession.userId);
-    if (byId && byId.authProvider === "email") {
+    if (byId && byId.authProvider === "email" && !isUserDisabled(byId)) {
       accountUserId = byId.userId;
       email = byId.email ?? emailSession.email;
     }

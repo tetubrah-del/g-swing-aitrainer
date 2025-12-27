@@ -28,6 +28,7 @@ import { useUserState } from '@/app/golf/state/userState';
 import ProUpsellModal from '@/app/components/ProUpsellModal';
 import PhaseFrameSelector from './PhaseFrameSelector';
 import { clearDiagnostics, loadDiagnostics, saveDiagnostics } from '@/app/golf/utils/diagnosticsStorage';
+import { selectShareFrames } from '@/app/golf/utils/shareFrameSelection';
 
 type SwingTypeBadge = {
   label: string;
@@ -561,33 +562,23 @@ const GolfResultPage = () => {
           return Array.from(new Set(normalized)).sort((a, b) => a - b);
         };
 
-        const manualSelectedIndices = normalizeIndices([
-          ...(manualPhase.address ?? []),
-          ...(manualPhase.backswing ?? []),
-          ...(manualPhase.top ?? []),
-          ...(manualPhase.downswing ?? []),
-          ...(manualPhase.impact ?? []),
-          ...(manualPhase.finish ?? []),
-        ]);
-
         const stageSelectedIndices = normalizeIndices(
           (data?.result?.sequence?.stages ?? []).flatMap((s) => (Array.isArray(s.keyFrameIndices) ? s.keyFrameIndices : []))
         );
 
-        const baseIndices = manualSelectedIndices.length ? manualSelectedIndices : stageSelectedIndices;
-        const baseFrames = baseIndices.map((n) => allFrames[n - 1]).filter((u): u is string => typeof u === 'string' && u.length > 0);
-
-        const fillToEight = (frames: string[]) => {
-          const uniq = Array.from(new Set(frames));
-          if (uniq.length >= 8) return uniq.slice(0, 8);
-          for (const u of allFrames) {
-            if (uniq.length >= 8) break;
-            if (!uniq.includes(u)) uniq.push(u);
-          }
-          return uniq;
-        };
-
-        const selectedFrames = baseFrames.length ? fillToEight(baseFrames) : fillToEight(allFrames);
+        const selectedFrames = selectShareFrames({
+          allFrames,
+          manual: {
+            address: manualPhase.address,
+            backswing: manualPhase.backswing,
+            top: manualPhase.top,
+            downswing: manualPhase.downswing,
+            impact: manualPhase.impact,
+            finish: manualPhase.finish,
+          },
+          stageIndices: stageSelectedIndices,
+          desiredCount: 7,
+        });
 
         const sharePayload = {
           analysisId: id,

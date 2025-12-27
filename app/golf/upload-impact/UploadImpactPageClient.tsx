@@ -3,7 +3,7 @@
 import Link from "next/link";
 import Image from "next/image";
 import { usePathname, useRouter } from "next/navigation";
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import type { UserUsageState } from "@/app/golf/types";
 import { getAnonymousUserId } from "@/app/golf/utils/historyStorage";
 import { setActiveAnalysisPointer } from "@/app/golf/utils/reportStorage";
@@ -32,6 +32,9 @@ export default function UploadImpactPageClient() {
   const router = useRouter();
   const pathname = usePathname();
   const { state: userState, setUserState } = useUserState();
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const previewStripRef = useRef<HTMLDivElement | null>(null);
+  const previewItemRefs = useRef<Array<HTMLButtonElement | null>>([]);
 
   const [file, setFile] = useState<File | null>(null);
   const [handedness, setHandedness] = useState<"right" | "left">("right");
@@ -71,18 +74,14 @@ export default function UploadImpactPageClient() {
     setQuotaExceeded(false);
   };
 
-  const handleGeneratePreview = async () => {
-    if (!file) {
-      setError("スイング動画（または画像）を選択してください。");
-      return;
-    }
+  const generatePreviewForFile = async (selectedFile: File) => {
     setError(null);
     setQuotaExceeded(false);
     setLoadingPreview(true);
 
     try {
       const formData = new FormData();
-      formData.append("file", file);
+      formData.append("file", selectedFile);
       formData.append("previewOnly", "1");
       formData.append("previewMaxFrames", "60");
       if (anonymousUserId) formData.append("anonymousUserId", anonymousUserId);
@@ -110,6 +109,57 @@ export default function UploadImpactPageClient() {
     }
   };
 
+  const handleGeneratePreview = async () => {
+    if (!file) {
+      fileInputRef.current?.click();
+      return;
+    }
+    await generatePreviewForFile(file);
+  };
+
+  const scrollToFrame = (idx: number, behavior: ScrollBehavior = "smooth") => {
+    const el = previewItemRefs.current[idx];
+    if (!el) return;
+    el.scrollIntoView({ behavior, block: "nearest", inline: "center" });
+  };
+
+  const getClosestIndexToCenter = (): number | null => {
+    const container = previewStripRef.current;
+    if (!container || !previewFrames?.length) return null;
+
+    const containerRect = container.getBoundingClientRect();
+    const centerX = containerRect.left + containerRect.width / 2;
+
+    let bestIdx: number | null = null;
+    let bestDist = Infinity;
+    for (let i = 0; i < previewFrames.length; i += 1) {
+      const el = previewItemRefs.current[i];
+      if (!el) continue;
+      const r = el.getBoundingClientRect();
+      const elCenterX = r.left + r.width / 2;
+      const dist = Math.abs(elCenterX - centerX);
+      if (dist < bestDist) {
+        bestDist = dist;
+        bestIdx = i;
+      }
+    }
+    return bestIdx;
+  };
+
+  const moveBy = (delta: number) => {
+    if (!previewFrames?.length) return;
+    const current = getClosestIndexToCenter();
+    const base = current ?? Math.floor((previewFrames.length - 1) / 2);
+    const next = Math.min(previewFrames.length - 1, Math.max(0, base + delta));
+    scrollToFrame(next, "smooth");
+  };
+
+  useEffect(() => {
+    if (!previewFrames?.length) return;
+    const mid = Math.floor((previewFrames.length - 1) / 2);
+    requestAnimationFrame(() => scrollToFrame(mid, "auto"));
+  }, [previewFrames?.length]);
+
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
     setError(null);
@@ -124,7 +174,7 @@ export default function UploadImpactPageClient() {
       return;
     }
     if (impactIndex == null) {
-      setError("ボールに当たった瞬間（インパクト）を1枚タップしてください。");
+      setError("ボールに当たった瞬間または付近のフレームを1枚タップしてください。");
       return;
     }
 
@@ -262,7 +312,9 @@ export default function UploadImpactPageClient() {
                   const f = e.target.files?.[0] ?? null;
                   setFile(f);
                   resetSelection();
+                  if (f) void generatePreviewForFile(f);
                 }}
+                ref={fileInputRef}
               />
             </label>
 
@@ -295,23 +347,33 @@ export default function UploadImpactPageClient() {
             </label>
           </div>
 
-          <div className="flex flex-wrap gap-2">
-            <button
-              type="button"
-              className="rounded-md border border-slate-700 bg-slate-950/40 px-4 py-2 text-sm font-semibold hover:border-emerald-400 disabled:opacity-50"
-              disabled={!file || loadingPreview || submitting}
-              onClick={handleGeneratePreview}
-            >
-              {loadingPreview ? "プレビュー生成中…" : "プレビュー生成（40〜60枚）"}
-            </button>
+          {previewFrames && (
+            <div className="text-sm text-slate-200">
+              ボールに当たった瞬間または付近のフレームを1枚選択して以下のボタンをタップしてください（index: {impactIndex ?? "-"} / {previewFrames.length - 1}）
+            </div>
+          )}
 
-            <button
-              type="submit"
-              className="rounded-md border border-emerald-400/70 bg-emerald-500/15 px-4 py-2 text-sm font-semibold text-emerald-50 hover:bg-emerald-500/25 disabled:opacity-50"
-              disabled={!file || !previewFrames || impactIndex == null || submitting || loadingPreview}
-            >
-              {submitting ? "解析中…" : "この周辺を解析する（16枚）"}
-            </button>
+          <div className="flex flex-wrap gap-2">
+            {!previewFrames && (
+              <button
+                type="button"
+                className="rounded-md border border-emerald-300/60 bg-emerald-500/10 px-4 py-2 text-sm font-semibold text-emerald-50 hover:border-emerald-300 hover:bg-emerald-500/15 disabled:opacity-50"
+                disabled={loadingPreview || submitting}
+                onClick={handleGeneratePreview}
+              >
+                {loadingPreview ? "プレビュー生成中…" : "スイング動画をアップロード"}
+              </button>
+            )}
+
+            {previewFrames && (
+              <button
+                type="submit"
+                className="rounded-md border border-emerald-400/70 bg-emerald-500/15 px-4 py-2 text-sm font-semibold text-emerald-50 hover:bg-emerald-500/25 disabled:opacity-50"
+                disabled={!file || impactIndex == null || submitting || loadingPreview}
+              >
+                {submitting ? "解析中…" : "スイングを解析するためのフレームを抽出する"}
+              </button>
+            )}
 
             {previewFrames && (
               <button
@@ -327,38 +389,63 @@ export default function UploadImpactPageClient() {
 
           {previewFrames && (
             <section className="space-y-3">
-              <div className="flex items-baseline justify-between gap-3">
-                <div className="text-sm text-slate-200">
-                  ボールに当たった瞬間を1回タップしてください（index: {impactIndex ?? "-"} / {previewFrames.length - 1}）
+              <div className="relative">
+                <div
+                  ref={previewStripRef}
+                  className="flex gap-2 overflow-x-auto scroll-smooth snap-x snap-mandatory px-10 py-1"
+                >
+                  {previewFrames.map((f, idx) => {
+                    const selected = idx === impactIndex;
+                    return (
+                      <button
+                        key={idx}
+                        type="button"
+                        ref={(el) => {
+                          previewItemRefs.current[idx] = el;
+                        }}
+                        className={`relative shrink-0 snap-center overflow-hidden rounded-md border ${selected ? "border-emerald-400" : "border-slate-800"} bg-slate-950/40 hover:border-slate-500`}
+                        onClick={() => {
+                          setImpactIndex(idx);
+                          scrollToFrame(idx, "smooth");
+                        }}
+                        title={`index=${idx}`}
+                      >
+                        <Image
+                          src={f.url}
+                          alt={`frame-${idx}`}
+                          width={160}
+                          height={120}
+                          unoptimized
+                          className="block h-auto w-32 sm:w-36"
+                        />
+                        <div
+                          className={`absolute bottom-0 right-0 px-1.5 py-0.5 text-[10px] ${selected ? "bg-emerald-500/80 text-emerald-50" : "bg-slate-900/70 text-slate-200"}`}
+                        >
+                          {idx}
+                        </div>
+                      </button>
+                    );
+                  })}
                 </div>
-                <div className="text-xs text-slate-500">※ 解析はプレビュー全体ではなく、選択周辺の16枚のみ</div>
-              </div>
 
-              <div className="grid grid-cols-4 sm:grid-cols-6 md:grid-cols-8 lg:grid-cols-10 gap-2">
-                {previewFrames.map((f, idx) => {
-                  const selected = idx === impactIndex;
-                  return (
-                    <button
-                      key={idx}
-                      type="button"
-                      className={`relative overflow-hidden rounded-md border ${selected ? "border-emerald-400" : "border-slate-800"} bg-slate-950/40 hover:border-slate-500`}
-                      onClick={() => setImpactIndex(idx)}
-                      title={`index=${idx}`}
-                    >
-                      <Image
-                        src={f.url}
-                        alt={`frame-${idx}`}
-                        width={160}
-                        height={120}
-                        unoptimized
-                        className="block w-full h-auto"
-                      />
-                      <div className={`absolute bottom-0 right-0 px-1.5 py-0.5 text-[10px] ${selected ? "bg-emerald-500/80 text-emerald-50" : "bg-slate-900/70 text-slate-200"}`}>
-                        {idx}
-                      </div>
-                    </button>
-                  );
-                })}
+                <button
+                  type="button"
+                  aria-label="前のフレーム"
+                  className="absolute left-2 top-1/2 -translate-y-1/2 rounded-full border border-slate-700 bg-slate-950/60 px-2.5 py-2 text-sm hover:border-slate-500 disabled:opacity-40"
+                  onClick={() => moveBy(-1)}
+                  disabled={loadingPreview || submitting}
+                >
+                  ←
+                </button>
+                <button
+                  type="button"
+                  aria-label="次のフレーム"
+                  className="absolute right-2 top-1/2 -translate-y-1/2 rounded-full border border-slate-700 bg-slate-950/60 px-2.5 py-2 text-sm hover:border-slate-500 disabled:opacity-40"
+                  onClick={() => moveBy(1)}
+                  disabled={loadingPreview || submitting}
+                >
+                  →
+                </button>
               </div>
             </section>
           )}

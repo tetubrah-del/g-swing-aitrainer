@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/auth";
 import { buildUserUsageState } from "@/app/lib/membership";
-import { findUserByEmail, getUserById, linkAnonymousIdToUser, upsertGoogleUser } from "@/app/lib/userStore";
+import { findUserByEmail, getUserById, isUserDisabled, linkAnonymousIdToUser, upsertGoogleUser } from "@/app/lib/userStore";
 import { readAnonymousFromRequest, setAnonymousTokenOnResponse } from "@/app/lib/anonymousToken";
 import { readEmailSessionFromRequest } from "@/app/lib/emailSession";
 import { readActiveAuthFromRequest, setActiveAuthOnResponse } from "@/app/lib/activeAuth";
@@ -28,6 +28,7 @@ export async function GET(request: NextRequest) {
       account = await upsertGoogleUser({ googleSub: sessionUserId, email: sessionEmail, anonymousUserId: tokenAnonymous });
     }
   }
+  if (account && isUserDisabled(account)) account = null;
 
   if (!account && activeAuth !== "google" && emailSession) {
     const byId = await getUserById(emailSession.userId);
@@ -46,6 +47,7 @@ export async function GET(request: NextRequest) {
       }
     }
   }
+  if (account && isUserDisabled(account)) account = null;
 
   const anonId = tokenAnonymous ?? null;
 

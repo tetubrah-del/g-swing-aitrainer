@@ -1,6 +1,6 @@
 import NextAuth from "next-auth";
 import Google from "next-auth/providers/google";
-import { findUserByEmail, getUserById, upsertGoogleUser } from "@/app/lib/userStore";
+import { findUserByEmail, getUserById, isUserDisabled, upsertGoogleUser } from "@/app/lib/userStore";
 import { buildUserUsageState } from "@/app/lib/membership";
 import { recordRegistration } from "@/app/lib/referralTracking";
 
@@ -77,6 +77,7 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
       if (!googleSub || !email) return false;
 
       const existing = (await getUserById(googleSub)) ?? (email ? await findUserByEmail(email) : null);
+      if (existing && isUserDisabled(existing)) return false;
       const anonymousUserId =
         request?.nextUrl?.searchParams?.get("anonymousUserId") ??
         request?.cookies?.get("anonymousUserId")?.value ??

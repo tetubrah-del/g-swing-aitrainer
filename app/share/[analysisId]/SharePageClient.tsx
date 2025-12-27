@@ -335,10 +335,10 @@ export default function SharePageClient(props: {
           <section className="rounded-2xl border border-slate-800 bg-slate-900/80 shadow-2xl shadow-emerald-900/20 p-4 space-y-3">
             <div className="flex items-center justify-between">
               <h2 className="text-sm font-semibold text-slate-100">選択フレーム</h2>
-              <p className="text-xs text-slate-400">8枚</p>
+              <p className="text-xs text-slate-400">7枚</p>
             </div>
-            <div className="grid grid-cols-4 sm:grid-cols-8 gap-2">
-              {detail.selectedFrames.slice(0, 8).map((url, idx) => (
+            <div className="grid grid-cols-4 sm:grid-cols-7 gap-2">
+              {detail.selectedFrames.slice(0, 7).map((url, idx) => (
                 <div
                   key={idx}
                   className="overflow-hidden rounded-lg border border-slate-800 bg-slate-950/40 aspect-[3/4]"
