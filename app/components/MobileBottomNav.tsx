@@ -108,6 +108,31 @@ function MobileBottomNavInner() {
               >
                 お支払い・解約
               </Link>
+              <Link
+                onClick={closeMore}
+                href="/terms"
+                className="px-4 py-3 text-sm text-slate-100 hover:bg-slate-900/60"
+              >
+                利用規約
+              </Link>
+              <a
+                onClick={closeMore}
+                href="https://core-logic-studio.onrender.com/privacy"
+                target="_blank"
+                rel="noreferrer"
+                className="px-4 py-3 text-sm text-slate-100 hover:bg-slate-900/60"
+              >
+                プライバシーポリシー
+              </a>
+              <a
+                onClick={closeMore}
+                href="https://core-logic-studio.onrender.com/about"
+                target="_blank"
+                rel="noreferrer"
+                className="px-4 py-3 text-sm text-slate-100 hover:bg-slate-900/60"
+              >
+                運営会社
+              </a>
               {userState.isMonitor === true && (
                 <Link
                   onClick={closeMore}

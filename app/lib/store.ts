@@ -141,3 +141,24 @@ export async function attachUserToAnonymousAnalyses(anonymousUserId: string, use
     await persistToDisk();
   }
 }
+
+export async function deleteAnalysesForUser(params: { userId: string; anonymousUserIds?: string[] | null }): Promise<string[]> {
+  await loadPromise;
+  const anonymousUserIds = Array.isArray(params.anonymousUserIds) ? params.anonymousUserIds.filter((v) => typeof v === "string") : [];
+  const anonymousSet = new Set(anonymousUserIds);
+
+  const deleted: string[] = [];
+  analyses.forEach((record, id) => {
+    const matchesUser = record.userId === params.userId;
+    const matchesAnonymous = record.anonymousUserId && anonymousSet.has(record.anonymousUserId);
+    if (matchesUser || matchesAnonymous) {
+      analyses.delete(id);
+      deleted.push(id);
+    }
+  });
+
+  if (deleted.length > 0) {
+    await persistToDisk();
+  }
+  return deleted;
+}

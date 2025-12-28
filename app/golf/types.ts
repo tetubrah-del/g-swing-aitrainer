@@ -79,6 +79,7 @@ export interface GolfAnalyzeMeta {
   level: "beginner" | "beginner_plus" | "intermediate" | "upper_intermediate" | "advanced";
   previousAnalysisId?: AnalysisId | null;
   impactIndex?: number;
+  scoringVersion?: string;
 }
 
 export type AuthProvider = "google" | "email";
@@ -130,6 +131,9 @@ export interface UserAccount {
   freeAnalysisCount?: number;
   freeAnalysisResetAt?: number | null;
   monitorExpiresAt?: number | null;
+  withdrawRequestedAt?: number | null;
+  withdrawScheduledAt?: number | null;
+  withdrawReason?: string | null;
 }
 
 export type UserState = "anonymous" | "registered" | "pro";

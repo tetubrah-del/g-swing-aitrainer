@@ -29,6 +29,7 @@ import ProUpsellModal from '@/app/components/ProUpsellModal';
 import PhaseFrameSelector from './PhaseFrameSelector';
 import { clearDiagnostics, loadDiagnostics, saveDiagnostics } from '@/app/golf/utils/diagnosticsStorage';
 import { selectShareFrames } from '@/app/golf/utils/shareFrameSelection';
+import { computeRoundFallbackFromScore, estimateLevelFromScore } from '@/app/golf/utils/scoreCalibration';
 
 type SwingTypeBadge = {
   label: string;
@@ -139,24 +140,7 @@ type RoundEstimateMetrics = {
   ob: string;
 };
 
-const computeFallbackRoundEstimates = (totalScore: number): RoundEstimateMetrics => {
-  const mid = Math.round(105 - totalScore * 0.28);
-  const spread = 3;
-  const clamp = (v: number, min: number, max: number) => Math.min(max, Math.max(min, v));
-  const low = clamp(mid - spread, 60, 115);
-  const high = clamp(mid + spread, 60, 115);
-
-  const fwKeep = clamp(50 + totalScore * 0.18, 40, 75);
-  const gir = clamp(32 + totalScore * 0.18, 25, 65);
-  const ob = clamp(3.2 - totalScore * 0.012, 0.5, 4);
-
-  return {
-    strokeRange: `${low}〜${high}`,
-    fwKeep: `${fwKeep.toFixed(0)}%`,
-    gir: `${gir.toFixed(0)}%`,
-    ob: `${ob.toFixed(1)} 回`,
-  };
-};
+const computeFallbackRoundEstimates = (totalScore: number): RoundEstimateMetrics => computeRoundFallbackFromScore(totalScore);
 
 const buildLocalCausalImpact = (
   result: GolfAnalysisResponse['result'],
@@ -708,25 +692,18 @@ const GolfResultPage = () => {
         }
 
         const json = (await res.json()) as GolfAnalysisResponse;
-        let resolved = json;
-
         if (typeof window !== 'undefined') {
-          const stored = getReportById(id);
-          if (stored?.result) {
-            resolved = stored;
-            setFallbackNote(null);
-          }
           // API 取得が成功したらローカルにも保存して次回以降同一IDを参照
           saveReport(json);
         }
 
-        setData(resolved);
-        if (resolved.result) {
-          setSwingTypes(deriveSwingTypes(resolved.result));
-          setSwingTypeResult(deriveSwingTypeResult(resolved.result));
+        setData(json);
+        if (json.result) {
+          setSwingTypes(deriveSwingTypes(json.result));
+          setSwingTypeResult(deriveSwingTypeResult(json.result));
         }
-        if (resolved.causalImpact) {
-          setCausalImpact(resolved.causalImpact);
+        if (json.causalImpact) {
+          setCausalImpact(json.causalImpact);
         }
       } catch (err: unknown) {
         console.error(err);
@@ -787,6 +764,10 @@ const GolfResultPage = () => {
     let cancelled = false;
     const run = async () => {
       try {
+        if (!Number.isFinite(currentResultCreatedAtTs) || currentResultCreatedAtTs <= 0) {
+          setPreviousHistory(null);
+          return;
+        }
         const res = await fetch("/api/golf/history", { cache: "no-store" });
         const json = (await res.json().catch(() => null)) as
           | { items?: Array<{ id?: string; createdAt?: number; score?: number | null }> }
@@ -796,8 +777,8 @@ const GolfResultPage = () => {
           .filter((it) => typeof it?.id === "string" && typeof it?.createdAt === "number" && typeof it?.score === "number")
           .sort((a, b) => (b.createdAt as number) - (a.createdAt as number));
 
-        const currentTs = currentResultCreatedAtTs > 0 ? currentResultCreatedAtTs : Number.POSITIVE_INFINITY;
-        const prev = sorted.find((it) => it.id !== data.analysisId && (it.createdAt as number) <= currentTs) ?? null;
+        const prev =
+          sorted.find((it) => it.id !== data.analysisId && (it.createdAt as number) < currentResultCreatedAtTs) ?? null;
 
         if (cancelled) return;
         if (prev) {
@@ -813,10 +794,11 @@ const GolfResultPage = () => {
           });
           return;
         }
-
-        setPreviousHistory(pickPreviousHistory(ownerId, data.analysisId, currentResultCreatedAtTs));
+        // Server history is the source of truth for members; avoid falling back to localStorage histories
+        // because they can contain stale/other-device/other-session data and cause incorrect "前回比".
+        setPreviousHistory(null);
       } catch {
-        if (!cancelled) setPreviousHistory(pickPreviousHistory(ownerId, data.analysisId, currentResultCreatedAtTs));
+        if (!cancelled) setPreviousHistory(null);
       }
     };
 
@@ -872,36 +854,7 @@ const GolfResultPage = () => {
   }, [data?.result?.phases]);
 
   const levelEstimate = useMemo(() => {
-    const score = data?.result?.totalScore ?? 0;
-    if (score >= 85)
-      return {
-        label: '上級',
-        detail:
-          '全体の完成度が高く、動きの再現性が高いスイングです。良い点は、切り返し以降の体幹の回転が途切れにくく、インパクトでの当たり負けが少ないことです。一方で、わずかなフェース向きのズレやリリースのタイミング差が球筋に出やすく、弾道のばらつき要因になりやすい傾向があります。',
-      };
-    if (score >= 70)
-      return {
-        label: '中上級',
-        detail:
-          '全体のバランスが良く、スイングの形が崩れにくいタイプです。良い点は、トップ〜ダウンの動きが比較的スムーズで、ミート率につながる“体とクラブの同調”が見えやすいことです。課題は、切り返し付近でクラブの落ち方／フェース向きが一定になりきらず、方向性のブレが残りやすい点です。',
-      };
-    if (score >= 55)
-      return {
-        label: '中級',
-        detail:
-          '基本動作は安定しており、スイングの形としては十分にまとまっています。良い点は、アドレス〜トップまでの流れが大きく破綻せず、振り抜きまでのリズムが作れていることです。課題は、毎回の重心位置やトップ位置にわずかな差が出やすく、その影響が切り返し以降のクラブ軌道／フェース向きのばらつきとして現れやすい点です。',
-      };
-    if (score >= 40)
-      return {
-        label: '初級',
-        detail:
-          'スイングは成立しており、形の方向性も見えています。良い点は、フィニッシュまで振り切ろうとする意識があり、動作が途中で止まりにくいことです。課題は、アドレスの姿勢（前傾・重心）やグリップの一定感が揺れやすく、インパクトで当たり所とフェース向きが安定しにくい点です。',
-      };
-    return {
-      label: 'ビギナー',
-      detail:
-        'スイングの骨格を作っている段階で、動きの再現性はこれから伸びるタイプです。良い点は、クラブを振る動作自体はできており、改善に必要な“基準の形”を作れる余地が大きいことです。課題は、アドレス姿勢とテンポが毎回変わりやすく、トップ位置やインパクトの当たり所が揃いにくい点です。',
-    };
+    return estimateLevelFromScore(data?.result?.totalScore ?? 0);
   }, [data?.result?.totalScore]);
 
   const fallbackRoundEstimates = useMemo<RoundEstimateMetrics>(() => {
@@ -1603,6 +1556,7 @@ const GolfResultPage = () => {
                   highlightedFrames={highlightFrames}
                   isReevaluating={isPhaseReevalLoading}
                   isReevaluateEnabled={isReevaluateEnabled}
+                  hasEvaluationResult={diagnosticsStatus === 'ready'}
                   onConfirmedSelectionsChange={handleConfirmedSelectionsChange}
                   onReevaluate={() => void runFullEvaluation()}
                   onResetAll={handleResetAllPhases}

@@ -239,7 +239,7 @@ export default function UploadImpactPageClient() {
         <header className="flex items-end justify-between gap-4">
           <div>
             <h1 className="text-2xl font-semibold">AIゴルフスイング診断</h1>
-            <p className="text-xs text-slate-400 mt-1">プレビューから「ボールに当たった瞬間」を1枚タップ → その周辺16枚で解析します。</p>
+            <p className="text-xs text-slate-400 mt-1">15秒以内のスイング動画をアップロードしてください（推奨5秒以内）。</p>
           </div>
         </header>
 

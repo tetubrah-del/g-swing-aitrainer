@@ -368,3 +368,36 @@ export function grantCoupon(params: {
 
   return { id, userId: params.userId, code: params.code, note, expiresAt, createdAt, createdBy };
 }
+
+export function deleteReferralDataForUser(userId: string): void {
+  const db = getTrackingDb();
+  const codes = db
+    .prepare("SELECT code FROM ReferralCode WHERE userId = ?")
+    .all(userId) as Array<{ code?: string }>;
+  const referralCodes = codes.map((r) => (typeof r.code === "string" ? r.code : "")).filter((v) => v.length > 0);
+
+  db.prepare("DELETE FROM ShareEvent WHERE userId = ?").run(userId);
+  db.prepare("DELETE FROM Registration WHERE userId = ?").run(userId);
+  db.prepare("DELETE FROM Payment WHERE userId = ?").run(userId);
+  db.prepare("DELETE FROM CouponGrant WHERE userId = ?").run(userId);
+  db.prepare("DELETE FROM ReferralCode WHERE userId = ?").run(userId);
+
+  if (referralCodes.length > 0) {
+    const placeholders = referralCodes.map(() => "?").join(", ");
+    db.prepare(`DELETE FROM ReferralVisit WHERE referralCode IN (${placeholders})`).run(...referralCodes);
+  }
+}
+
+export function deleteSharedAnalysisData(analysisIds: string[]): void {
+  if (!Array.isArray(analysisIds) || analysisIds.length === 0) return;
+  const db = getTrackingDb();
+  const CHUNK = 200;
+  for (let i = 0; i < analysisIds.length; i += CHUNK) {
+    const chunk = analysisIds.slice(i, i + CHUNK).filter((v) => typeof v === "string" && v.length > 0);
+    if (chunk.length === 0) continue;
+    const placeholders = chunk.map(() => "?").join(", ");
+    db.prepare(`DELETE FROM SharedAnalysisSnapshot WHERE analysisId IN (${placeholders})`).run(...chunk);
+    db.prepare(`DELETE FROM SharedAnalysisDetail WHERE analysisId IN (${placeholders})`).run(...chunk);
+    db.prepare(`DELETE FROM ShareEvent WHERE analysisId IN (${placeholders})`).run(...chunk);
+  }
+}

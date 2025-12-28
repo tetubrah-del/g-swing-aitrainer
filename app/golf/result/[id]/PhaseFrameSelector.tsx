@@ -295,6 +295,7 @@ type BottomActionBarProps = {
   tempSelectedFrames: number[];
   isConfirmEnabled: boolean;
   confirmLabel: string;
+  hasEvaluationResult: boolean;
   errorText?: string | null;
   onConfirm: () => void;
   onClearTemp: () => void;
@@ -309,6 +310,7 @@ export function BottomActionBar({
   tempSelectedFrames,
   isConfirmEnabled,
   confirmLabel,
+  hasEvaluationResult,
   errorText,
   onConfirm,
   onClearTemp,
@@ -320,7 +322,7 @@ export function BottomActionBar({
   const hasTemp = tempSelectedFrames.length > 0;
   if (!hasTemp && !isReevaluateEnabled) return null;
 
-  const barLabel = hasTemp ? confirmLabel : 'フレームをリセットして再評価する';
+  const barLabel = hasTemp ? confirmLabel : hasEvaluationResult ? 'フレームをリセットして再評価する' : '設定したフレームで解析をする';
 
   return (
     <div className="mt-3">
@@ -364,7 +366,7 @@ export function BottomActionBar({
                   disabled={!isReevaluateEnabled || isReevaluating}
                   className="rounded-xl bg-emerald-500 px-4 py-2 text-sm font-semibold text-slate-950 disabled:opacity-60"
                 >
-                  {isReevaluating ? '再評価中…' : '再評価'}
+                  {isReevaluating ? (hasEvaluationResult ? '再評価中…' : '評価中…') : hasEvaluationResult ? '再評価' : '評価'}
                 </button>
               </>
             )}
@@ -387,6 +389,7 @@ type PhaseFrameSelectorProps = {
   highlightedFrames?: number[];
   isReevaluating: boolean;
   isReevaluateEnabled: boolean;
+  hasEvaluationResult: boolean;
   onConfirmedSelectionsChange: (next: ConfirmedSelections) => void;
   onReevaluate: () => void;
   onResetAll: () => void;
@@ -399,6 +402,7 @@ export default function PhaseFrameSelector({
   highlightedFrames,
   isReevaluating,
   isReevaluateEnabled,
+  hasEvaluationResult,
   onConfirmedSelectionsChange,
   onReevaluate,
   onResetAll,
@@ -534,6 +538,7 @@ export default function PhaseFrameSelector({
         tempSelectedFrames={normalizedTemp}
         isConfirmEnabled={isTempValid && !req.instant}
         confirmLabel={confirmLabel}
+        hasEvaluationResult={hasEvaluationResult}
         errorText={!req.instant ? tempError : null}
         onConfirm={confirmTemp}
         onClearTemp={clearTemp}

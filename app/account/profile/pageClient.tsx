@@ -1,6 +1,7 @@
 "use client";
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 
 type ProfileResponse = {
@@ -132,6 +133,27 @@ export default function AccountProfilePageClient() {
             </button>
           </form>
         </section>
+
+        <div className="text-xs text-slate-400">
+          <Link href="/terms" className="text-emerald-300 underline underline-offset-4">
+            利用規約
+          </Link>
+        </div>
+
+        <div className="rounded-2xl border border-rose-900/60 bg-rose-950/20 p-5">
+          <div className="text-sm font-semibold text-rose-100">退会</div>
+          <p className="mt-2 text-xs text-slate-300">
+            退会すると、診断履歴・投稿データを含むユーザーデータが削除されます。PROは期間末で解約し、期間末に退会処理が実行されます。
+          </p>
+          <div className="mt-3">
+            <Link
+              href="/account/withdraw"
+              className="inline-flex rounded-xl border border-rose-700/60 bg-rose-950/30 px-4 py-2.5 text-sm text-rose-100 hover:border-rose-300/60"
+            >
+              退会手続きへ
+            </Link>
+          </div>
+        </div>
       </div>
     </main>
   );

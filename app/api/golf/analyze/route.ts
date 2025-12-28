@@ -43,17 +43,19 @@ import { canPerform } from "@/app/lib/permissions";
 import { User, UserPlan } from "@/app/types/user";
 import { buildSwingStyleComment, detectSwingStyle, detectSwingStyleChange, SwingStyleType } from "@/app/lib/swing/style";
 import { extractSequenceFramesAroundImpact } from "@/app/lib/vision/extractSequenceFramesAroundImpact";
+import { rescoreSwingAnalysis } from "@/app/golf/scoring/phaseGuardrails";
+import { retrieveCoachKnowledge } from "@/app/coach/rag/retrieve";
 
 const execFileAsync = promisify(execFile);
 
 // Node.js ランタイムで動かしたい場合は明示（必須ではないが念のため）
 export const runtime = "nodejs";
 
-const phaseOrder: PhaseKey[] = ["address", "backswing", "top", "downswing", "impact", "finish"];
 const clientPhaseOrder: PhaseKey[] = ["address", "backswing", "top", "downswing", "impact", "finish"];
 const PHASE_ORDER: PhaseKey[] = ["address", "backswing", "top", "downswing", "impact", "finish"];
 
 const ALLOWED_IMAGE_MIME = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"]);
+const MAX_VIDEO_DURATION_SECONDS = 15;
 
 type UserContext = {
   user: User;
@@ -357,8 +359,8 @@ async function extractSequenceFramesFromBuffer(params: {
   try {
     await fs.writeFile(inputPath, buffer);
     const duration = await getVideoDuration(inputPath);
-    if (duration > 7) {
-      throw new Error("Video duration exceeds limit (7 seconds)");
+    if (duration > MAX_VIDEO_DURATION_SECONDS) {
+      throw new Error(`Video duration exceeds limit (${MAX_VIDEO_DURATION_SECONDS} seconds)`);
     }
     const targetCount = Math.max(2, Math.min(maxFrames, 16));
     const timeCount = mode === "beta" ? Math.min(20, targetCount + 6) : targetCount;
@@ -789,8 +791,8 @@ async function extractPreviewFramesFromBuffer(params: {
   try {
     await fs.writeFile(inputPath, buffer);
     const duration = await getVideoDuration(inputPath);
-    if (duration > 7) {
-      throw new Error("Video duration exceeds limit (7 seconds)");
+    if (duration > MAX_VIDEO_DURATION_SECONDS) {
+      throw new Error(`Video duration exceeds limit (${MAX_VIDEO_DURATION_SECONDS} seconds)`);
     }
 
     const targetCount = Math.max(2, Math.min(Math.floor(maxFrames), 60));
@@ -928,8 +930,8 @@ async function extractFramesAtTimestampsFromBuffer(params: {
   try {
     await fs.writeFile(inputPath, buffer);
     const duration = await getVideoDuration(inputPath);
-    if (duration > 7) {
-      throw new Error("Video duration exceeds limit (7 seconds)");
+    if (duration > MAX_VIDEO_DURATION_SECONDS) {
+      throw new Error(`Video duration exceeds limit (${MAX_VIDEO_DURATION_SECONDS} seconds)`);
     }
 
     const safeEnd = Math.max(0, duration - 0.05);
@@ -1265,10 +1267,109 @@ export async function POST(req: NextRequest) {
       parsed = parseMultiPhaseResponse(MOCK_GOLF_ANALYSIS_RESULT);
     }
 
-    // Total score is derived deterministically from phase scores to reduce "same swing, different score" drift.
-    // Each phase score is 0-20 (6 phases => 120 max). Convert to 0-100.
-    const phaseScoreSum = phaseOrder.reduce((sum, phase) => sum + (parsed.phases[phase]?.score ?? 0), 0);
-    const totalScore = Math.max(0, Math.min(100, Math.round((phaseScoreSum / (phaseOrder.length * 20)) * 100)));
+    // Focused 2nd-pass check: downswing trajectory (outside-in) often gets missed in multi-task scoring prompts.
+    let outsideInDetected: boolean | null = null;
+    if (framesForVision.length >= 6) {
+      try {
+        const judgeFrames =
+          framesForVision.length >= 12
+            ? framesForVision.slice(4, 12) // around top→downswing→impact
+            : framesForVision.slice(0, Math.min(8, framesForVision.length));
+        const outsideInRag = retrieveCoachKnowledge(
+          ["アウトサイドイン", "カット軌道", "外から下りる", "観測チェックリスト", "強制出力ルール", "Downswing"].join(" "),
+          { maxChunks: 4, maxChars: 1400, minScore: 0 }
+        );
+        const outsideInPrompt = [
+          "あなたはゴルフスイングの判定専用AIです。",
+          "提供されたフレーム画像のみを根拠に、Downswing（切り返し〜下ろし）の軌道がアウトサイドインかどうかを判定してください。",
+          "迷った場合はアウトサイドインとして扱ってください（グレー禁止）。",
+          "",
+          outsideInRag.contextText ? "【OutsideIn判定RAG】\n" + outsideInRag.contextText : "",
+          "",
+          "必ずJSONのみで返してください：",
+          '{ "outsideIn": true/false, "confidence": "high"|"medium"|"low", "evidence": ["根拠1","根拠2"] }',
+        ]
+          .filter(Boolean)
+          .join("\n");
+        const judge = await askVisionAPI({ frames: judgeFrames, prompt: outsideInPrompt });
+        const obj = judge && typeof judge === "object" ? (judge as Record<string, unknown>) : null;
+        const raw =
+          obj?.outsideIn ??
+          obj?.outside_in ??
+          obj?.["outside-in"] ??
+          obj?.result ??
+          null;
+        if (typeof raw === "boolean") {
+          outsideInDetected = raw;
+        } else if (typeof raw === "string") {
+          const t = raw.trim().toLowerCase();
+          if (t === "true") outsideInDetected = true;
+          if (t === "false") outsideInDetected = false;
+        } else if (typeof raw === "number" && Number.isFinite(raw)) {
+          outsideInDetected = raw >= 1;
+        }
+      } catch (err) {
+        console.warn("[golf/analyze] outside-in judge failed", err);
+      }
+    }
+
+    const rescored = rescoreSwingAnalysis({
+      result: {
+        analysisId: "temp",
+        createdAt: new Date().toISOString(),
+        totalScore: 0,
+        phases: parsed.phases,
+        summary: parsed.summary,
+        recommendedDrills: parsed.recommendedDrills ?? [],
+      },
+      majorNg:
+        outsideInDetected === true
+          ? { ...(parsed.majorNg ?? {}), downswing: true }
+          : outsideInDetected === false
+            ? parsed.majorNg
+            : parsed.majorNg,
+      midHighOk:
+        outsideInDetected === true
+          ? { ...(parsed.midHighOk ?? {}), downswing: false }
+          : outsideInDetected === false
+            ? parsed.midHighOk
+            : parsed.midHighOk,
+      deriveFromText: true,
+    });
+
+    parsed.phases = rescored.phases;
+    let totalScore = rescored.totalScore;
+
+    // Absolute enforcement (defensive): Some models still miss outside-in cues even with RAG.
+    // If downswing text contains strong over-the-top signals, force DS<=8 and cap total<=58.
+    try {
+      const ds = parsed.phases.downswing;
+      const dsText = [...(ds.good ?? []), ...(ds.issues ?? []), ...(ds.advice ?? [])].join("／");
+      const hasUpperBodyIssue = /上半身/.test(dsText) && /(回転.*不足|不足|開き)/.test(dsText);
+      const hasEarlyRelease = /(手首|コック|リリース)/.test(dsText) && /(早|解け|ほどけ)/.test(dsText);
+      const hasElbowAway = /右肘.*体から離れ|肘.*離れすぎ|腕が体から離れ/.test(dsText);
+      const hasKneeCollapse = /右膝.*内側|膝.*内側.*入りすぎ/.test(dsText);
+      const hasOutsideInWord = /アウトサイドイン|カット軌道|外から下り|外から入る|上から入る|かぶせ|カット打ち/.test(dsText);
+      const shouldCap =
+        outsideInDetected === true ||
+        hasOutsideInWord ||
+        hasElbowAway ||
+        hasKneeCollapse ||
+        (hasUpperBodyIssue && hasEarlyRelease) ||
+        (hasUpperBodyIssue && hasElbowAway);
+
+      if (shouldCap) {
+        ds.score = Math.min(ds.score ?? 0, 8);
+        if (!ds.issues?.some((t) => /アウトサイドイン|カット軌道|外から下り/.test(String(t)))) {
+          ds.issues = ["アウトサイドイン（外から下りる）", ...(ds.issues ?? [])].slice(0, 4);
+        }
+        const sum = PHASE_ORDER.reduce((acc, key) => acc + (parsed.phases[key]?.score ?? 0), 0);
+        const raw = Math.max(0, Math.min(100, Math.round((sum / (PHASE_ORDER.length * 20)) * 100)));
+        totalScore = Math.min(totalScore, 58, raw);
+      }
+    } catch {
+      // ignore enforcement failures
+    }
 
     const analysisId: AnalysisId =
       typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `golf-${Date.now()}`;
@@ -1360,6 +1461,32 @@ export async function POST(req: NextRequest) {
           ? { frames: [], stages: stagesWithMotion ?? parsed.sequenceStages }
           : undefined,
     };
+
+    // Final, authoritative guardrails pass (analysis-time only).
+    // This keeps stored results consistent even when upstream prompts drift.
+    {
+      const finalized = rescoreSwingAnalysis({
+        result,
+        majorNg:
+          outsideInDetected === true
+            ? { ...(parsed.majorNg ?? {}), downswing: true }
+            : outsideInDetected === false
+              ? parsed.majorNg
+              : parsed.majorNg,
+        midHighOk:
+          outsideInDetected === true
+            ? { ...(parsed.midHighOk ?? {}), downswing: false }
+            : outsideInDetected === false
+              ? parsed.midHighOk
+              : parsed.midHighOk,
+        deriveFromText: true,
+      });
+      result.totalScore = finalized.totalScore;
+      result.phases = finalized.phases;
+      // Keep downstream logic consistent (swing style delta / hints, etc).
+      totalScore = result.totalScore;
+      parsed.phases = result.phases;
+    }
 
     if (previousReport) {
       result.comparison = buildPhaseComparison(previousReport, result);
@@ -1473,6 +1600,8 @@ export async function POST(req: NextRequest) {
     }
 
     const note = visionFailedMessage ? `Vision fallback: ${visionFailedMessage}` : undefined;
+
+    meta.scoringVersion = "v2025-12-28-guardrails-outside-in";
 
     const record: GolfAnalysisRecord = {
       id: analysisId,

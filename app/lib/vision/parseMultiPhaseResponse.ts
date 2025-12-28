@@ -20,6 +20,8 @@ type RawResponse = Partial<Record<PhaseKey, unknown>> & {
   drills?: unknown;
   comparison?: unknown;
   sequence?: unknown;
+  major_ng?: unknown;
+  mid_high_ok?: unknown;
 };
 
 function ensureString(value: unknown, field: string): string {
@@ -47,6 +49,17 @@ function ensureNumber(value: unknown, field: string): number {
     throw new Error(`Field ${field} must be a finite number`);
   }
   return num;
+}
+
+function parsePhaseBooleanMap(raw: unknown): Partial<Record<PhaseKey, boolean>> | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const obj = raw as Record<string, unknown>;
+  const out: Partial<Record<PhaseKey, boolean>> = {};
+  for (const key of phaseKeys) {
+    const v = obj[key];
+    if (typeof v === "boolean") out[key] = v;
+  }
+  return Object.keys(out).length ? out : undefined;
 }
 
 function parseSequenceStages(raw: unknown): SequenceStageFeedback[] | undefined {
@@ -112,6 +125,8 @@ export function parseMultiPhaseResponse(input: unknown): {
   recommendedDrills?: string[];
   comparison?: { improved: string[]; regressed: string[] };
   phases: Record<PhaseKey, SwingPhase>;
+  majorNg?: Partial<Record<PhaseKey, boolean>>;
+  midHighOk?: Partial<Record<PhaseKey, boolean>>;
   sequenceStages?: SequenceStageFeedback[];
 } {
   let parsed: RawResponse;
@@ -163,6 +178,8 @@ export function parseMultiPhaseResponse(input: unknown): {
           }
         : undefined,
     phases,
+    majorNg: parsePhaseBooleanMap(parsed.major_ng),
+    midHighOk: parsePhaseBooleanMap(parsed.mid_high_ok),
     sequenceStages: parseSequenceStages(parsed.sequence) ?? parseSequenceStages(parsed),
   };
 }

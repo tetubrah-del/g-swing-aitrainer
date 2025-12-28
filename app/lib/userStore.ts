@@ -3,7 +3,11 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { ProAccessReason, UserAccount } from "@/app/golf/types";
-import { attachUserToAnonymousAnalyses } from "@/app/lib/store";
+import { attachUserToAnonymousAnalyses, deleteAnalysesForUser } from "@/app/lib/store";
+import { deleteFreeCoachUsageForActor } from "@/app/lib/freeCoachUsageStore";
+import { deleteEmailVerificationRecords } from "@/app/lib/emailVerificationStore";
+import { deleteReferralDataForUser, deleteSharedAnalysisData } from "@/app/lib/referralTracking";
+import { setAnonymousQuotaCount } from "@/app/lib/quotaStore";
 
 const users = new Map<string, UserAccount>();
 const STORE_PATH = path.join(os.tmpdir(), "golf-users.json");
@@ -81,6 +85,18 @@ async function loadFromDisk() {
             : null,
         monitorExpiresAt: typeof value.monitorExpiresAt === "number" ? value.monitorExpiresAt : null,
         anonymousIds: Array.isArray(value.anonymousIds) ? value.anonymousIds.filter((v) => typeof v === "string") : [],
+        withdrawRequestedAt:
+          typeof (value as Record<string, unknown>).withdrawRequestedAt === "number"
+            ? ((value as Record<string, unknown>).withdrawRequestedAt as number)
+            : null,
+        withdrawScheduledAt:
+          typeof (value as Record<string, unknown>).withdrawScheduledAt === "number"
+            ? ((value as Record<string, unknown>).withdrawScheduledAt as number)
+            : null,
+        withdrawReason:
+          typeof (value as Record<string, unknown>).withdrawReason === "string"
+            ? String((value as Record<string, unknown>).withdrawReason).slice(0, 200)
+            : null,
       };
       users.set(normalized.userId, normalized);
     });
@@ -108,7 +124,12 @@ async function persistToDisk() {
 
 export async function getUserById(userId: string): Promise<UserAccount | null> {
   await loadPromise;
-  return users.get(userId) ?? null;
+  const user = users.get(userId) ?? null;
+  if (user) {
+    const finalized = await finalizeWithdrawalIfDue(user);
+    if (finalized) return null;
+  }
+  return user;
 }
 
 export async function findUserByEmail(email: string | null | undefined): Promise<UserAccount | null> {
@@ -116,7 +137,11 @@ export async function findUserByEmail(email: string | null | undefined): Promise
   if (!email) return null;
   const lower = email.toLowerCase();
   for (const user of users.values()) {
-    if (user.email && user.email.toLowerCase() === lower) return user;
+    if (user.email && user.email.toLowerCase() === lower) {
+      const finalized = await finalizeWithdrawalIfDue(user);
+      if (finalized) return null;
+      return user;
+    }
   }
   return null;
 }
@@ -134,6 +159,85 @@ export async function saveUser(user: UserAccount) {
   await loadPromise;
   users.set(user.userId, user);
   await persistToDisk();
+}
+
+function normalizeWithdrawReason(value: unknown): string | null {
+  const trimmed = typeof value === "string" ? value.trim() : "";
+  if (!trimmed) return null;
+  return trimmed.slice(0, 200);
+}
+
+export async function requestUserWithdrawal(params: {
+  userId: string;
+  scheduledAt: number;
+  reason?: string | null;
+}): Promise<UserAccount | null> {
+  const user = await getUserById(params.userId);
+  if (!user) return null;
+  const now = Date.now();
+  const scheduledAt = Math.max(now, Math.trunc(params.scheduledAt));
+  const next: UserAccount = {
+    ...user,
+    withdrawRequestedAt: now,
+    withdrawScheduledAt: scheduledAt,
+    withdrawReason: normalizeWithdrawReason(params.reason),
+    updatedAt: now,
+  };
+  await saveUser(next);
+  return next;
+}
+
+export async function deleteUserAccountAndData(userId: string): Promise<{
+  deletedAnalysisIds: string[];
+  deletedFreeCoachUsage: number;
+  deletedEmailVerifications: number;
+}> {
+  await loadPromise;
+  const user = users.get(userId) ?? null;
+  if (!user) {
+    return { deletedAnalysisIds: [], deletedFreeCoachUsage: 0, deletedEmailVerifications: 0 };
+  }
+
+  const actorIds = [user.userId, ...(Array.isArray(user.anonymousIds) ? user.anonymousIds : [])].filter((v) => typeof v === "string");
+  const deletedAnalysisIds = await deleteAnalysesForUser({ userId: user.userId, anonymousUserIds: user.anonymousIds ?? [] });
+
+  let deletedFreeCoachUsage = 0;
+  for (const actorId of actorIds) {
+    deletedFreeCoachUsage += await deleteFreeCoachUsageForActor(actorId);
+  }
+
+  if (Array.isArray(user.anonymousIds)) {
+    for (const anonId of user.anonymousIds) {
+      if (typeof anonId === "string" && anonId.trim().length) {
+        await setAnonymousQuotaCount(anonId, 0);
+      }
+    }
+  }
+
+  let deletedEmailVerifications = 0;
+  deletedEmailVerifications += await deleteEmailVerificationRecords({ email: user.email ?? null });
+  for (const actorId of actorIds) {
+    deletedEmailVerifications += await deleteEmailVerificationRecords({ anonymousUserId: actorId });
+  }
+
+  // Referral / share tracking data is stored in SQLite.
+  for (const actorId of actorIds) {
+    deleteReferralDataForUser(actorId);
+  }
+  deleteSharedAnalysisData(deletedAnalysisIds);
+
+  users.delete(user.userId);
+  await persistToDisk();
+
+  return { deletedAnalysisIds, deletedFreeCoachUsage, deletedEmailVerifications };
+}
+
+async function finalizeWithdrawalIfDue(user: UserAccount): Promise<boolean> {
+  const scheduledAt = typeof user.withdrawScheduledAt === "number" ? user.withdrawScheduledAt : null;
+  if (!scheduledAt) return false;
+  if (Date.now() < scheduledAt) return false;
+  await deleteUserAccountAndData(user.userId);
+  return true;
 }
 
 export async function updateUserNickname(params: { userId: string; nickname: string | null }) {
