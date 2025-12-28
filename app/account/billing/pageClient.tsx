@@ -158,6 +158,7 @@ export default function AccountBillingPageClient() {
             <div className="mt-4 text-xs text-slate-400">
               解約/カード変更/領収書はStripeのポータルで管理します。
             </div>
+
           </div>
         )}
       </div>

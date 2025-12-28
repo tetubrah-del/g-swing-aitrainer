@@ -62,3 +62,18 @@ export async function markFreeCoachUsed(params: { actorId: string; analysisId: s
   await persistToDisk();
 }
 
+export async function deleteFreeCoachUsageForActor(actorId: string): Promise<number> {
+  await loadFromDisk();
+  let deleted = 0;
+  const prefix = `${actorId}:`;
+  for (const key of Array.from(memory.keys())) {
+    if (key.startsWith(prefix)) {
+      memory.delete(key);
+      deleted += 1;
+    }
+  }
+  if (deleted > 0) {
+    await persistToDisk();
+  }
+  return deleted;
+}

@@ -22,15 +22,15 @@ const clamp = (v: number, min: number, max: number) => Math.min(max, Math.max(mi
 function computeFallback(totalScore: number): RoundEstimate {
   const score = clamp(Number.isFinite(totalScore) ? totalScore : 0, 0, 100);
 
-  // 少し厳しめ：85前後が出やすいレンジに寄せる
-  const mid = Math.round(105 - score * 0.28);
-  const spread = 3;
-  const low = clamp(mid - spread, 60, 115);
-  const high = clamp(mid + spread, 60, 115);
+  // Calibrated for typical amateurs: swing score 70-75 -> ~95-105 (100切り付近)
+  const mid = Math.round(147 - score * 0.67);
+  const spread = 4;
+  const low = clamp(mid - spread, 70, 140);
+  const high = clamp(mid + spread, 70, 140);
 
-  const fwKeep = clamp(50 + score * 0.18, 40, 75);
-  const gir = clamp(32 + score * 0.18, 25, 65);
-  const ob = clamp(3.2 - score * 0.012, 0.5, 4);
+  const fwKeep = clamp(25 + score * 0.35, 25, 70);
+  const gir = clamp(10 + score * 0.3, 10, 55);
+  const ob = clamp(7 - score * 0.045, 1.5, 7);
 
   return {
     strokeRange: `${low}〜${high}`,
@@ -55,7 +55,7 @@ Input:
 - meta (handedness, club, level, etc.): ${metaText}
 
 Guidelines:
-- Output should be slightly strict; typical amateur with swing score ~70-75 should land around mid-80s to low-90s.
+- Output should be conservative; typical amateur with swing score ~70-75 should land around mid-90s to low-100s.
 - Return conservative but realistic metrics for FW keep %, GIR %, and OB count (18H equivalent).
 - Keep numbers human-readable integers; OB can be one decimal.
 - Output ONLY JSON with keys: strokeRange (string like "84〜88"), fwKeep (string "%"), gir (string "%"), ob (string "x.x 回"), source ("ai").

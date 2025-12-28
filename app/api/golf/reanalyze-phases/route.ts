@@ -11,6 +11,7 @@ import { auth } from "@/auth";
 import { findUserByEmail, getUserById } from "@/app/lib/userStore";
 import type { PhaseFrame } from "@/app/lib/vision/extractPhaseFrames";
 import { askVisionAPI } from "@/app/lib/vision/askVisionAPI";
+import { rescoreSwingAnalysis } from "@/app/golf/scoring/phaseGuardrails";
 
 export const runtime = "nodejs";
 
@@ -308,6 +309,11 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
   };
 
   const nextTotal = computeTotalScoreFromPhases(nextResult.phases as Record<string, { score?: number }>);
+  const rescored = rescoreSwingAnalysis({
+    result: { ...(nextResult as SwingAnalysis), totalScore: nextTotal },
+    deriveFromText: true,
+  });
+
   let previousReport: SwingAnalysis | null = null;
   const previousAnalysisId = stored.meta?.previousAnalysisId ?? null;
   if (typeof previousAnalysisId === "string" && previousAnalysisId !== analysisId) {
@@ -317,8 +323,8 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
     }
   }
 
-  const phaseComparison = previousReport ? buildPhaseComparison(previousReport, nextResult as SwingAnalysis) : null;
-  const finalResult = { ...nextResult, totalScore: nextTotal, comparison: phaseComparison ?? nextResult.comparison };
+  const phaseComparison = previousReport ? buildPhaseComparison(previousReport, rescored) : null;
+  const finalResult = { ...rescored, comparison: phaseComparison ?? rescored.comparison };
 
   const updated = { ...stored, result: finalResult };
   await saveAnalysis(updated);

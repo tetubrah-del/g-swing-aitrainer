@@ -102,3 +102,27 @@ export async function consumeEmailVerification(token: string): Promise<{
   await persistToDisk();
   return { email: record.email, nickname: record.nickname ?? null, anonymousUserId: record.anonymousUserId };
 }
+
+export async function deleteEmailVerificationRecords(params: {
+  email?: string | null;
+  anonymousUserId?: string | null;
+}): Promise<number> {
+  await loadPromise;
+  const email = typeof params.email === "string" ? params.email.trim().toLowerCase() : null;
+  const anonymousUserId = typeof params.anonymousUserId === "string" ? params.anonymousUserId.trim() : null;
+  if (!email && !anonymousUserId) return 0;
+
+  let deleted = 0;
+  for (const [tokenHash, record] of Array.from(records.entries())) {
+    const matchesEmail = email && record.email.toLowerCase() === email;
+    const matchesAnonymous = anonymousUserId && record.anonymousUserId === anonymousUserId;
+    if (matchesEmail || matchesAnonymous) {
+      records.delete(tokenHash);
+      deleted += 1;
+    }
+  }
+  if (deleted > 0) {
+    await persistToDisk();
+  }
+  return deleted;
+}

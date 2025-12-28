@@ -93,18 +93,51 @@ async function getVideoDuration(inputPath: string): Promise<number> {
 async function extractFrameAt(inputPath: string, outputPath: string, timeSec: number): Promise<void> {
   const safeTime = Math.max(0, timeSec);
   const ffmpeg = await getFfmpegPath();
-  await execFileAsync(ffmpeg, [
-    "-y",
-    "-ss",
-    safeTime.toString(),
-    "-i",
-    inputPath,
+  const scaleFilter = "scale=trunc(iw/2)*2:trunc(ih/2)*2";
+  const formatFilter = "format=yuvj420p";
+  const outputArgs = [
+    "-map",
+    "0:v:0",
+    "-vf",
+    `${scaleFilter},${formatFilter}`,
     "-frames:v",
     "1",
     "-q:v",
     "2",
+    "-an",
+    "-sn",
+    "-strict",
+    "-1",
     outputPath,
-  ]);
+  ];
+
+  const tryExtract = async (seekMode: "fast" | "accurate", timestampSec: number) => {
+    const args =
+      seekMode === "fast"
+        ? ["-y", "-ss", timestampSec.toString(), "-i", inputPath, ...outputArgs]
+        : ["-y", "-i", inputPath, "-ss", timestampSec.toString(), ...outputArgs];
+    await execFileAsync(ffmpeg, args);
+    await access(outputPath);
+  };
+
+  const candidates = [safeTime, Math.max(0, safeTime - 0.05), Math.max(0, safeTime - 0.1), Math.max(0, safeTime - 0.2)];
+  let lastError: unknown = null;
+  for (const t of candidates) {
+    try {
+      await tryExtract("fast", t);
+      return;
+    } catch (error) {
+      lastError = error;
+    }
+    try {
+      await tryExtract("accurate", t);
+      return;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error(`Failed to extract frame at ${safeTime}s`);
 }
 
 async function extractVideoPhaseFrames(inputPath: string): Promise<PhaseFrames> {
@@ -112,7 +145,9 @@ async function extractVideoPhaseFrames(inputPath: string): Promise<PhaseFrames> 
   try {
     const duration = await getVideoDuration(inputPath);
     const length = duration > 0 ? duration : 1;
-    const timestamps = [0.03, 0.18, 0.42, 0.65, 0.82, 0.97].map((ratio) => ratio * length);
+    const safeEnd = duration > 0 ? Math.max(0, duration - 0.05) : length;
+    const clamp = (t: number) => Math.min(Math.max(0, t), safeEnd);
+    const timestamps = [0.03, 0.18, 0.42, 0.65, 0.82, 0.97].map((ratio) => clamp(ratio * length));
 
     const outputFiles = timestamps.map((_, idx) => path.join(tempDir, `phase-${idx}.jpg`));
     await Promise.all(timestamps.map((time, idx) => extractFrameAt(inputPath, outputFiles[idx], time)));

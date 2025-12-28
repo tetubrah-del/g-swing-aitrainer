@@ -28,6 +28,7 @@ export default function RegisterPage() {
   const [status, setStatus] = useState<"idle" | "email" | "google">("idle");
   const [error, setError] = useState<string | null>(null);
   const [sent, setSent] = useState(false);
+  const [agreed, setAgreed] = useState(false);
   const [devLink, setDevLink] = useState<string | null>(null);
   const [anonymousUserId, setAnonymousUserId] = useState<string>("");
   const [hydrated, setHydrated] = useState(false);
@@ -52,6 +53,10 @@ export default function RegisterPage() {
   const handleEmailRegister = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     if (status !== "idle") return;
+    if (!agreed) {
+      setError("利用規約に同意してください。");
+      return;
+    }
     setStatus("email");
     setError(null);
     setDevLink(null);
@@ -87,6 +92,10 @@ export default function RegisterPage() {
 
   const handleGoogleRegister = async () => {
     if (status !== "idle") return;
+    if (!agreed) {
+      setError("利用規約に同意してください。");
+      return;
+    }
     setStatus("google");
     setError(null);
     try {
@@ -163,10 +172,27 @@ export default function RegisterPage() {
           )}
 
           <div className="space-y-3">
+            <div className="rounded-lg border border-slate-800 bg-slate-950/40 px-3 py-2">
+              <label className="flex items-start gap-2 text-sm text-slate-200">
+                <input
+                  type="checkbox"
+                  checked={agreed}
+                  onChange={(e) => setAgreed(e.target.checked)}
+                  className="mt-1 h-4 w-4 accent-emerald-500"
+                />
+                <span>
+                  <Link href="/terms" className="text-emerald-300 underline underline-offset-4">
+                    利用規約
+                  </Link>
+                  に同意して登録します
+                </span>
+              </label>
+            </div>
+
             <button
               type="button"
               onClick={handleGoogleRegister}
-              disabled={isBusy}
+              disabled={isBusy || !agreed}
               className="w-full inline-flex items-center justify-center gap-2 rounded-lg bg-emerald-500 hover:bg-emerald-400 disabled:bg-emerald-700 px-4 py-3 font-semibold text-slate-900 transition-colors"
             >
               {status === "google" ? "Googleで登録中…" : "Googleで登録"}
@@ -200,7 +226,7 @@ export default function RegisterPage() {
               </div>
               <button
                 type="submit"
-                disabled={isBusy || !email}
+                disabled={isBusy || !email || !agreed}
                 className="w-full rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 disabled:bg-slate-800/50 px-4 py-3 font-semibold text-slate-50 transition-colors"
               >
                 {status === "email" ? "送信中…" : sent ? "もう一度送信する" : "認証メールを送信"}

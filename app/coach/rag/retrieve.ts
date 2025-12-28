@@ -7,7 +7,11 @@ type RetrieveOptions = {
   minScore?: number;
 };
 
-const KB_PATH = path.join(process.cwd(), "app", "coach", "rag", "KNOWLEDGE.md");
+const KB_PATHS: Array<{ label: string; filePath: string }> = [
+  { label: "app/coach/rag/KNOWLEDGE.md", filePath: path.join(process.cwd(), "app", "coach", "rag", "KNOWLEDGE.md") },
+  { label: "app/coach/rag/SWING_SCORING.md", filePath: path.join(process.cwd(), "app", "coach", "rag", "SWING_SCORING.md") },
+  { label: "app/coach/rag/DOWNSWING_OUTSIDE_IN.md", filePath: path.join(process.cwd(), "app", "coach", "rag", "DOWNSWING_OUTSIDE_IN.md") },
+];
 
 const safeReadText = (filePath: string): string => {
   try {
@@ -60,6 +64,12 @@ const splitIntoChunks = (raw: string): string[] => {
   return merged;
 };
 
+const splitIntoChunksWithLabel = (raw: string, label: string): string[] => {
+  const chunks = splitIntoChunks(raw);
+  if (!chunks.length) return [];
+  return chunks.map((c) => `【${label}】\n${c}`);
+};
+
 const scoreChunk = (chunk: string, queryTokens: string[]): number => {
   if (!chunk) return 0;
   if (!queryTokens.length) return 0;
@@ -81,10 +91,7 @@ export const retrieveCoachKnowledge = (
   const maxChars = Math.max(200, Math.min(opts.maxChars ?? 1400, 4000));
   const minScore = opts.minScore ?? 1;
 
-  const raw = safeReadText(KB_PATH);
-  if (!raw.trim()) return { contextText: "", chunks: [] };
-
-  const chunks = splitIntoChunks(raw);
+  const chunks = KB_PATHS.flatMap(({ label, filePath }) => splitIntoChunksWithLabel(safeReadText(filePath), label));
   if (!chunks.length) return { contextText: "", chunks: [] };
 
   const qTokens = tokenize(query);
@@ -112,4 +119,3 @@ export const retrieveCoachKnowledge = (
   const contextText = outChunks.join("\n\n").slice(0, maxChars);
   return { contextText, chunks: outChunks };
 };
-
