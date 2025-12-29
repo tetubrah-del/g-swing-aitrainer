@@ -1421,13 +1421,23 @@ export async function POST(req: NextRequest) {
     // This prevents false positives (e.g., pro swings) from being forced into low scores by a single mislabel.
     try {
       const hasTwoGoods = (items: unknown) => Array.isArray(items) && items.filter((t) => typeof t === "string" && t.trim().length > 0).length >= 2;
+      const dropGenericDsAdviceWhenNoIssues = (ds: { issues?: unknown; advice?: unknown }) => {
+        const issues = Array.isArray(ds.issues) ? ds.issues : [];
+        if (issues.length) return;
+        const advice = Array.isArray(ds.advice) ? ds.advice : [];
+        ds.advice = advice.filter(
+          (t) =>
+            !/インサイド|内側|手元.*先行|フェース.*開|アウトサイドイン|外から|カット軌道|かぶせ|上から/.test(String(t))
+        );
+      };
       if (outsideInDetected?.value === false) {
         const ds = parsed.phases.downswing;
         const before = Array.isArray(ds.issues) ? ds.issues : [];
         const filtered = before.filter((t) => !/外から入りやすい傾向|アウトサイドイン（確定）|カット軌道（確定）|外から下りる（確定）|アウトサイドイン|カット軌道|外から下り/.test(String(t)));
         if (filtered.length !== before.length) {
           ds.issues = filtered;
-          if ((ds.score ?? 0) < 14 && hasTwoGoods(ds.good)) ds.score = 14;
+          if ((ds.score ?? 0) < 18 && hasTwoGoods(ds.good)) ds.score = 18;
+          dropGenericDsAdviceWhenNoIssues(ds);
         }
       }
       // If the judge is unavailable (null) and the only "issue" is a soft "要確認" label, treat it as non-evidence.
@@ -1439,7 +1449,14 @@ export async function POST(req: NextRequest) {
           issues.length === 1 && /外から入りやすい傾向（要確認）/.test(String(issues[0]));
         if (hasOnlySoftTendency && hasTwoGoods(ds.good)) {
           ds.issues = [];
-          if ((ds.score ?? 0) < 15) ds.score = 15;
+          if ((ds.score ?? 0) < 18) ds.score = 18;
+          dropGenericDsAdviceWhenNoIssues(ds);
+        }
+        // If issues are empty but score is still low, treat it as a scoring mismatch and lift it.
+        const nowIssues = Array.isArray(ds.issues) ? ds.issues : [];
+        if (!nowIssues.length && hasTwoGoods(ds.good) && (ds.score ?? 0) < 18) {
+          ds.score = 18;
+          dropGenericDsAdviceWhenNoIssues(ds);
         }
       }
       if (earlyExtensionDetected?.value === false) {
@@ -1497,6 +1514,20 @@ export async function POST(req: NextRequest) {
       }
     } catch {
       // ignore enforcement failures
+    }
+
+    // Final consistency pass: recompute totalScore from the current phase scores (after postprocessing),
+    // while preserving only the intended cross-phase caps.
+    try {
+      const sum = PHASE_ORDER.reduce((acc, key) => acc + (parsed.phases[key]?.score ?? 0), 0);
+      const raw = Math.max(0, Math.min(100, Math.round((sum / (PHASE_ORDER.length * 20)) * 100)));
+      let capped = raw;
+      if ((parsed.phases.downswing?.score ?? 0) <= 8) capped = Math.min(capped, 65);
+      if (outsideInDetected?.value === true && outsideInDetected.confidence === "high") capped = Math.min(capped, 58);
+      if ((parsed.phases.address?.score ?? 0) <= 8 && (parsed.phases.finish?.score ?? 0) <= 8) capped = Math.min(capped, 60);
+      totalScore = capped;
+    } catch {
+      // ignore
     }
 
     const analysisId: AnalysisId =
