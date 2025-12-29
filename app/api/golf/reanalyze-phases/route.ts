@@ -93,11 +93,25 @@ function postprocessSinglePhaseResult(args: { phaseLabel: string; result: { scor
           !/インサイド|内側|手元.*先行|フェース.*開|アウトサイドイン|外から|カット軌道|かぶせ|上から|連動|同調/.test(String(t))
       );
     };
+    const hasTrajectoryConcernInAdvice = () => {
+      const text = [...result.advice, ...result.good].map((t) => String(t)).join("／");
+      return (
+        /肩.*開|体の開き|胸.*開|上から|かぶせ|外から|アウトサイド|カット|インサイド.*下ろ|フェース.*開|手元.*先行|上半身先行|早開き/.test(
+          text
+        ) && /抑|注意|意識|心がけ|遅ら|保つ|練習|確認/.test(text)
+      );
+    };
     // Soft "要確認" alone is not enough evidence to keep the score low.
     if (result.issues.length === 1 && /外から入りやすい傾向（要確認）/.test(result.issues[0]) && goodCount >= 2) {
       result.issues = [];
       result.score = Math.max(result.score, 18);
       dropGenericAdviceWhenNoIssues();
+    }
+    // If issues are empty but advice indicates trajectory concern, treat it as "tendency" and avoid full score.
+    if (!result.issues.length && hasTrajectoryConcernInAdvice()) {
+      result.issues = ["外から入りやすい傾向（要確認）"];
+      result.score = Math.min(result.score, 12);
+      return result;
     }
     // If issues are empty but score is still low, lift it to match the rubric.
     if (!result.issues.length && goodCount >= 2 && result.score < 18) {
