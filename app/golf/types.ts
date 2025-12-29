@@ -67,6 +67,7 @@ export interface SwingAnalysis {
     regressed: string[];
   };
   sequence?: SequenceReview;
+  on_plane?: unknown;
   swingStyle?: import("@/app/lib/swing/style").SwingStyleAssessment;
   swingStyleChange?: import("@/app/lib/swing/style").SwingStyleChange;
   swingStyleComment?: string;
