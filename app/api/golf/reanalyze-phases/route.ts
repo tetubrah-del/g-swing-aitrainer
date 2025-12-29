@@ -81,6 +81,29 @@ function parseSinglePhaseResult(raw: unknown): { score: number; good: string[]; 
   };
 }
 
+function postprocessSinglePhaseResult(args: { phaseLabel: string; result: { score: number; good: string[]; issues: string[]; advice: string[] } }) {
+  const { phaseLabel, result } = args;
+  const goodCount = result.good.filter((t) => t.trim().length > 0).length;
+
+  if (phaseLabel === "ダウンスイング") {
+    // Soft "要確認" alone is not enough evidence to keep the score low.
+    if (result.issues.length === 1 && /外から入りやすい傾向（要確認）/.test(result.issues[0]) && goodCount >= 2) {
+      result.issues = [];
+      result.score = Math.max(result.score, 15);
+    }
+  }
+
+  if (phaseLabel === "インパクト") {
+    // If early extension is mentioned without "(確定)", keep it as "要確認" and avoid harsh scoring.
+    if (result.issues.some((t) => /早期伸展/.test(t)) && !result.issues.some((t) => /早期伸展（確定）/.test(t))) {
+      result.issues = result.issues.map((t) => (/早期伸展/.test(t) ? "早期伸展の懸念（要確認）" : t));
+      result.score = Math.max(result.score, 11);
+    }
+  }
+
+  return result;
+}
+
 function buildPhasePrompt(args: { phaseLabel: string; handedness?: string; clubType?: string; level?: string }) {
   const metaLines = [
     `利き手: ${args.handedness === "left" ? "左打ち" : "右打ち"}`,
@@ -199,7 +222,7 @@ async function analyzeSinglePhase(
   const prompt = buildPhasePrompt(args);
   const raw = await askVisionAPI({ frames, prompt });
   const parsed = typeof raw === "string" ? (() => { try { return JSON.parse(raw); } catch { return null; } })() : raw;
-  return parseSinglePhaseResult(parsed);
+  return postprocessSinglePhaseResult({ phaseLabel: args.phaseLabel, result: parseSinglePhaseResult(parsed) });
 }
 
 export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisResponse | { error: string }>> {
