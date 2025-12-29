@@ -1681,6 +1681,15 @@ export async function POST(req: NextRequest) {
       summary: parsed.summary,
       recommendedDrills: parsed.recommendedDrills ?? [],
       comparison: parsed.comparison,
+      on_plane:
+        parsed.onPlane && typeof parsed.onPlane === "object"
+          ? {
+              ...(parsed.onPlane as Record<string, unknown>),
+              ...(previousReport && (previousReport as unknown as Record<string, unknown>)?.on_plane
+                ? { previous: (previousReport as unknown as Record<string, unknown>).on_plane }
+                : null),
+            }
+          : undefined,
       sequence: resolvedSequence.length
         ? {
             frames: cleanedSequenceFrames,

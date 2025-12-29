@@ -30,6 +30,7 @@ import PhaseFrameSelector from './PhaseFrameSelector';
 import { clearDiagnostics, loadDiagnostics, saveDiagnostics } from '@/app/golf/utils/diagnosticsStorage';
 import { selectShareFrames } from '@/app/golf/utils/shareFrameSelection';
 import { buildLevelDiagnosis, computeRoundFallbackFromScore } from '@/app/golf/utils/scoreCalibration';
+import OnPlaneSection from './OnPlaneSection';
 
 type SwingTypeBadge = {
   label: string;
@@ -68,6 +69,8 @@ const phaseOrder: Array<keyof GolfAnalysisResponse['result']['phases']> = [
   'finish',
 ];
 
+const SHOW_SWING_TYPE_DIAGNOSIS_UI = false;
+const SHOW_SWING_STYLE_COMMENT_UI = false;
 
 type IssueRule = {
   key: string;
@@ -1436,6 +1439,11 @@ const GolfResultPage = () => {
       !!manualPhase.impact?.length &&
       phaseOverrideSig.length > 0 &&
       phaseOverrideSig === phaseOverrideAppliedSig);
+  const onPlaneData =
+    (result as unknown as Record<string, unknown>)?.on_plane ??
+    (result as unknown as Record<string, unknown>)?.onPlane ??
+    (result as unknown as Record<string, unknown>)?.onPlaneData ??
+    null;
 
   return (
     <main className="min-h-screen bg-slate-950 text-slate-50 flex justify-center">
@@ -1706,9 +1714,11 @@ const GolfResultPage = () => {
               <span>{isCausalLoading ? '推定中…' : causalImpact?.source === 'ai' ? 'AI推定' : 'ルールベース'}</span>
             </div>
           </div>
-          {typeof result.swingStyleComment === "string" && result.swingStyleComment.trim().length > 0 && (
-            <p className="text-sm text-slate-200">{result.swingStyleComment}</p>
-          )}
+          {SHOW_SWING_STYLE_COMMENT_UI &&
+            typeof result.swingStyleComment === "string" &&
+            result.swingStyleComment.trim().length > 0 && (
+              <p className="text-sm text-slate-200">{result.swingStyleComment}</p>
+            )}
           {causalImpact ? (
             <div className="space-y-2">
               <div className="flex flex-wrap items-center gap-2">
@@ -1842,7 +1852,7 @@ const GolfResultPage = () => {
 	                      })}
 	                    </ul>
 	                  </div>
-	                  {swingStyleCommentText && (
+	                  {SHOW_SWING_STYLE_COMMENT_UI && swingStyleCommentText && (
 	                    <p className="text-sm text-slate-300 mt-2 whitespace-pre-line">{swingStyleCommentText}</p>
 	                  )}
 	                  <div>
@@ -1964,6 +1974,8 @@ const GolfResultPage = () => {
           </section>
         )}
 
+        <OnPlaneSection onPlaneData={onPlaneData} isPro={userState.hasProAccess} />
+
         <ProUpsellModal
           open={proModalOpen}
           onClose={() => setProModalOpen(false)}
@@ -1973,203 +1985,205 @@ const GolfResultPage = () => {
           ctaLabel={userState.isAuthenticated ? 'PROにアップグレード' : '登録してPROを見る'}
         />
 
-        {/* あなたのスイングタイプ */}
-        <section className="rounded-xl bg-slate-900/70 border border-slate-700 p-4 space-y-3">
-          <div className="flex items-center gap-2">
-            <span className="text-lg">🧬</span>
-            <div>
-              <p className="text-xs text-slate-400">あなたのスイングタイプ</p>
-              <p className="text-sm font-semibold text-slate-100">得意な動きと伸ばしたい方向性</p>
-            </div>
-          </div>
-          {swingTypeBadges.length > 0 ? (
-            <div className="space-y-3">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                {swingTypeBadges.map((badge, idx) => (
-                  <div
-                    key={`${badge.label}-${idx}`}
-                    className="flex items-center justify-between rounded-lg border border-slate-800 bg-slate-950/60 px-3 py-2"
-                  >
-                    <div className="flex items-center gap-2">
-                      <span className={badge.positive ? "text-emerald-300" : "text-amber-300"}>
-                        {badge.positive ? "✔" : "❌"}
-                      </span>
-                      <span className="text-sm text-slate-100">{badge.label}</span>
-                    </div>
-                    <div className="text-xs text-slate-300">
-                      {typeof badge.confidence === "number" ? `${badge.confidence}%` : badge.value ?? ""}
-                    </div>
-                  </div>
-                ))}
-              </div>
-              <div className="text-xs text-slate-400 space-y-1">
-                {swingTypeBadges.map((badge, idx) => (
-                  <p key={`reason-${badge.label}-${idx}`}>
-                    ・{badge.label}：{badge.reason || "診断内容から推定しました"}
-                  </p>
-                ))}
-              </div>
-            </div>
-          ) : (
-            <p className="text-sm text-slate-300">タイプを分析しています…</p>
-          )}
-        </section>
-
-        {/* スイングタイプ（AI判定・型の解説） */}
-        <section className="rounded-xl bg-slate-900/70 border border-slate-700 p-4 space-y-4">
-          <div className="flex items-center gap-2">
-            <span className="text-lg">🧬</span>
-            <div>
-              <p className="text-xs text-slate-400">あなたに向いているスイングタイプ（AI判定）</p>
-              <p className="text-sm font-semibold text-slate-100">型に縛られず、向き・強みをベースに伸ばす提案</p>
-            </div>
-          </div>
-          {isSwingTypeLoading && <p className="text-xs text-slate-400">スイング型を解析中…</p>}
-          {swingTypeMatches.length > 0 && bestType && bestTypeDetail && (
-            <div className="space-y-3">
-              <div className="grid grid-cols-1">
-                <div className="flex items-center justify-between rounded-lg px-3 py-3 text-left border border-emerald-500/70 bg-emerald-900/30 text-emerald-50">
-                  <div className="flex flex-col">
-                    <span className="text-sm font-semibold">{bestType.label}</span>
-                    <span className="text-[11px] text-emerald-100">{bestType.reason}</span>
-                  </div>
-                  <span className="flex items-center gap-1 text-xs font-semibold text-emerald-50">
-                    <span className="text-[10px] font-medium text-emerald-100/80">適合性</span>
-                    <span>{Math.round(bestType.matchScore * 100)}%</span>
-                  </span>
+        {SHOW_SWING_TYPE_DIAGNOSIS_UI && (
+          <>
+            {/* あなたのスイングタイプ */}
+            <section className="rounded-xl bg-slate-900/70 border border-slate-700 p-4 space-y-3">
+              <div className="flex items-center gap-2">
+                <span className="text-lg">🧬</span>
+                <div>
+                  <p className="text-xs text-slate-400">あなたのスイングタイプ</p>
+                  <p className="text-sm font-semibold text-slate-100">得意な動きと伸ばしたい方向性</p>
                 </div>
               </div>
-
-              <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-3 space-y-2">
-                <p className="text-sm font-semibold text-emerald-200">{bestTypeDetail.title}</p>
-                <p className="text-xs text-slate-300">{bestTypeDetail.shortDescription}</p>
-                <p className="text-xs text-slate-300 leading-relaxed">{bestTypeDetail.overview}</p>
-
-                <div className="text-xs text-slate-300 space-y-1">
-                  <p className="font-semibold text-slate-200">【AIの判定理由】</p>
-                  <ul className="list-disc pl-4 space-y-1">
-                    <li>{bestType?.reason || swingTypeSummary?.reasons?.[0] || '診断結果から推定しました'}</li>
-                  </ul>
-                  <p className="font-semibold text-slate-200 pt-1">【このタイプの特徴】</p>
-                  <ul className="list-disc pl-4 space-y-1">
-                    {bestTypeDetail.characteristics.map((line, idx) => (
-                      <li key={`ch-${idx}`}>{line}</li>
-                    ))}
-                  </ul>
-                  {bestTypeDetail.recommendedFor?.length ? (
-                    <>
-                      <p className="font-semibold text-slate-200 pt-1">【向いている人・レベル】</p>
-                      <ul className="list-disc pl-4 space-y-1">
-                        {bestTypeDetail.recommendedFor.map((line, idx) => (
-                          <li key={`rec-${idx}`}>{line}</li>
-                        ))}
-                      </ul>
-                    </>
-                  ) : null}
-                  {bestTypeDetail.advantages?.length ? (
-                    <>
-                      <p className="font-semibold text-slate-200 pt-1">【メリット】</p>
-                      <ul className="list-disc pl-4 space-y-1">
-                        {bestTypeDetail.advantages.map((line, idx) => (
-                          <li key={`adv-${idx}`}>{line}</li>
-                        ))}
-                      </ul>
-                    </>
-                  ) : null}
-                  {bestTypeDetail.disadvantages?.length ? (
-                    <>
-                      <p className="font-semibold text-slate-200 pt-1">【注意点】</p>
-                      <ul className="list-disc pl-4 space-y-1">
-                        {bestTypeDetail.disadvantages.map((line, idx) => (
-                          <li key={`dis-${idx}`}>{line}</li>
-                        ))}
-                      </ul>
-                    </>
-                  ) : null}
-                  {bestTypeDetail.commonMistakes?.length ? (
-                    <>
-                      <p className="font-semibold text-slate-200 pt-1">【よくある誤解・失敗】</p>
-                      <ul className="list-disc pl-4 space-y-1">
-                        {bestTypeDetail.commonMistakes.map((line, idx) => (
-                          <li key={`mis-${idx}`}>{line}</li>
-                        ))}
-                      </ul>
-                    </>
-                  ) : null}
-                </div>
-              </div>
-              <button
-                onClick={() => {
-                  const params = new URLSearchParams();
-                  if (bestTypeDetail?.title) params.set('swingType', bestTypeDetail.title);
-                  if (data?.analysisId) params.set('analysisId', data.analysisId);
-                  const query = params.toString();
-                  router.push(`/coach${query ? `?${query}` : ''}`);
-                }}
-                className="w-full rounded-lg border border-emerald-500/50 bg-emerald-900/30 px-3 py-2 text-sm font-semibold text-emerald-100 hover:bg-emerald-900/50 transition-colors"
-              >
-                👉 このスイングを磨くためにAIコーチに相談する
-              </button>
-            </div>
-          )}
-          {!swingTypeMatches.length && !isSwingTypeLoading && (
-            <p className="text-sm text-slate-300">スイングタイプを分析しています…</p>
-          )}
-        </section>
-
-        {alternativeTypes.length > 0 && swingTypeLLM?.swingTypeDetails && (
-          <section className="rounded-xl bg-slate-900/70 border border-slate-700 p-4 space-y-3">
-            <p className="text-sm font-semibold">ほかに進められるスイング型</p>
-            <div className="space-y-2">
-              {alternativeTypes.map((match, idx) => {
-                const detail =
-                  swingTypeLLM.swingTypeDetails[match.type] ||
-                  {
-                    title: match.label,
-                    shortDescription: match.reason,
-                    overview: swingTypeSummary?.reasons?.join('。') ?? match.reason,
-                    characteristics: [],
-                    recommendedFor: [],
-                    advantages: [],
-                    disadvantages: [],
-                    commonMistakes: [],
-                    cta: bestTypeDetail?.cta || {
-                      headline: 'このスイングを目指したい方へ',
-                      message:
-                        'このスイング型を自分に合った形で身につけるには、自己流ではなく客観的なチェックが重要です。AIコーチなら、あなたのスイング動画をもとに、この型に近づくための具体的な改善ポイントを段階的にアドバイスできます。',
-                      buttonText: 'この型を目標にAIコーチに相談する',
-                    },
-                  };
-                const isOpen = expandedAlt === match.type;
-                const reasonText =
-                  match.reason && /記述/.test(match.reason)
-                    ? detail.shortDescription || 'この型の動きがマッチするため'
-                    : match.reason || detail.shortDescription || 'この型の動きがマッチするため';
-                return (
-                  <div key={`${match.type}-${idx}`} className="rounded-lg border border-slate-800 bg-slate-950/60">
-                    <button
-                      type="button"
-                      onClick={() => setExpandedAlt(isOpen ? null : match.type)}
-                      className={`w-full flex items-center justify-between px-3 py-2 text-left transition-colors ${
-                        isOpen ? 'bg-slate-900/70 border-b border-emerald-500/40' : 'hover:border-emerald-400/50'
-                      }`}
-                    >
-                      <div className="flex flex-col">
-                        <span className="text-sm font-semibold text-slate-100 flex items-center gap-2">
-                          <span>{match.label}</span>
-                          <span className="text-[10px] text-slate-400">{isOpen ? '▲' : '▼'}</span>
-                        </span>
-                        <span className="text-[11px] text-slate-400">{reasonText}</span>
+              {swingTypeBadges.length > 0 ? (
+                <div className="space-y-3">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    {swingTypeBadges.map((badge, idx) => (
+                      <div
+                        key={`${badge.label}-${idx}`}
+                        className="flex items-center justify-between rounded-lg border border-slate-800 bg-slate-950/60 px-3 py-2"
+                      >
+                        <div className="flex items-center gap-2">
+                          <span className={badge.positive ? "text-emerald-300" : "text-amber-300"}>
+                            {badge.positive ? "✔" : "❌"}
+                          </span>
+                          <span className="text-sm text-slate-100">{badge.label}</span>
+                        </div>
+                        <div className="text-xs text-slate-300">
+                          {typeof badge.confidence === "number" ? `${badge.confidence}%` : badge.value ?? ""}
+                        </div>
                       </div>
-                      <span className="flex items-center gap-1 text-xs font-semibold text-emerald-200">
-                        <span className="text-[10px] font-medium text-slate-400">適合性</span>
-                        <span>{Math.round(match.matchScore * 100)}%</span>
+                    ))}
+                  </div>
+                  <div className="text-xs text-slate-400 space-y-1">
+                    {swingTypeBadges.map((badge, idx) => (
+                      <p key={`reason-${badge.label}-${idx}`}>
+                        ・{badge.label}：{badge.reason || "診断内容から推定しました"}
+                      </p>
+                    ))}
+                  </div>
+                </div>
+              ) : (
+                <p className="text-sm text-slate-300">タイプを分析しています…</p>
+              )}
+            </section>
+
+            {/* スイングタイプ（AI判定・型の解説） */}
+            <section className="rounded-xl bg-slate-900/70 border border-slate-700 p-4 space-y-4">
+              <div className="flex items-center gap-2">
+                <span className="text-lg">🧬</span>
+                <div>
+                  <p className="text-xs text-slate-400">あなたに向いているスイングタイプ（AI判定）</p>
+                  <p className="text-sm font-semibold text-slate-100">型に縛られず、向き・強みをベースに伸ばす提案</p>
+                </div>
+              </div>
+              {isSwingTypeLoading && <p className="text-xs text-slate-400">スイング型を解析中…</p>}
+              {swingTypeMatches.length > 0 && bestType && bestTypeDetail && (
+                <div className="space-y-3">
+                  <div className="grid grid-cols-1">
+                    <div className="flex items-center justify-between rounded-lg px-3 py-3 text-left border border-emerald-500/70 bg-emerald-900/30 text-emerald-50">
+                      <div className="flex flex-col">
+                        <span className="text-sm font-semibold">{bestType.label}</span>
+                        <span className="text-[11px] text-emerald-100">{bestType.reason}</span>
+                      </div>
+                      <span className="flex items-center gap-1 text-xs font-semibold text-emerald-50">
+                        <span className="text-[10px] font-medium text-emerald-100/80">適合性</span>
+                        <span>{Math.round(bestType.matchScore * 100)}%</span>
                       </span>
-                    </button>
-                    {isOpen && detail && (
-                      <div className="border-t border-slate-800 px-3 py-3 space-y-2 animate-accordion">
-                        <p className="text-sm font-semibold text-emerald-200">{detail.title}</p>
-                        <p className="text-xs text-slate-300">{detail.shortDescription}</p>
+                    </div>
+                  </div>
+
+                  <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-3 space-y-2">
+                    <p className="text-sm font-semibold text-emerald-200">{bestTypeDetail.title}</p>
+                    <p className="text-xs text-slate-300">{bestTypeDetail.shortDescription}</p>
+                    <p className="text-xs text-slate-300 leading-relaxed">{bestTypeDetail.overview}</p>
+
+                    <div className="text-xs text-slate-300 space-y-1">
+                      <p className="font-semibold text-slate-200">【AIの判定理由】</p>
+                      <ul className="list-disc pl-4 space-y-1">
+                        <li>{bestType?.reason || swingTypeSummary?.reasons?.[0] || '診断結果から推定しました'}</li>
+                      </ul>
+                      <p className="font-semibold text-slate-200 pt-1">【このタイプの特徴】</p>
+                      <ul className="list-disc pl-4 space-y-1">
+                        {bestTypeDetail.characteristics.map((line, idx) => (
+                          <li key={`ch-${idx}`}>{line}</li>
+                        ))}
+                      </ul>
+                      {bestTypeDetail.recommendedFor?.length ? (
+                        <>
+                          <p className="font-semibold text-slate-200 pt-1">【向いている人・レベル】</p>
+                          <ul className="list-disc pl-4 space-y-1">
+                            {bestTypeDetail.recommendedFor.map((line, idx) => (
+                              <li key={`rec-${idx}`}>{line}</li>
+                            ))}
+                          </ul>
+                        </>
+                      ) : null}
+                      {bestTypeDetail.advantages?.length ? (
+                        <>
+                          <p className="font-semibold text-slate-200 pt-1">【メリット】</p>
+                          <ul className="list-disc pl-4 space-y-1">
+                            {bestTypeDetail.advantages.map((line, idx) => (
+                              <li key={`adv-${idx}`}>{line}</li>
+                            ))}
+                          </ul>
+                        </>
+                      ) : null}
+                      {bestTypeDetail.disadvantages?.length ? (
+                        <>
+                          <p className="font-semibold text-slate-200 pt-1">【注意点】</p>
+                          <ul className="list-disc pl-4 space-y-1">
+                            {bestTypeDetail.disadvantages.map((line, idx) => (
+                              <li key={`dis-${idx}`}>{line}</li>
+                            ))}
+                          </ul>
+                        </>
+                      ) : null}
+                      {bestTypeDetail.commonMistakes?.length ? (
+                        <>
+                          <p className="font-semibold text-slate-200 pt-1">【よくある誤解・失敗】</p>
+                          <ul className="list-disc pl-4 space-y-1">
+                            {bestTypeDetail.commonMistakes.map((line, idx) => (
+                              <li key={`mis-${idx}`}>{line}</li>
+                            ))}
+                          </ul>
+                        </>
+                      ) : null}
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => {
+                      const params = new URLSearchParams();
+                      if (bestTypeDetail?.title) params.set('swingType', bestTypeDetail.title);
+                      if (data?.analysisId) params.set('analysisId', data.analysisId);
+                      const query = params.toString();
+                      router.push(`/coach${query ? `?${query}` : ''}`);
+                    }}
+                    className="w-full rounded-lg border border-emerald-500/50 bg-emerald-900/30 px-3 py-2 text-sm font-semibold text-emerald-100 hover:bg-emerald-900/50 transition-colors"
+                  >
+                    👉 このスイングを磨くためにAIコーチに相談する
+                  </button>
+                </div>
+              )}
+              {!swingTypeMatches.length && !isSwingTypeLoading && (
+                <p className="text-sm text-slate-300">スイングタイプを分析しています…</p>
+              )}
+            </section>
+
+            {alternativeTypes.length > 0 && swingTypeLLM?.swingTypeDetails && (
+              <section className="rounded-xl bg-slate-900/70 border border-slate-700 p-4 space-y-3">
+                <p className="text-sm font-semibold">ほかに進められるスイング型</p>
+                <div className="space-y-2">
+                  {alternativeTypes.map((match, idx) => {
+                    const detail =
+                      swingTypeLLM.swingTypeDetails[match.type] ||
+                      {
+                        title: match.label,
+                        shortDescription: match.reason,
+                        overview: swingTypeSummary?.reasons?.join('。') ?? match.reason,
+                        characteristics: [],
+                        recommendedFor: [],
+                        advantages: [],
+                        disadvantages: [],
+                        commonMistakes: [],
+                        cta: bestTypeDetail?.cta || {
+                          headline: 'このスイングを目指したい方へ',
+                          message:
+                            'このスイング型を自分に合った形で身につけるには、自己流ではなく客観的なチェックが重要です。AIコーチなら、あなたのスイング動画をもとに、この型に近づくための具体的な改善ポイントを段階的にアドバイスできます。',
+                          buttonText: 'この型を目標にAIコーチに相談する',
+                        },
+                      };
+                    const isOpen = expandedAlt === match.type;
+                    const reasonText =
+                      match.reason && /記述/.test(match.reason)
+                        ? detail.shortDescription || 'この型の動きがマッチするため'
+                        : match.reason || detail.shortDescription || 'この型の動きがマッチするため';
+                    return (
+                      <div key={`${match.type}-${idx}`} className="rounded-lg border border-slate-800 bg-slate-950/60">
+                        <button
+                          type="button"
+                          onClick={() => setExpandedAlt(isOpen ? null : match.type)}
+                          className={`w-full flex items-center justify-between px-3 py-2 text-left transition-colors ${
+                            isOpen ? 'bg-slate-900/70 border-b border-emerald-500/40' : 'hover:border-emerald-400/50'
+                          }`}
+                        >
+                          <div className="flex flex-col">
+                            <span className="text-sm font-semibold text-slate-100 flex items-center gap-2">
+                              <span>{match.label}</span>
+                              <span className="text-[10px] text-slate-400">{isOpen ? '▲' : '▼'}</span>
+                            </span>
+                            <span className="text-[11px] text-slate-400">{reasonText}</span>
+                          </div>
+                          <span className="flex items-center gap-1 text-xs font-semibold text-emerald-200">
+                            <span className="text-[10px] font-medium text-slate-400">適合性</span>
+                            <span>{Math.round(match.matchScore * 100)}%</span>
+                          </span>
+                        </button>
+                        {isOpen && detail && (
+                          <div className="border-t border-slate-800 px-3 py-3 space-y-2 animate-accordion">
+                            <p className="text-sm font-semibold text-emerald-200">{detail.title}</p>
+                            <p className="text-xs text-slate-300">{detail.shortDescription}</p>
                         <p className="text-xs text-slate-300 leading-relaxed">{detail.overview}</p>
                         <div className="text-xs text-slate-300 space-y-1">
                           <AccordionSection title="【このタイプの特徴】" items={detail.characteristics} />
@@ -2197,6 +2211,8 @@ const GolfResultPage = () => {
               })}
             </div>
           </section>
+        )}
+          </>
         )}
           </>
         )}

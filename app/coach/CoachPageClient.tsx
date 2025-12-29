@@ -1596,7 +1596,7 @@ const CoachPage = () => {
 	              <span>専属AIコーチとのスレッド</span>
 	              {summary?.updatedAt && <span>要約更新: {new Date(summary.updatedAt).toLocaleString('ja-JP')}</span>}
 	            </div>
-	            {analysisContext?.swingTypeHeadline && (
+	            {false && analysisContext?.swingTypeHeadline && (
 	              <p className="mt-1 text-[11px] text-emerald-200">狙うスイングタイプ: {analysisContext.swingTypeHeadline}</p>
 	            )}
 	          </div>

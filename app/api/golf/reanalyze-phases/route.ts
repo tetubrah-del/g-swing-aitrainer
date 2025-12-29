@@ -15,6 +15,10 @@ import { rescoreSwingAnalysis } from "@/app/golf/scoring/phaseGuardrails";
 
 export const runtime = "nodejs";
 
+function clamp(v: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, v));
+}
+
 function json<T>(body: T, init: { status: number }) {
   const res = NextResponse.json(body, init);
   res.headers.set("Cache-Control", "no-store");
@@ -81,6 +85,53 @@ function parseSinglePhaseResult(raw: unknown): { score: number; good: string[]; 
   };
 }
 
+type JudgeConfidence = "high" | "medium" | "low" | null;
+type OutsideInJudge = { value: boolean; confidence: JudgeConfidence } | null;
+
+function parseOutsideInJudge(raw: unknown): OutsideInJudge {
+  if (!raw || typeof raw !== "object") return null;
+  const obj = raw as Record<string, unknown>;
+  const rawValue = obj.outsideIn ?? obj.outside_in ?? obj["outside-in"] ?? obj.result ?? null;
+  let value: boolean | null = null;
+  if (typeof rawValue === "boolean") value = rawValue;
+  else if (typeof rawValue === "string") {
+    const t = rawValue.trim().toLowerCase();
+    if (t === "true") value = true;
+    if (t === "false") value = false;
+  } else if (typeof rawValue === "number" && Number.isFinite(rawValue)) {
+    value = rawValue >= 1;
+  }
+
+  const confRaw = obj.confidence;
+  const confidence = confRaw === "high" || confRaw === "medium" || confRaw === "low" ? (confRaw as JudgeConfidence) : null;
+  if (typeof value !== "boolean") return null;
+  return { value, confidence };
+}
+
+async function judgeOutsideIn(frames: PhaseFrame[], args: { handedness?: string; clubType?: string; level?: string }): Promise<OutsideInJudge> {
+  if (!frames.length) return null;
+  const metaLines = [
+    `利き手: ${args.handedness === "left" ? "左打ち" : "右打ち"}`,
+    `クラブ: ${args.clubType ?? "unknown"}`,
+    `レベル: ${args.level ?? "unknown"}`,
+  ].join("\n");
+
+  const prompt = [
+    "あなたはゴルフスイングの判定専用AIです。",
+    "提供されたフレーム画像のみを根拠に、Downswing（切り返し〜下ろし）の軌道がアウトサイドインかどうかを判定してください。",
+    "迷った場合は false にしてください（グレーは false）。",
+    "",
+    "補足情報:",
+    metaLines,
+    "",
+    "必ずJSONのみで返してください：",
+    '{ "outsideIn": true/false, "confidence": "high"|"medium"|"low", "evidence": ["根拠1","根拠2"] }',
+  ].join("\n");
+
+  const raw = await askVisionAPI({ frames: frames.slice(0, 8), prompt }).catch(() => null);
+  return parseOutsideInJudge(raw);
+}
+
 function postprocessSinglePhaseResult(args: { phaseLabel: string; result: { score: number; good: string[]; issues: string[]; advice: string[] } }) {
   const { phaseLabel, result } = args;
   const goodCount = result.good.filter((t) => t.trim().length > 0).length;
@@ -93,25 +144,11 @@ function postprocessSinglePhaseResult(args: { phaseLabel: string; result: { scor
           !/インサイド|内側|手元.*先行|フェース.*開|アウトサイドイン|外から|カット軌道|かぶせ|上から|連動|同調/.test(String(t))
       );
     };
-    const hasTrajectoryConcernInAdvice = () => {
-      const text = [...result.advice, ...result.good].map((t) => String(t)).join("／");
-      return (
-        /肩.*開|体の開き|胸.*開|上から|かぶせ|外から|アウトサイド|カット|インサイド.*下ろ|フェース.*開|手元.*先行|上半身先行|早開き/.test(
-          text
-        ) && /抑|注意|意識|心がけ|遅ら|保つ|練習|確認/.test(text)
-      );
-    };
     // Soft "要確認" alone is not enough evidence to keep the score low.
     if (result.issues.length === 1 && /外から入りやすい傾向/.test(result.issues[0]) && goodCount >= 2) {
       result.issues = [];
       result.score = Math.max(result.score, 18);
       dropGenericAdviceWhenNoIssues();
-    }
-    // If issues are empty but advice indicates trajectory concern, treat it as "tendency" and avoid full score.
-    if (!result.issues.length && hasTrajectoryConcernInAdvice()) {
-      result.issues = ["外から入りやすい傾向"];
-      result.score = Math.min(result.score, 12);
-      return result;
     }
     // If issues are empty but score is still low, lift it to match the rubric.
     if (!result.issues.length && goodCount >= 2 && result.score < 18) {
@@ -191,6 +228,74 @@ function buildPhasePrompt(args: { phaseLabel: string; handedness?: string; clubT
     `  "advice": ["アドバイス1","アドバイス2"]`,
     `}`,
   ].join("\n");
+}
+
+function buildOnPlanePrompt(args: { handedness?: string; clubType?: string; level?: string }) {
+  const metaLines = [
+    `利き手: ${args.handedness === "left" ? "左打ち" : "右打ち"}`,
+    `クラブ: ${args.clubType ?? "unknown"}`,
+    `レベル: ${args.level ?? "unknown"}`,
+  ].join("\n");
+
+  return [
+    `あなたはゴルフスイングの判定専用AIです。`,
+    `これから提示する画像は Top → Downswing → Impact の順です。`,
+    `画像だけを根拠に「オンプレーン一致度」と「フェーズ別のズレ（cm）」を推定してください（正確さより理解優先の粗い推定でOK）。`,
+    ``,
+    `符号ルール:`,
+    `- +（プラス）: プレーンより外側（アウトサイド寄り）`,
+    `- -（マイナス）: プレーンより内側（インサイド寄り）`,
+    ``,
+    `補足情報:`,
+    metaLines,
+    ``,
+    `必ずJSONのみで返してください（前後の文章は禁止）。`,
+    `出力形式:`,
+    `{`,
+    `  "score": 0〜100の数値,`,
+    `  "summary": "1文サマリ（cm/deg/度などの単位や数値の記載は禁止）",`,
+    `  "top_to_downswing_cm": 数値（cm, 小数OK, 符号あり）,`,
+    `  "late_downswing_cm": 数値（cm, 小数OK, 符号あり）,`,
+    `  "impact_cm": 数値（cm, 小数OK, 符号あり）`,
+    `}`,
+  ].join("\n");
+}
+
+function readFiniteNumber(value: unknown): number | null {
+  const n = typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
+  if (!Number.isFinite(n)) return null;
+  return n;
+}
+
+function parseOnPlane(raw: unknown): { score: number; summary: string; top_to_downswing_cm: number; late_downswing_cm: number; impact_cm: number } | null {
+  const obj =
+    raw && typeof raw === "object"
+      ? (raw as Record<string, unknown>)
+      : typeof raw === "string"
+        ? (() => {
+            try {
+              return JSON.parse(raw) as Record<string, unknown>;
+            } catch {
+              return null;
+            }
+          })()
+        : null;
+  if (!obj) return null;
+
+  const scoreRaw = readFiniteNumber(obj.score);
+  const tds = readFiniteNumber(obj.top_to_downswing_cm ?? obj.topToDownswingCm ?? obj.top_to_downswing);
+  const late = readFiniteNumber(obj.late_downswing_cm ?? obj.lateDownswingCm ?? obj.downswing_late_cm ?? obj.downswingLateCm);
+  const imp = readFiniteNumber(obj.impact_cm ?? obj.impactCm ?? obj.impact);
+  const summary = typeof obj.summary === "string" ? obj.summary.trim() : "";
+
+  if (scoreRaw == null || tds == null || late == null || imp == null) return null;
+  return {
+    score: clamp(Math.round(scoreRaw), 0, 100),
+    summary: summary.slice(0, 120),
+    top_to_downswing_cm: clamp(tds, -50, 50),
+    late_downswing_cm: clamp(late, -50, 50),
+    impact_cm: clamp(imp, -50, 50),
+  };
 }
 
 function computeTotalScoreFromPhases(phases: Record<string, { score?: number }>): number {
@@ -334,6 +439,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
   const phaseUpdates: Partial<
     Record<"address" | "backswing" | "top" | "downswing" | "impact" | "finish", { score: number; good: string[]; issues: string[]; advice: string[] }>
   > = {};
+  let onPlaneUpdate: Record<string, unknown> | null = null;
 
   try {
     if (addressIndices.length) {
@@ -369,12 +475,38 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
     if (downswingIndices.length) {
       const picked = pickFrames(downswingIndices);
       if (!picked.length) return json({ error: "invalid downswing frames" }, { status: 400 });
-      phaseUpdates.downswing = await analyzeSinglePhase(picked, {
+      const downswingResult = await analyzeSinglePhase(picked, {
         phaseLabel: "ダウンスイング",
         handedness: meta?.handedness,
         clubType: meta?.clubType,
         level: meta?.level,
       });
+      const outsideInJudge = await judgeOutsideIn(picked, {
+        handedness: meta?.handedness,
+        clubType: meta?.clubType,
+        level: meta?.level,
+      });
+      if (outsideInJudge?.value === true) {
+        if (outsideInJudge.confidence === "high") {
+          downswingResult.issues = Array.from(new Set(["アウトサイドイン（確定）", ...downswingResult.issues])).slice(0, 4);
+          downswingResult.issues = downswingResult.issues.filter((t) => !/外から入りやすい傾向/.test(t));
+          downswingResult.score = Math.min(downswingResult.score, 8);
+        } else {
+          if (!downswingResult.issues.some((t) => /外から入りやすい傾向/.test(t))) {
+            downswingResult.issues = ["外から入りやすい傾向", ...downswingResult.issues].slice(0, 4);
+          }
+          downswingResult.issues = downswingResult.issues.filter((t) => !/（確定）/.test(t));
+          downswingResult.score = Math.min(downswingResult.score, 12);
+        }
+      } else if (outsideInJudge?.value === false) {
+        // If judged as NOT outside-in, remove the tendency wording to avoid false negatives (e.g., elite swings).
+        downswingResult.issues = downswingResult.issues.filter((t) => !/アウトサイドイン|外から入りやすい傾向|外から下り|カット軌道|上から/.test(t));
+        const goodCount = downswingResult.good.filter((t) => t.trim().length > 0).length;
+        if (!downswingResult.issues.length && goodCount >= 2) {
+          downswingResult.score = Math.max(downswingResult.score, 18);
+        }
+      }
+      phaseUpdates.downswing = downswingResult;
     }
     if (impactIndices.length) {
       const picked = pickFrames(impactIndices);
@@ -395,6 +527,21 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
         clubType: meta?.clubType,
         level: meta?.level,
       });
+    }
+
+    // On-plane: use the same user-selected phase frames (Top/Downswing/Impact) as evidence.
+    // This allows older analyses (without on_plane in the original result JSON) to be backfilled on reevaluation.
+    if (topIndices.length && downswingIndices.length && impactIndices.length) {
+      const topFrames = pickFrames(topIndices.slice(0, 2));
+      const dsFrames = pickFrames(downswingIndices.slice(0, 3));
+      const impFrames = pickFrames(impactIndices.slice(0, 2));
+      const framesForOnPlane = [...topFrames, ...dsFrames, ...impFrames].slice(0, 7);
+      if (framesForOnPlane.length >= 3) {
+        const prompt = buildOnPlanePrompt({ handedness: meta?.handedness, clubType: meta?.clubType, level: meta?.level });
+        const raw = await askVisionAPI({ frames: framesForOnPlane, prompt });
+        const parsed = parseOnPlane(raw);
+        if (parsed) onPlaneUpdate = parsed;
+      }
     }
   } catch (err) {
     console.error("[reanalyze-phases] vision failed", err);
@@ -434,7 +581,18 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
   }
 
   const phaseComparison = previousReport ? buildPhaseComparison(previousReport, rescored) : null;
-  const finalResult = { ...rescored, comparison: phaseComparison ?? rescored.comparison };
+  const previousOnPlane =
+    (previousReport as unknown as Record<string, unknown> | null)?.on_plane ??
+    (previousReport as unknown as Record<string, unknown> | null)?.onPlane ??
+    null;
+  const finalResult = {
+    ...rescored,
+    comparison: phaseComparison ?? rescored.comparison,
+    on_plane:
+      onPlaneUpdate
+        ? { ...onPlaneUpdate, ...(previousOnPlane ? { previous: previousOnPlane } : null) }
+        : (stored.result as unknown as Record<string, unknown>)?.on_plane ?? null,
+  };
 
   const updated = { ...stored, result: finalResult };
   await saveAnalysis(updated);

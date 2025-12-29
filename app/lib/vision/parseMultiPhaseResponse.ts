@@ -16,6 +16,7 @@ type RawResponse = Partial<Record<PhaseKey, unknown>> & {
   score?: unknown;
   totalScore?: unknown;
   summary?: unknown;
+  on_plane?: unknown;
   recommendedDrills?: unknown;
   drills?: unknown;
   comparison?: unknown;
@@ -124,6 +125,7 @@ export function parseMultiPhaseResponse(input: unknown): {
   summary: string;
   recommendedDrills?: string[];
   comparison?: { improved: string[]; regressed: string[] };
+  onPlane?: unknown;
   phases: Record<PhaseKey, SwingPhase>;
   majorNg?: Partial<Record<PhaseKey, boolean>>;
   midHighOk?: Partial<Record<PhaseKey, boolean>>;
@@ -165,6 +167,7 @@ export function parseMultiPhaseResponse(input: unknown): {
   return {
     totalScore: Math.max(0, Math.min(100, Math.round(totalScore))),
     summary: ensureString(parsed.summary ?? "", "summary"),
+    onPlane: parsed.on_plane,
     recommendedDrills: parsed.recommendedDrills
       ? ensureStringArray(parsed.recommendedDrills, "recommendedDrills")
       : parsed.drills

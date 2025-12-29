@@ -46,6 +46,7 @@ export default function SharePageClient(props: {
   referralCode: string | null;
   initial?: { totalScore: number | null; createdAt: number | null } | null;
 }) {
+  const SHOW_SWING_TYPE_DIAGNOSIS_UI = false;
   const [data, setData] = useState<ShareResult | null>(() =>
     props.initial ? { analysisId: props.analysisId, totalScore: props.initial.totalScore, createdAt: props.initial.createdAt } : null
   );
@@ -383,50 +384,52 @@ export default function SharePageClient(props: {
           </div>
         </section>
 
-        <section className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div className="rounded-2xl border border-slate-800 bg-slate-900/80 shadow-2xl shadow-emerald-900/20 p-6 space-y-2">
-            <p className="text-xs text-slate-400">あなたのスイングタイプ</p>
-            {topSwingType ? (
-              <>
-                <p className="text-xl font-semibold">{topSwingType.label}</p>
-                <p className="text-sm text-slate-300">{topSwingType.reason}</p>
-                {topSwingTypeDetail?.shortDescription && (
-                  <p className="text-sm text-slate-100 mt-2">{topSwingTypeDetail.shortDescription}</p>
-                )}
-                {topSwingTypeDetail?.characteristics?.length ? (
-                  <ul className="mt-2 list-disc pl-5 space-y-1 text-sm text-slate-300">
-                    {topSwingTypeDetail.characteristics.slice(0, 4).map((t) => (
-                      <li key={t}>{t}</li>
-                    ))}
-                  </ul>
-                ) : null}
-              </>
-            ) : (
-              <p className="text-sm text-slate-300">-</p>
-            )}
-          </div>
-          <div className="rounded-2xl border border-slate-800 bg-slate-900/80 shadow-2xl shadow-emerald-900/20 p-6 space-y-3">
-            <p className="text-xs text-slate-400">あなたに向いてるスイングタイプ</p>
-            {recommendedSwingTypes.length ? (
-              <ul className="space-y-2">
-                {recommendedSwingTypes.map((m) => (
-                  <li key={m.type} className="rounded-lg border border-slate-800 bg-slate-950/30 p-3">
-                    <div className="flex items-center justify-between gap-3">
-                      <p className="font-semibold text-slate-100">{m.label}</p>
-                      <p className="text-xs text-slate-400 tabular-nums">{Math.round(m.matchScore * 100)}%</p>
-                    </div>
-                    <p className="text-sm text-slate-300 mt-1">{m.reason}</p>
-                    {swingTypeDetails?.[m.type]?.shortDescription && (
-                      <p className="text-sm text-slate-100 mt-2">{swingTypeDetails[m.type]!.shortDescription}</p>
-                    )}
-                  </li>
-                ))}
-              </ul>
-            ) : (
-              <p className="text-sm text-slate-300">-</p>
-            )}
-          </div>
-        </section>
+        {SHOW_SWING_TYPE_DIAGNOSIS_UI && (
+          <section className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="rounded-2xl border border-slate-800 bg-slate-900/80 shadow-2xl shadow-emerald-900/20 p-6 space-y-2">
+              <p className="text-xs text-slate-400">あなたのスイングタイプ</p>
+              {topSwingType ? (
+                <>
+                  <p className="text-xl font-semibold">{topSwingType.label}</p>
+                  <p className="text-sm text-slate-300">{topSwingType.reason}</p>
+                  {topSwingTypeDetail?.shortDescription && (
+                    <p className="text-sm text-slate-100 mt-2">{topSwingTypeDetail.shortDescription}</p>
+                  )}
+                  {topSwingTypeDetail?.characteristics?.length ? (
+                    <ul className="mt-2 list-disc pl-5 space-y-1 text-sm text-slate-300">
+                      {topSwingTypeDetail.characteristics.slice(0, 4).map((t) => (
+                        <li key={t}>{t}</li>
+                      ))}
+                    </ul>
+                  ) : null}
+                </>
+              ) : (
+                <p className="text-sm text-slate-300">-</p>
+              )}
+            </div>
+            <div className="rounded-2xl border border-slate-800 bg-slate-900/80 shadow-2xl shadow-emerald-900/20 p-6 space-y-3">
+              <p className="text-xs text-slate-400">あなたに向いてるスイングタイプ</p>
+              {recommendedSwingTypes.length ? (
+                <ul className="space-y-2">
+                  {recommendedSwingTypes.map((m) => (
+                    <li key={m.type} className="rounded-lg border border-slate-800 bg-slate-950/30 p-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <p className="font-semibold text-slate-100">{m.label}</p>
+                        <p className="text-xs text-slate-400 tabular-nums">{Math.round(m.matchScore * 100)}%</p>
+                      </div>
+                      <p className="text-sm text-slate-300 mt-1">{m.reason}</p>
+                      {swingTypeDetails?.[m.type]?.shortDescription && (
+                        <p className="text-sm text-slate-100 mt-2">{swingTypeDetails[m.type]!.shortDescription}</p>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="text-sm text-slate-300">-</p>
+              )}
+            </div>
+          </section>
+        )}
 
         {error && <p className="text-sm text-rose-300">表示できませんでした（{error}）</p>}
 
