@@ -90,7 +90,7 @@ function postprocessSinglePhaseResult(args: { phaseLabel: string; result: { scor
       if (result.issues.length) return;
       result.advice = result.advice.filter(
         (t) =>
-          !/インサイド|内側|手元.*先行|フェース.*開|アウトサイドイン|外から|カット軌道|かぶせ|上から/.test(String(t))
+          !/インサイド|内側|手元.*先行|フェース.*開|アウトサイドイン|外から|カット軌道|かぶせ|上から|連動|同調/.test(String(t))
       );
     };
     // Soft "要確認" alone is not enough evidence to keep the score low.
@@ -101,16 +101,30 @@ function postprocessSinglePhaseResult(args: { phaseLabel: string; result: { scor
     }
     // If issues are empty but score is still low, lift it to match the rubric.
     if (!result.issues.length && goodCount >= 2 && result.score < 18) {
-      result.score = 18;
+      result.score = 20;
       dropGenericAdviceWhenNoIssues();
     }
   }
 
   if (phaseLabel === "インパクト") {
+    const dropGenericAdviceWhenNoIssues = () => {
+      if (result.issues.length) return;
+      result.advice = result.advice.filter((t) => !/骨盤|前傾|早期伸展|腰.*前|スペース.*潰|軸|体幹/.test(String(t)));
+    };
     // If early extension is mentioned without "(確定)", keep it as "要確認" and avoid harsh scoring.
     if (result.issues.some((t) => /早期伸展/.test(t)) && !result.issues.some((t) => /早期伸展（確定）/.test(t))) {
       result.issues = result.issues.map((t) => (/早期伸展/.test(t) ? "早期伸展の懸念（要確認）" : t));
       result.score = Math.max(result.score, 11);
+    }
+    // If it's only a soft "要確認" note and otherwise all-positive, don't treat it as a real defect.
+    if (result.issues.length === 1 && /早期伸展の懸念（要確認）/.test(result.issues[0]) && goodCount >= 2) {
+      result.issues = [];
+      result.score = Math.max(result.score, 20);
+      dropGenericAdviceWhenNoIssues();
+    }
+    if (!result.issues.length && goodCount >= 2 && result.score < 20) {
+      result.score = 20;
+      dropGenericAdviceWhenNoIssues();
     }
   }
 
