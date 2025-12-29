@@ -29,7 +29,7 @@ import ProUpsellModal from '@/app/components/ProUpsellModal';
 import PhaseFrameSelector from './PhaseFrameSelector';
 import { clearDiagnostics, loadDiagnostics, saveDiagnostics } from '@/app/golf/utils/diagnosticsStorage';
 import { selectShareFrames } from '@/app/golf/utils/shareFrameSelection';
-import { computeRoundFallbackFromScore, estimateLevelFromScore } from '@/app/golf/utils/scoreCalibration';
+import { buildLevelDiagnosis, computeRoundFallbackFromScore } from '@/app/golf/utils/scoreCalibration';
 
 type SwingTypeBadge = {
   label: string;
@@ -854,8 +854,8 @@ const GolfResultPage = () => {
   }, [data?.result?.phases]);
 
   const levelEstimate = useMemo(() => {
-    return estimateLevelFromScore(data?.result?.totalScore ?? 0);
-  }, [data?.result?.totalScore]);
+    return buildLevelDiagnosis({ totalScore: data?.result?.totalScore ?? 0, phases: data?.result?.phases ?? null });
+  }, [data?.result?.phases, data?.result?.totalScore]);
 
   const fallbackRoundEstimates = useMemo<RoundEstimateMetrics>(() => {
     return computeFallbackRoundEstimates(data?.result?.totalScore ?? 0);
@@ -1618,42 +1618,42 @@ const GolfResultPage = () => {
               </div>
             )}
           </div>
-          <div className="rounded-xl bg-slate-900/70 border border-slate-700 p-4 sm:col-span-2">
-            <p className="text-xs text-slate-400">推定レベル診断</p>
-            <p className="text-xl font-semibold mt-1">{levelEstimate.label}</p>
-            <p className="text-sm text-slate-300 mt-1">{levelEstimate.detail}</p>
-          </div>
+          <section className="rounded-xl bg-slate-900/70 border border-slate-700 p-4 sm:col-span-2">
+            <p className="text-sm font-semibold text-slate-100">📣 この診断結果を共有する</p>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={handleTwitterShare}
+                disabled={shareBusy}
+                className="rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 disabled:bg-slate-800/50 px-3 py-2 text-sm text-slate-100"
+              >
+                Xで共有
+              </button>
+              <button
+                type="button"
+                onClick={handleInstagramShare}
+                disabled={shareBusy}
+                className="rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 disabled:bg-slate-800/50 px-3 py-2 text-sm text-slate-100"
+              >
+                Instagramで共有
+              </button>
+              <button
+                type="button"
+                onClick={handleCopyShare}
+                disabled={shareBusy}
+                className="rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 disabled:bg-slate-800/50 px-3 py-2 text-sm text-slate-100"
+              >
+                リンクをコピー
+              </button>
+            </div>
+            {shareMessage && <p className="text-xs text-slate-300 mt-2">{shareMessage}</p>}
+          </section>
         </section>
 
         <section className="rounded-xl bg-slate-900/70 border border-slate-700 p-4">
-          <p className="text-sm font-semibold text-slate-100">📣 この診断結果を共有する</p>
-          <div className="mt-3 flex flex-wrap gap-2">
-            <button
-              type="button"
-              onClick={handleTwitterShare}
-              disabled={shareBusy}
-              className="rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 disabled:bg-slate-800/50 px-3 py-2 text-sm text-slate-100"
-            >
-              Xで共有
-            </button>
-            <button
-              type="button"
-              onClick={handleInstagramShare}
-              disabled={shareBusy}
-              className="rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 disabled:bg-slate-800/50 px-3 py-2 text-sm text-slate-100"
-            >
-              Instagramで共有
-            </button>
-            <button
-              type="button"
-              onClick={handleCopyShare}
-              disabled={shareBusy}
-              className="rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 disabled:bg-slate-800/50 px-3 py-2 text-sm text-slate-100"
-            >
-              リンクをコピー
-            </button>
-          </div>
-          {shareMessage && <p className="text-xs text-slate-300 mt-2">{shareMessage}</p>}
+          <p className="text-xs text-slate-400">推定レベル診断</p>
+          <p className="text-xl font-semibold mt-1">{levelEstimate.label}</p>
+          <p className="text-sm text-slate-300 mt-1 whitespace-pre-line">{levelEstimate.detail}</p>
         </section>
 
         {/* 推定ラウンドスコア/推奨ドリル */}

@@ -88,6 +88,24 @@ function buildPhasePrompt(args: { phaseLabel: string; handedness?: string; clubT
     `レベル: ${args.level ?? "unknown"}`,
   ].join("\n");
 
+  const mustCheckLines: string[] = [];
+  if (args.phaseLabel === "ダウンスイング") {
+    mustCheckLines.push(
+      `【重要チェック（省略不可）】`,
+      `- クラブ軌道が「アウトサイドイン（確定）」か、「外から入りやすい傾向（要確認）」かを必ず判定する。`,
+      `- 確定できる場合のみ issues に必ず「アウトサイドイン（確定）」を含め、score は 0〜8 に収める。`,
+      `- 断定できない場合は issues に必ず「外から入りやすい傾向」を含め、score は 9〜12 に収める（確定と書かない）。`
+    );
+  }
+  if (args.phaseLabel === "インパクト") {
+    mustCheckLines.push(
+      `【重要チェック（省略不可）】`,
+      `- 「早期伸展（骨盤が前に出る／前傾が起きる／スペースが潰れる）」に該当するか必ず判定する。`,
+      `- 該当する場合は issues に必ず「早期伸展」または「骨盤が前に出る」または「前傾が起きる」を含める。`,
+      `- その場合 score は 0〜12（明確なら 0〜10）に収める。`
+    );
+  }
+
   return [
     `あなたはゴルフスイングの分析専門AIです。`,
     `これから提示する画像フレームは「${args.phaseLabel}」に該当するフレームです。`,
@@ -95,6 +113,8 @@ function buildPhasePrompt(args: { phaseLabel: string; handedness?: string; clubT
     ``,
     `補足情報:`,
     metaLines,
+    mustCheckLines.length ? `` : null,
+    ...mustCheckLines,
     ``,
     `必ずJSONのみで返してください（前後の文章は禁止）。`,
     `出力形式:`,

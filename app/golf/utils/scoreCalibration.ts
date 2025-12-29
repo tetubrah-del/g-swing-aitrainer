@@ -9,6 +9,18 @@ export type RoundEstimateMetrics = {
 
 const clamp = (v: number, min: number, max: number) => Math.min(max, Math.max(min, v));
 
+type PhaseKey = "address" | "backswing" | "top" | "downswing" | "impact" | "finish";
+type PhaseLike = { score: number; good?: string[]; issues?: string[]; advice?: string[] };
+
+const PHASE_LABEL: Record<PhaseKey, string> = {
+  address: "アドレス",
+  backswing: "バックスイング",
+  top: "トップ",
+  downswing: "ダウンスイング",
+  impact: "インパクト",
+  finish: "フィニッシュ",
+};
+
 export function estimateLevelFromScore(scoreRaw: number): LevelEstimate {
   const score = clamp(Number.isFinite(scoreRaw) ? scoreRaw : 0, 0, 100);
   if (score >= 90)
@@ -42,13 +54,138 @@ export function estimateLevelFromScore(scoreRaw: number): LevelEstimate {
   };
 }
 
+function normalizeList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((v): v is string => typeof v === "string")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+}
+
+function uniq(items: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const it of items) {
+    if (seen.has(it)) continue;
+    seen.add(it);
+    out.push(it);
+  }
+  return out;
+}
+
+function pickNotableIssues(phase: PhaseLike, max: number): string[] {
+  const issues = normalizeList(phase.issues);
+  if (!issues.length) return [];
+  const priorityPatterns: RegExp[] = [
+    /アウトサイドイン（確定）/,
+    /外から入りやすい傾向/,
+    /アウトサイドイン/,
+    /外から下り/,
+    /カット軌道/,
+    /早期伸展/,
+    /骨盤.*前.*出/,
+    /前傾.*起き/,
+    /すくい打ち/,
+    /体勢崩壊/,
+    /早開き/,
+    /上半身先行/,
+  ];
+  const prioritized = issues.filter((t) => priorityPatterns.some((p) => p.test(t)));
+  const rest = issues.filter((t) => !prioritized.includes(t));
+  return uniq([...prioritized, ...rest]).slice(0, max);
+}
+
+function safeScore(value: unknown): number {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return 0;
+  return clamp(Math.round(n), 0, 20);
+}
+
+export function buildLevelDiagnosis(params: {
+  totalScore: number;
+  phases?: Partial<Record<PhaseKey, PhaseLike>> | null;
+}): LevelEstimate {
+  const base = estimateLevelFromScore(params.totalScore);
+  const phases = params.phases ?? null;
+  if (!phases) return base;
+
+  const keys = Object.keys(PHASE_LABEL) as PhaseKey[];
+  const scored = keys
+    .map((k) => ({ key: k, score: safeScore(phases[k]?.score), phase: phases[k] }))
+    .filter((x) => x.phase != null);
+  if (!scored.length) return base;
+
+  scored.sort((a, b) => a.score - b.score);
+  const weakest = scored.slice(0, 2);
+  const strongest = [...scored].sort((a, b) => b.score - a.score).slice(0, 2);
+
+  const strongestSummary = strongest
+    .map(({ key, phase }) => {
+      const goods = uniq(normalizeList(phase?.good)).slice(0, 1);
+      const tail = goods.length ? `（${goods[0]}）` : "";
+      return `${PHASE_LABEL[key]}では${tail ? tail.slice(1, -1) : "安定感が出ています"}`;
+    })
+    .join("、");
+
+  const weakestSummary = weakest
+    .map(({ key, phase }) => {
+      const issues = pickNotableIssues((phase ?? { score: 0 }) as PhaseLike, 2);
+      const tail = issues.length ? `（${issues.join("／")}）` : "";
+      return `${PHASE_LABEL[key]}では${tail ? tail.slice(1, -1) : "改善余地が残ります"}`;
+    })
+    .join("、");
+
+  const downswingIssues = phases.downswing ? pickNotableIssues(phases.downswing as PhaseLike, 2) : [];
+  const impactIssues = phases.impact ? pickNotableIssues(phases.impact as PhaseLike, 2) : [];
+
+  const causalHints: string[] = [];
+  if (downswingIssues.some((t) => /アウトサイドイン（確定）|外から入りやすい傾向|アウトサイドイン|外から下り|カット軌道/.test(t))) {
+    causalHints.push("ダウンスイングの軌道が乱れると、方向性（特に右への曲がり）や当たり負けにつながりやすいです。");
+  }
+  if (impactIssues.some((t) => /早期伸展|骨盤.*前.*出|前傾.*起き|スペース.*潰/.test(t))) {
+    causalHints.push("インパクトでスペースが潰れると、手元が浮きやすく、打点とフェース向きが安定しにくくなります。");
+  }
+
+  const detail = [
+    `${base.detail}`,
+    ``,
+    strongestSummary
+      ? `良い傾向としては、${strongestSummary}あたりが土台になっています。`
+      : `良い傾向は、現状の情報だけだと特定しきれませんでした。`,
+    ``,
+    weakestSummary
+      ? `一方でスコアに直結しやすい課題は、${weakestSummary}です。ここを整えると、結果（球筋・当たり）の安定が出やすくなります。`
+      : `一方で、現状の情報だけだと優先課題を特定しきれませんでした。`,
+    ...(causalHints.length
+      ? [
+          ``,
+          `理由をもう少し噛み砕くと、${causalHints.join(" ")}`,
+        ]
+      : []),
+  ].join("\n");
+
+  return { label: base.label, detail };
+}
+
 export function computeRoundFallbackFromScore(scoreRaw: number): RoundEstimateMetrics {
   const score = clamp(Number.isFinite(scoreRaw) ? scoreRaw : 0, 0, 100);
 
-  // Calibrated for typical amateurs:
-  // - swing score ~70 -> ~90前後
+  // Calibrated for typical amateurs, with a non-linear "elite tail":
   // - swing score ~50 -> ~105〜115
-  const mid = Math.round(155 - score * 0.9);
+  // - swing score ~70 -> ~90前後
+  // - swing score ~83 -> ~75〜85
+  // - swing score ~95 -> ~65〜72
+  const mid = (() => {
+    const s = score;
+    // Piecewise linear interpolation to avoid over-penalizing high swing scores.
+    // Anchors: (0,140), (50,110), (70,90), (90,72), (100,65)
+    const lerp = (x0: number, y0: number, x1: number, y1: number, x: number) =>
+      y0 + ((y1 - y0) * (x - x0)) / (x1 - x0);
+    if (s <= 50) return lerp(0, 140, 50, 110, s);
+    if (s <= 70) return lerp(50, 110, 70, 90, s);
+    if (s <= 90) return lerp(70, 90, 90, 72, s);
+    return lerp(90, 72, 100, 65, s);
+  })();
   const spread = 4;
   const low = clamp(mid - spread, 70, 140);
   const high = clamp(mid + spread, 70, 140);

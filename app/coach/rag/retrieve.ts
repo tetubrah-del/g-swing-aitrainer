@@ -11,6 +11,7 @@ const KB_PATHS: Array<{ label: string; filePath: string }> = [
   { label: "app/coach/rag/KNOWLEDGE.md", filePath: path.join(process.cwd(), "app", "coach", "rag", "KNOWLEDGE.md") },
   { label: "app/coach/rag/SWING_SCORING.md", filePath: path.join(process.cwd(), "app", "coach", "rag", "SWING_SCORING.md") },
   { label: "app/coach/rag/DOWNSWING_OUTSIDE_IN.md", filePath: path.join(process.cwd(), "app", "coach", "rag", "DOWNSWING_OUTSIDE_IN.md") },
+  { label: "app/coach/rag/IMPACT_EARLY_EXTENSION.md", filePath: path.join(process.cwd(), "app", "coach", "rag", "IMPACT_EARLY_EXTENSION.md") },
 ];
 
 const safeReadText = (filePath: string): string => {
