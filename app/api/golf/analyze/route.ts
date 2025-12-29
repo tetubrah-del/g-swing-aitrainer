@@ -1398,13 +1398,13 @@ export async function POST(req: NextRequest) {
     parsed.phases = rescored.phases;
     let totalScore = rescored.totalScore;
 
-    // If early extension is detected, ensure it's explicitly mentioned and cap impact score.
+    // If early extension is detected, ensure it's explicitly mentioned (as "confirmed") and cap impact score.
     try {
       if (earlyExtensionDetected?.value === true) {
         const imp = parsed.phases.impact;
-        const hasWord = (imp.issues ?? []).some((t) => /早期伸展|骨盤.*前.*出|腰.*前.*出|前傾.*起き|腰の突っ込み|スペース.*潰/.test(String(t)));
+        const hasWord = (imp.issues ?? []).some((t) => /早期伸展（確定）|骨盤.*前.*出|腰.*前.*出|前傾.*起き|腰の突っ込み|スペース.*潰/.test(String(t)));
         if (!hasWord) {
-          imp.issues = ["早期伸展（骨盤が前に出る）", ...(imp.issues ?? [])].slice(0, 4);
+          imp.issues = ["早期伸展（確定）", ...(imp.issues ?? [])].slice(0, 4);
         }
         const cap = earlyExtensionDetected.confidence === "high" ? 10 : 12;
         imp.score = Math.min(imp.score ?? 0, cap);
@@ -1412,6 +1412,32 @@ export async function POST(req: NextRequest) {
         const sum = PHASE_ORDER.reduce((acc, key) => acc + (parsed.phases[key]?.score ?? 0), 0);
         const raw = Math.max(0, Math.min(100, Math.round((sum / (PHASE_ORDER.length * 20)) * 100)));
         totalScore = Math.min(totalScore, raw);
+      }
+    } catch {
+      // ignore
+    }
+
+    // If the focused 2nd-pass judge says "false", avoid keeping strong penalty keywords solely from the multi-task LLM output.
+    // This prevents false positives (e.g., pro swings) from being forced into low scores by a single mislabel.
+    try {
+      const hasTwoGoods = (items: unknown) => Array.isArray(items) && items.filter((t) => typeof t === "string" && t.trim().length > 0).length >= 2;
+      if (outsideInDetected?.value === false) {
+        const ds = parsed.phases.downswing;
+        const before = Array.isArray(ds.issues) ? ds.issues : [];
+        const filtered = before.filter((t) => !/外から入りやすい傾向|アウトサイドイン（確定）|カット軌道（確定）|外から下りる（確定）|アウトサイドイン|カット軌道|外から下り/.test(String(t)));
+        if (filtered.length !== before.length) {
+          ds.issues = filtered;
+          if ((ds.score ?? 0) < 14 && hasTwoGoods(ds.good)) ds.score = 14;
+        }
+      }
+      if (earlyExtensionDetected?.value === false) {
+        const imp = parsed.phases.impact;
+        const before = Array.isArray(imp.issues) ? imp.issues : [];
+        const filtered = before.filter((t) => !/早期伸展|骨盤.*前.*出|腰.*前.*出|前傾.*起き|腰の突っ込み|スペース.*潰/.test(String(t)));
+        if (filtered.length !== before.length) {
+          imp.issues = filtered;
+          if ((imp.score ?? 0) < 14 && hasTwoGoods(imp.good)) imp.score = 14;
+        }
       }
     } catch {
       // ignore
@@ -1428,15 +1454,17 @@ export async function POST(req: NextRequest) {
       const hasKneeCollapse = /右膝.*内側|膝.*内側.*入りすぎ/.test(dsText);
       const hasConfirmedWord = /アウトサイドイン（確定）|カット軌道（確定）|外から下りる（確定）/.test(dsText);
       const hasTendencyWord = /外から入りやすい傾向/.test(dsText);
-      const confirmed =
-        hasConfirmedWord || (outsideInDetected?.value === true && outsideInDetected.confidence === "high");
-      const tendency =
-        hasTendencyWord ||
-        (outsideInDetected?.value === true && outsideInDetected.confidence !== "high") ||
-        hasElbowAway ||
-        hasKneeCollapse ||
-        (hasUpperBodyIssue && hasEarlyRelease) ||
-        (hasUpperBodyIssue && hasElbowAway);
+      const judgeConfirmed = outsideInDetected?.value === true && outsideInDetected.confidence === "high";
+      const judgeTendency = outsideInDetected?.value === true && outsideInDetected.confidence !== "high";
+      const canTrustText = outsideInDetected?.value !== false;
+      const heuristicTendency =
+        (hasElbowAway ? 1 : 0) +
+          (hasKneeCollapse ? 1 : 0) +
+          (hasUpperBodyIssue && hasEarlyRelease ? 1 : 0) +
+          (hasUpperBodyIssue && hasElbowAway ? 1 : 0) >=
+        2;
+      const confirmed = hasConfirmedWord || judgeConfirmed;
+      const tendency = judgeTendency || (canTrustText && (hasTendencyWord || heuristicTendency));
 
       if (confirmed) {
         ds.score = Math.min(ds.score ?? 0, 8);
@@ -1453,7 +1481,7 @@ export async function POST(req: NextRequest) {
         }
         const sum = PHASE_ORDER.reduce((acc, key) => acc + (parsed.phases[key]?.score ?? 0), 0);
         const raw = Math.max(0, Math.min(100, Math.round((sum / (PHASE_ORDER.length * 20)) * 100)));
-        totalScore = Math.min(totalScore, raw, 65);
+        totalScore = Math.min(totalScore, raw);
       }
     } catch {
       // ignore enforcement failures
