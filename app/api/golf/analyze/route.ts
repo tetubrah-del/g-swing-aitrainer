@@ -1436,6 +1436,27 @@ export async function POST(req: NextRequest) {
         const advice = Array.isArray(imp.advice) ? imp.advice : [];
         imp.advice = advice.filter((t) => !/骨盤|前傾|早期伸展|腰.*前|スペース.*潰|軸|体幹/.test(String(t)));
       };
+      const hasDownswingTrajectoryConcern = (ds: { good?: unknown; issues?: unknown; advice?: unknown }) => {
+        const text = [
+          ...(Array.isArray(ds.good) ? ds.good : []),
+          ...(Array.isArray(ds.issues) ? ds.issues : []),
+          ...(Array.isArray(ds.advice) ? ds.advice : []),
+        ]
+          .map((t) => String(t))
+          .join("／");
+        return (
+          /肩.*開|体の開き|胸.*開|上から|かぶせ|外から|アウトサイド|カット|インサイド.*下ろ|フェース.*開|手元.*先行|上半身先行|早開き/.test(
+            text
+          ) && /抑|注意|意識|心がけ|遅ら|保つ|練習|確認/.test(text)
+        );
+      };
+      const applyTendencyFromAdvice = (ds: { score?: number; issues?: unknown; advice?: unknown }) => {
+        const issues = Array.isArray(ds.issues) ? ds.issues : [];
+        if (!issues.some((t) => /外から入りやすい傾向|体の開きが早い/.test(String(t)))) {
+          ds.issues = ["外から入りやすい傾向（要確認）", ...issues].slice(0, 4);
+        }
+        ds.score = Math.min(Number(ds.score ?? 0) || 0, 12);
+      };
       if (outsideInDetected?.value === false) {
         const ds = parsed.phases.downswing;
         const before = Array.isArray(ds.issues) ? ds.issues : [];
@@ -1448,8 +1469,13 @@ export async function POST(req: NextRequest) {
         // Even if there was nothing to filter, a "false" judge means we should not keep a low DS score without issues.
         const nowIssues = Array.isArray(ds.issues) ? ds.issues : [];
         if (!nowIssues.length && hasTwoGoods(ds.good) && (ds.score ?? 0) < 20) {
-          ds.score = 20;
-          dropGenericDsAdviceWhenNoIssues(ds);
+          // If advice still contains trajectory/sequence concerns, treat it as "tendency" rather than perfect.
+          if (hasDownswingTrajectoryConcern(ds)) {
+            applyTendencyFromAdvice(ds);
+          } else {
+            ds.score = 20;
+            dropGenericDsAdviceWhenNoIssues(ds);
+          }
         }
       }
       // If the judge is unavailable (null) and the only "issue" is a soft "要確認" label, treat it as non-evidence.
@@ -1467,8 +1493,12 @@ export async function POST(req: NextRequest) {
         // If issues are empty but score is still low, treat it as a scoring mismatch and lift it.
         const nowIssues = Array.isArray(ds.issues) ? ds.issues : [];
         if (!nowIssues.length && hasTwoGoods(ds.good) && (ds.score ?? 0) < 20) {
-          ds.score = 20;
-          dropGenericDsAdviceWhenNoIssues(ds);
+          if (hasDownswingTrajectoryConcern(ds)) {
+            applyTendencyFromAdvice(ds);
+          } else {
+            ds.score = 20;
+            dropGenericDsAdviceWhenNoIssues(ds);
+          }
         }
       }
       if (earlyExtensionDetected?.value === false) {
