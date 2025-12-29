@@ -1445,6 +1445,12 @@ export async function POST(req: NextRequest) {
           if ((ds.score ?? 0) < 20 && hasTwoGoods(ds.good)) ds.score = 20;
           dropGenericDsAdviceWhenNoIssues(ds);
         }
+        // Even if there was nothing to filter, a "false" judge means we should not keep a low DS score without issues.
+        const nowIssues = Array.isArray(ds.issues) ? ds.issues : [];
+        if (!nowIssues.length && hasTwoGoods(ds.good) && (ds.score ?? 0) < 20) {
+          ds.score = 20;
+          dropGenericDsAdviceWhenNoIssues(ds);
+        }
       }
       // If the judge is unavailable (null) and the only "issue" is a soft "要確認" label, treat it as non-evidence.
       // This avoids penalizing high-skill swings when the model over-applies the tendency phrase.
