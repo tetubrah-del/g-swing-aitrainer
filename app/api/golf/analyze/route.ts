@@ -1430,6 +1430,18 @@ export async function POST(req: NextRequest) {
           if ((ds.score ?? 0) < 14 && hasTwoGoods(ds.good)) ds.score = 14;
         }
       }
+      // If the judge is unavailable (null) and the only "issue" is a soft "要確認" label, treat it as non-evidence.
+      // This avoids penalizing high-skill swings when the model over-applies the tendency phrase.
+      if (outsideInDetected == null) {
+        const ds = parsed.phases.downswing;
+        const issues = Array.isArray(ds.issues) ? ds.issues : [];
+        const hasOnlySoftTendency =
+          issues.length === 1 && /外から入りやすい傾向（要確認）/.test(String(issues[0]));
+        if (hasOnlySoftTendency && hasTwoGoods(ds.good)) {
+          ds.issues = [];
+          if ((ds.score ?? 0) < 15) ds.score = 15;
+        }
+      }
       if (earlyExtensionDetected?.value === false) {
         const imp = parsed.phases.impact;
         const before = Array.isArray(imp.issues) ? imp.issues : [];
@@ -1456,7 +1468,7 @@ export async function POST(req: NextRequest) {
       const hasTendencyWord = /外から入りやすい傾向/.test(dsText);
       const judgeConfirmed = outsideInDetected?.value === true && outsideInDetected.confidence === "high";
       const judgeTendency = outsideInDetected?.value === true && outsideInDetected.confidence !== "high";
-      const canTrustText = outsideInDetected?.value !== false;
+      const canTrustText = outsideInDetected?.value !== false && outsideInDetected != null;
       const heuristicTendency =
         (hasElbowAway ? 1 : 0) +
           (hasKneeCollapse ? 1 : 0) +
@@ -1464,7 +1476,7 @@ export async function POST(req: NextRequest) {
           (hasUpperBodyIssue && hasElbowAway ? 1 : 0) >=
         2;
       const confirmed = hasConfirmedWord || judgeConfirmed;
-      const tendency = judgeTendency || (canTrustText && (hasTendencyWord || heuristicTendency));
+      const tendency = judgeTendency || (canTrustText && (heuristicTendency || (hasTendencyWord && heuristicTendency)));
 
       if (confirmed) {
         ds.score = Math.min(ds.score ?? 0, 8);
