@@ -1,6 +1,7 @@
 // app/api/golf/round-estimate/route.ts
 import { NextResponse } from "next/server";
 import OpenAI from "openai";
+import { computeRoundFallbackFromScore } from "@/app/golf/utils/scoreCalibration";
 
 export const runtime = "nodejs";
 
@@ -21,22 +22,13 @@ const clamp = (v: number, min: number, max: number) => Math.min(max, Math.max(mi
 
 function computeFallback(totalScore: number): RoundEstimate {
   const score = clamp(Number.isFinite(totalScore) ? totalScore : 0, 0, 100);
-
-  // Calibrated for typical amateurs: swing score 70-75 -> ~95-105 (100切り付近)
-  const mid = Math.round(147 - score * 0.67);
-  const spread = 4;
-  const low = clamp(mid - spread, 70, 140);
-  const high = clamp(mid + spread, 70, 140);
-
-  const fwKeep = clamp(25 + score * 0.35, 25, 70);
-  const gir = clamp(10 + score * 0.3, 10, 55);
-  const ob = clamp(7 - score * 0.045, 1.5, 7);
+  const fallback = computeRoundFallbackFromScore(score);
 
   return {
-    strokeRange: `${low}〜${high}`,
-    fwKeep: `${fwKeep.toFixed(0)}%`,
-    gir: `${gir.toFixed(0)}%`,
-    ob: `${ob.toFixed(1)} 回`,
+    strokeRange: fallback.strokeRange,
+    fwKeep: fallback.fwKeep,
+    gir: fallback.gir,
+    ob: fallback.ob,
     source: "fallback",
   };
 }
@@ -55,7 +47,8 @@ Input:
 - meta (handedness, club, level, etc.): ${metaText}
 
 Guidelines:
-- Output should be conservative; typical amateur with swing score ~70-75 should land around mid-90s to low-100s.
+- Output should be conservative and realistic for amateurs.
+- Rough anchors: swing score ~70 => around 90s, ~83 => around 75-85, ~95 => around high-60s/low-70s.
 - Return conservative but realistic metrics for FW keep %, GIR %, and OB count (18H equivalent).
 - Keep numbers human-readable integers; OB can be one decimal.
 - Output ONLY JSON with keys: strokeRange (string like "84〜88"), fwKeep (string "%"), gir (string "%"), ob (string "x.x 回"), source ("ai").

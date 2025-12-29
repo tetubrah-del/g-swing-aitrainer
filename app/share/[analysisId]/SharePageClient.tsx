@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import type { CausalImpactExplanation, SwingAnalysis, SwingTypeLLMResult } from "@/app/golf/types";
 import { buildRuleBasedCausalImpact } from "@/app/golf/utils/causalImpact";
-import { computeRoundFallbackFromScore, estimateLevelFromScore } from "@/app/golf/utils/scoreCalibration";
+import { buildLevelDiagnosis, computeRoundFallbackFromScore } from "@/app/golf/utils/scoreCalibration";
 
 type ShareResult = { analysisId: string; totalScore: number | null; createdAt: number | null };
 
@@ -140,7 +140,7 @@ export default function SharePageClient(props: {
   }, [data?.createdAt, data?.totalScore, props.analysisId]);
 
   const score = useMemo(() => (typeof data?.totalScore === "number" ? data.totalScore : 0), [data?.totalScore]);
-  const levelEstimate = useMemo(() => estimateLevelFromScore(score), [score]);
+  const levelEstimate = useMemo(() => buildLevelDiagnosis({ totalScore: score, phases: detail?.phases ?? null }), [detail?.phases, score]);
   const round = useMemo(() => computeRoundFallbackFromScore(score), [score]);
 
   const causalImpact = useMemo<CausalImpactExplanation>(() => {
@@ -246,7 +246,7 @@ export default function SharePageClient(props: {
           <div className="rounded-2xl border border-slate-800 bg-slate-900/80 shadow-2xl shadow-emerald-900/20 p-6 space-y-2 md:col-span-2">
             <p className="text-xs text-slate-400">推定レベル診断</p>
             <p className="text-xl font-semibold">{levelEstimate.label}</p>
-            <p className="text-sm text-slate-300">{levelEstimate.detail}</p>
+            <p className="text-sm text-slate-300 whitespace-pre-line">{levelEstimate.detail}</p>
           </div>
         </section>
 

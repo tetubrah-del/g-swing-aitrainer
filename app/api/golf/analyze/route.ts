@@ -1268,7 +1268,8 @@ export async function POST(req: NextRequest) {
     }
 
     // Focused 2nd-pass check: downswing trajectory (outside-in) often gets missed in multi-task scoring prompts.
-    let outsideInDetected: boolean | null = null;
+    let outsideInDetected: { value: boolean; confidence: "high" | "medium" | "low" | null } | null = null;
+    let earlyExtensionDetected: { value: boolean; confidence: "high" | "medium" | "low" | null } | null = null;
     if (framesForVision.length >= 6) {
       try {
         const judgeFrames =
@@ -1282,7 +1283,7 @@ export async function POST(req: NextRequest) {
         const outsideInPrompt = [
           "あなたはゴルフスイングの判定専用AIです。",
           "提供されたフレーム画像のみを根拠に、Downswing（切り返し〜下ろし）の軌道がアウトサイドインかどうかを判定してください。",
-          "迷った場合はアウトサイドインとして扱ってください（グレー禁止）。",
+          "迷った場合は false にしてください（グレーは false）。",
           "",
           outsideInRag.contextText ? "【OutsideIn判定RAG】\n" + outsideInRag.contextText : "",
           "",
@@ -1299,17 +1300,69 @@ export async function POST(req: NextRequest) {
           obj?.["outside-in"] ??
           obj?.result ??
           null;
-        if (typeof raw === "boolean") {
-          outsideInDetected = raw;
-        } else if (typeof raw === "string") {
+        let value: boolean | null = null;
+        if (typeof raw === "boolean") value = raw;
+        else if (typeof raw === "string") {
           const t = raw.trim().toLowerCase();
-          if (t === "true") outsideInDetected = true;
-          if (t === "false") outsideInDetected = false;
+          if (t === "true") value = true;
+          if (t === "false") value = false;
         } else if (typeof raw === "number" && Number.isFinite(raw)) {
-          outsideInDetected = raw >= 1;
+          value = raw >= 1;
+        }
+        const confRaw = obj?.confidence;
+        const confidence =
+          confRaw === "high" || confRaw === "medium" || confRaw === "low" ? (confRaw as "high" | "medium" | "low") : null;
+        if (typeof value === "boolean") {
+          outsideInDetected = { value, confidence };
         }
       } catch (err) {
         console.warn("[golf/analyze] outside-in judge failed", err);
+      }
+    }
+
+    // Focused 2nd-pass check: Impact early-extension (pelvis thrust / loss of posture) is easy to miss.
+    if (framesForVision.length >= 6) {
+      try {
+        const judgeFrames =
+          framesForVision.length >= 12
+            ? framesForVision.slice(6, 11) // around downswing→impact→post
+            : framesForVision.slice(Math.max(0, framesForVision.length - 6), framesForVision.length);
+        const earlyExtRag = retrieveCoachKnowledge(
+          ["早期伸展", "骨盤が前に出る", "前傾が起きる", "腰の突っ込み", "スペースが潰れる", "Impact"].join(" "),
+          { maxChunks: 3, maxChars: 1200, minScore: 0 }
+        );
+        const earlyExtPrompt = [
+          "あなたはゴルフスイングの判定専用AIです。",
+          "提供されたフレーム画像のみを根拠に、Impact（インパクト）付近で「早期伸展（骨盤がボール側に前に出る／前傾が起きる／スペースが潰れる）」があるかを判定してください。",
+          "迷った場合は false にしてください（グレーは false）。",
+          "",
+          earlyExtRag.contextText ? "【Impact早期伸展 判定RAG】\n" + earlyExtRag.contextText : "",
+          "",
+          "必ずJSONのみで返してください：",
+          '{ "earlyExtension": true/false, "confidence": "high"|"medium"|"low", "evidence": ["根拠1","根拠2"] }',
+        ]
+          .filter(Boolean)
+          .join("\n");
+        const judge = await askVisionAPI({ frames: judgeFrames, prompt: earlyExtPrompt });
+        const obj = judge && typeof judge === "object" ? (judge as Record<string, unknown>) : null;
+        const raw = obj?.earlyExtension ?? obj?.early_extension ?? obj?.["early-extension"] ?? obj?.result ?? null;
+        let value: boolean | null = null;
+        if (typeof raw === "boolean") value = raw;
+        else if (typeof raw === "string") {
+          const t = raw.trim().toLowerCase();
+          if (t === "true") value = true;
+          if (t === "false") value = false;
+        } else if (typeof raw === "number" && Number.isFinite(raw)) {
+          value = raw >= 1;
+        }
+        const confRaw = obj?.confidence;
+        const confidence =
+          confRaw === "high" || confRaw === "medium" || confRaw === "low" ? (confRaw as "high" | "medium" | "low") : null;
+        if (typeof value === "boolean") {
+          earlyExtensionDetected = { value, confidence };
+        }
+      } catch (err) {
+        console.warn("[golf/analyze] early-extension judge failed", err);
       }
     }
 
@@ -1323,25 +1376,49 @@ export async function POST(req: NextRequest) {
         recommendedDrills: parsed.recommendedDrills ?? [],
       },
       majorNg:
-        outsideInDetected === true
+        outsideInDetected?.value === true && outsideInDetected.confidence === "high"
           ? { ...(parsed.majorNg ?? {}), downswing: true }
-          : outsideInDetected === false
+          : outsideInDetected?.value === false
             ? parsed.majorNg
             : parsed.majorNg,
       midHighOk:
-        outsideInDetected === true
-          ? { ...(parsed.midHighOk ?? {}), downswing: false }
-          : outsideInDetected === false
-            ? parsed.midHighOk
-            : parsed.midHighOk,
+        (() => {
+          const base = parsed.midHighOk ?? {};
+          const withDs =
+            outsideInDetected?.value === true ? { ...base, downswing: false } : outsideInDetected?.value === false ? base : base;
+          if (earlyExtensionDetected?.value === true) {
+            return { ...withDs, impact: false };
+          }
+          return withDs;
+        })(),
       deriveFromText: true,
+      outsideInConfirmed: outsideInDetected?.value === true && outsideInDetected.confidence === "high",
     });
 
     parsed.phases = rescored.phases;
     let totalScore = rescored.totalScore;
 
+    // If early extension is detected, ensure it's explicitly mentioned and cap impact score.
+    try {
+      if (earlyExtensionDetected?.value === true) {
+        const imp = parsed.phases.impact;
+        const hasWord = (imp.issues ?? []).some((t) => /早期伸展|骨盤.*前.*出|腰.*前.*出|前傾.*起き|腰の突っ込み|スペース.*潰/.test(String(t)));
+        if (!hasWord) {
+          imp.issues = ["早期伸展（骨盤が前に出る）", ...(imp.issues ?? [])].slice(0, 4);
+        }
+        const cap = earlyExtensionDetected.confidence === "high" ? 10 : 12;
+        imp.score = Math.min(imp.score ?? 0, cap);
+        // Recompute total based on adjusted phase scores.
+        const sum = PHASE_ORDER.reduce((acc, key) => acc + (parsed.phases[key]?.score ?? 0), 0);
+        const raw = Math.max(0, Math.min(100, Math.round((sum / (PHASE_ORDER.length * 20)) * 100)));
+        totalScore = Math.min(totalScore, raw);
+      }
+    } catch {
+      // ignore
+    }
+
     // Absolute enforcement (defensive): Some models still miss outside-in cues even with RAG.
-    // If downswing text contains strong over-the-top signals, force DS<=8 and cap total<=58.
+    // If downswing text contains strong over-the-top signals, force DS caps (confirmed vs tendency).
     try {
       const ds = parsed.phases.downswing;
       const dsText = [...(ds.good ?? []), ...(ds.issues ?? []), ...(ds.advice ?? [])].join("／");
@@ -1349,23 +1426,34 @@ export async function POST(req: NextRequest) {
       const hasEarlyRelease = /(手首|コック|リリース)/.test(dsText) && /(早|解け|ほどけ)/.test(dsText);
       const hasElbowAway = /右肘.*体から離れ|肘.*離れすぎ|腕が体から離れ/.test(dsText);
       const hasKneeCollapse = /右膝.*内側|膝.*内側.*入りすぎ/.test(dsText);
-      const hasOutsideInWord = /アウトサイドイン|カット軌道|外から下り|外から入る|上から入る|かぶせ|カット打ち/.test(dsText);
-      const shouldCap =
-        outsideInDetected === true ||
-        hasOutsideInWord ||
+      const hasConfirmedWord = /アウトサイドイン（確定）|カット軌道（確定）|外から下りる（確定）/.test(dsText);
+      const hasTendencyWord = /外から入りやすい傾向/.test(dsText);
+      const confirmed =
+        hasConfirmedWord || (outsideInDetected?.value === true && outsideInDetected.confidence === "high");
+      const tendency =
+        hasTendencyWord ||
+        (outsideInDetected?.value === true && outsideInDetected.confidence !== "high") ||
         hasElbowAway ||
         hasKneeCollapse ||
         (hasUpperBodyIssue && hasEarlyRelease) ||
         (hasUpperBodyIssue && hasElbowAway);
 
-      if (shouldCap) {
+      if (confirmed) {
         ds.score = Math.min(ds.score ?? 0, 8);
-        if (!ds.issues?.some((t) => /アウトサイドイン|カット軌道|外から下り/.test(String(t)))) {
-          ds.issues = ["アウトサイドイン（外から下りる）", ...(ds.issues ?? [])].slice(0, 4);
+        if (!ds.issues?.some((t) => /（確定）/.test(String(t)))) {
+          ds.issues = ["アウトサイドイン（確定）", ...(ds.issues ?? [])].slice(0, 4);
         }
         const sum = PHASE_ORDER.reduce((acc, key) => acc + (parsed.phases[key]?.score ?? 0), 0);
         const raw = Math.max(0, Math.min(100, Math.round((sum / (PHASE_ORDER.length * 20)) * 100)));
-        totalScore = Math.min(totalScore, 58, raw);
+        totalScore = Math.min(totalScore, raw, 58);
+      } else if (tendency) {
+        ds.score = Math.min(ds.score ?? 0, 12);
+        if (!ds.issues?.some((t) => /外から入りやすい傾向/.test(String(t)))) {
+          ds.issues = ["外から入りやすい傾向（要確認）", ...(ds.issues ?? [])].slice(0, 4);
+        }
+        const sum = PHASE_ORDER.reduce((acc, key) => acc + (parsed.phases[key]?.score ?? 0), 0);
+        const raw = Math.max(0, Math.min(100, Math.round((sum / (PHASE_ORDER.length * 20)) * 100)));
+        totalScore = Math.min(totalScore, raw, 65);
       }
     } catch {
       // ignore enforcement failures
@@ -1468,18 +1556,23 @@ export async function POST(req: NextRequest) {
       const finalized = rescoreSwingAnalysis({
         result,
         majorNg:
-          outsideInDetected === true
+          outsideInDetected?.value === true && outsideInDetected.confidence === "high"
             ? { ...(parsed.majorNg ?? {}), downswing: true }
-            : outsideInDetected === false
+            : outsideInDetected?.value === false
               ? parsed.majorNg
               : parsed.majorNg,
         midHighOk:
-          outsideInDetected === true
-            ? { ...(parsed.midHighOk ?? {}), downswing: false }
-            : outsideInDetected === false
-              ? parsed.midHighOk
-              : parsed.midHighOk,
+          (() => {
+            const base = parsed.midHighOk ?? {};
+            const withDs =
+              outsideInDetected?.value === true ? { ...base, downswing: false } : outsideInDetected?.value === false ? base : base;
+            if (earlyExtensionDetected?.value === true) {
+              return { ...withDs, impact: false };
+            }
+            return withDs;
+          })(),
         deriveFromText: true,
+        outsideInConfirmed: outsideInDetected?.value === true && outsideInDetected.confidence === "high",
       });
       result.totalScore = finalized.totalScore;
       result.phases = finalized.phases;

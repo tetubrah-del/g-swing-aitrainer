@@ -8,6 +8,9 @@ type PhaseLike = { score: number; good: string[]; issues: string[]; advice: stri
 
 const clamp = (v: number, min: number, max: number) => Math.min(max, Math.max(min, v));
 
+// Treat as "confirmed" only when explicitly marked, to avoid false positives.
+const OUTSIDE_IN_CONFIRMED = /アウトサイドイン（確定）|カット軌道（確定）|外から下りる（確定）/;
+
 export function mergePhaseBoolMaps(a?: PhaseBoolMap, b?: PhaseBoolMap): PhaseBoolMap | undefined {
   if (!a && !b) return undefined;
   const out: PhaseBoolMap = {};
@@ -29,38 +32,41 @@ function buildPhaseText(phase?: Partial<PhaseLike> | null): string {
   return parts.join("／");
 }
 
+function isOutsideInConfirmedFromText(params: { phases: Record<PhaseKey, PhaseLike>; summary?: string | null }): boolean {
+  try {
+    const dsText = buildPhaseText(params.phases.downswing);
+    // Only treat as "confirmed" when explicitly stated in the Downswing findings.
+    // (The overall summary may mention outside-in as a generic suggestion and is too noisy.)
+    return OUTSIDE_IN_CONFIRMED.test(dsText);
+  } catch {
+    return false;
+  }
+}
+
 export function deriveMajorNgFromText(params: { phases: Record<PhaseKey, PhaseLike>; summary?: string | null }): PhaseBoolMap | undefined {
   const { phases } = params;
   const patterns: Partial<Record<PhaseKey, RegExp[]>> = {
     downswing: [
-      // Direct outside-in / over-the-top cues
-      /アウトサイドイン/,
-      /カット軌道/,
-      /外から下り/,
-      /外から入る/,
-      /上から入る/,
-      /かぶせ/,
-      /カット打ち/,
-      // Sequence/order breakdown
+      // Confirmed outside-in only (avoid false positives on "tendency")
+      OUTSIDE_IN_CONFIRMED,
+      // Sequence/order breakdown (strong)
       /上半身先行/,
-      /体の開き/,
       /早開き/,
-      // Shoulder/chest opening (often described without "体の開き")
-      /右肩.*開/,
-      /左肩.*開/,
-      /肩.*早.*開/,
-      /肩が.*早く開/,
-      /胸.*開/,
-      /腕が外に放り出/,
-      /腕が体の外/,
-      /肘.*離れすぎ/,
-      /右肘.*離れ/,
-      /右肘.*体から離れ/,
-      // Common collapse cue that often accompanies over-the-top in this dataset
-      /右膝.*内側/,
-      /膝.*内側.*入りすぎ/,
+      // "opening too early" (strong) cues (avoid mild "少し早く開く")
+      /開きが早/,
+      /開き.*早すぎ/,
     ],
-    impact: [/体勢崩壊/, /すくい打ち/],
+    impact: [
+      /体勢崩壊/,
+      /すくい打ち/,
+      // Strong early-extension cues (only treat as major when clearly stated)
+      /早期伸展/,
+      /骨盤.*前.*出/,
+      /腰.*前.*出/,
+      /前傾.*起き/,
+      /腰の突っ込み/,
+      /スペース.*潰/,
+    ],
     finish: [/ふらつ/, /静止でき/, /立っていられ/],
     address: [/つま先/, /かかと/, /バランス崩/],
   };
@@ -73,16 +79,6 @@ export function deriveMajorNgFromText(params: { phases: Record<PhaseKey, PhaseLi
     if (text && rules.some((r) => r.test(text))) out[key] = true;
   }
 
-  // Composite downswing rule: "rotation insufficient" + early wrist release often indicates over-the-top / cast.
-  try {
-    const dsText = buildPhaseText(phases.downswing);
-    const hasUpperBodyIssue = /上半身/.test(dsText) && /(不足|回転が不足|回転不足|開き)/.test(dsText);
-    const hasEarlyRelease = /(手首|コック|リリース)/.test(dsText) && /(早|解け|ほどけ)/.test(dsText);
-    if (hasUpperBodyIssue && hasEarlyRelease) out.downswing = true;
-  } catch {
-    // ignore
-  }
-
   return Object.keys(out).length ? out : undefined;
 }
 
@@ -93,13 +89,8 @@ export function deriveMidHighOkFromText(params: { phases: Record<PhaseKey, Phase
   if (
     dsText &&
     [
-      /アウトサイドイン/,
-      /カット軌道/,
-      /外から下り/,
-      /外から入る/,
-      /上から入る/,
-      /かぶせ/,
-      /カット打ち/,
+      OUTSIDE_IN_CONFIRMED,
+      /外から入りやすい傾向/,
       /上半身先行/,
       /早開き/,
       /体の開き/,
@@ -117,6 +108,23 @@ export function deriveMidHighOkFromText(params: { phases: Record<PhaseKey, Phase
     ].some((r) => r.test(dsText))
   ) {
     out.downswing = false;
+  }
+
+  const impText = buildPhaseText(phases.impact);
+  if (
+    impText &&
+    [
+      /体勢崩壊/,
+      /すくい打ち/,
+      /早期伸展/,
+      /骨盤.*前.*出/,
+      /腰.*前.*出/,
+      /前傾.*起き/,
+      /腰の突っ込み/,
+      /スペース.*潰/,
+    ].some((r) => r.test(impText))
+  ) {
+    out.impact = false;
   }
   return Object.keys(out).length ? out : undefined;
 }
@@ -166,16 +174,17 @@ export function computeRawTotalScoreFromPhases(phases: Record<PhaseKey, PhaseLik
 export function applyCrossPhaseTotalCaps(params: {
   totalScore: number;
   phases: Record<PhaseKey, PhaseLike>;
-  majorNg?: PhaseBoolMap;
+  outsideInConfirmed?: boolean;
 }): number {
-  const { totalScore, phases, majorNg } = params;
+  const { totalScore, phases, outsideInConfirmed } = params;
   let capped = totalScore;
   const ds = phases.downswing?.score ?? 0;
   const ad = phases.address?.score ?? 0;
   const fin = phases.finish?.score ?? 0;
 
   if (ds <= 8) capped = Math.min(capped, 65);
-  if (majorNg?.downswing === true) capped = Math.min(capped, 58);
+  // Strongest total cap (58) only when outside-in is explicitly confirmed.
+  if (outsideInConfirmed === true) capped = Math.min(capped, 58);
   if (ad <= 8 && fin <= 8) capped = Math.min(capped, 60);
 
   return Math.max(0, Math.min(100, Math.round(capped)));
@@ -186,8 +195,9 @@ export function rescoreSwingAnalysis(params: {
   majorNg?: PhaseBoolMap;
   midHighOk?: PhaseBoolMap;
   deriveFromText?: boolean;
+  outsideInConfirmed?: boolean;
 }): SwingAnalysis {
-  const { result, majorNg, midHighOk, deriveFromText = true } = params;
+  const { result, majorNg, midHighOk, deriveFromText = true, outsideInConfirmed } = params;
   const phases = result.phases as unknown as Record<PhaseKey, PhaseLike>;
   if (!phases) return result;
 
@@ -195,10 +205,25 @@ export function rescoreSwingAnalysis(params: {
   const derivedMidHighOk = deriveFromText ? deriveMidHighOkFromText({ phases, summary: result.summary ?? null }) : undefined;
   const mergedMajorNg = mergePhaseBoolMaps(majorNg, derivedMajorNg);
   const mergedMidHighOk = mergePhaseBoolMaps(midHighOk, derivedMidHighOk);
+  const confirmedByText = deriveFromText ? isOutsideInConfirmedFromText({ phases, summary: result.summary ?? null }) : false;
+  const outsideIn = outsideInConfirmed === true || confirmedByText;
 
-  const guardedPhases = applyPhaseGuardrails({ phases, majorNg: mergedMajorNg, midHighOk: mergedMidHighOk });
+  // Apply "major NG" caps always (hard penalties).
+  const majorGuarded = applyPhaseGuardrails({ phases, majorNg: mergedMajorNg });
+  const majorTotal = computeRawTotalScoreFromPhases(majorGuarded);
+
+  // Apply "mid-high (70+) minimum conditions" only when the score would otherwise be 70+.
+  const guardedPhases =
+    majorTotal >= 70
+      ? applyPhaseGuardrails({ phases: majorGuarded, majorNg: mergedMajorNg, midHighOk: mergedMidHighOk })
+      : majorGuarded;
+
   const rawTotal = computeRawTotalScoreFromPhases(guardedPhases);
-  const totalScore = applyCrossPhaseTotalCaps({ totalScore: rawTotal, phases: guardedPhases, majorNg: mergedMajorNg });
+  const totalScore = applyCrossPhaseTotalCaps({
+    totalScore: rawTotal,
+    phases: guardedPhases,
+    outsideInConfirmed: outsideIn,
+  });
 
   return {
     ...result,
