@@ -102,14 +102,14 @@ function postprocessSinglePhaseResult(args: { phaseLabel: string; result: { scor
       );
     };
     // Soft "要確認" alone is not enough evidence to keep the score low.
-    if (result.issues.length === 1 && /外から入りやすい傾向（要確認）/.test(result.issues[0]) && goodCount >= 2) {
+    if (result.issues.length === 1 && /外から入りやすい傾向/.test(result.issues[0]) && goodCount >= 2) {
       result.issues = [];
       result.score = Math.max(result.score, 18);
       dropGenericAdviceWhenNoIssues();
     }
     // If issues are empty but advice indicates trajectory concern, treat it as "tendency" and avoid full score.
     if (!result.issues.length && hasTrajectoryConcernInAdvice()) {
-      result.issues = ["外から入りやすい傾向（要確認）"];
+      result.issues = ["外から入りやすい傾向"];
       result.score = Math.min(result.score, 12);
       return result;
     }
@@ -127,11 +127,11 @@ function postprocessSinglePhaseResult(args: { phaseLabel: string; result: { scor
     };
     // If early extension is mentioned without "(確定)", keep it as "要確認" and avoid harsh scoring.
     if (result.issues.some((t) => /早期伸展/.test(t)) && !result.issues.some((t) => /早期伸展（確定）/.test(t))) {
-      result.issues = result.issues.map((t) => (/早期伸展/.test(t) ? "早期伸展の懸念（要確認）" : t));
+      result.issues = result.issues.map((t) => (/早期伸展/.test(t) ? "早期伸展の懸念" : t));
       result.score = Math.max(result.score, 11);
     }
     // If it's only a soft "要確認" note and otherwise all-positive, don't treat it as a real defect.
-    if (result.issues.length === 1 && /早期伸展の懸念（要確認）/.test(result.issues[0]) && goodCount >= 2) {
+    if (result.issues.length === 1 && /早期伸展の懸念/.test(result.issues[0]) && goodCount >= 2) {
       result.issues = [];
       result.score = Math.max(result.score, 20);
       dropGenericAdviceWhenNoIssues();
@@ -156,9 +156,9 @@ function buildPhasePrompt(args: { phaseLabel: string; handedness?: string; clubT
   if (args.phaseLabel === "ダウンスイング") {
     mustCheckLines.push(
       `【重要チェック（省略不可）】`,
-      `- クラブ軌道が「アウトサイドイン（確定）」か、「外から入りやすい傾向（要確認）」かを必ず判定する。`,
+      `- クラブ軌道が「アウトサイドイン（確定）」か、「外から入りやすい傾向」かを必ず判定する。`,
       `- 確定できる場合のみ issues に必ず「アウトサイドイン（確定）」を含め、score は 0〜8 に収める。`,
-      `- 外から入りそうな傾向が“見える”程度なら issues に「外から入りやすい傾向（要確認）」を含め、score は 9〜12 に収める（確定と書かない）。`,
+      `- 外から入りそうな傾向が“見える”程度なら issues に「外から入りやすい傾向」を含め、score は 9〜12 に収める（確定と書かない）。`,
       `- 判断できない場合は、その文言を書かない（無理に当てはめない）。`
     );
   }
@@ -167,7 +167,7 @@ function buildPhasePrompt(args: { phaseLabel: string; handedness?: string; clubT
       `【重要チェック（省略不可）】`,
       `- 「早期伸展（骨盤が前に出る／前傾が起きる／スペースが潰れる）」に該当するか必ず判定する。`,
       `- 確定できる場合のみ issues に必ず「早期伸展（確定）」を含める。`,
-      `- 懸念レベル（要確認）の場合は issues に「早期伸展の懸念（要確認）」を含める（確定と書かない）。`,
+      `- 懸念レベルの場合は issues に「早期伸展の懸念」を含める（確定と書かない）。`,
       `- 確定の場合 score は 0〜12（明確なら 0〜10）に収める。要確認の場合は 11〜15 を目安にし、過剰に減点しない。`
     );
   }

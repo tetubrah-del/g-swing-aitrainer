@@ -1465,7 +1465,7 @@ export async function POST(req: NextRequest) {
         }
 
         if (!issues.some((t) => /外から入りやすい傾向|体の開きが早い/.test(String(t)))) {
-          ds.issues = ["外から入りやすい傾向（要確認）", ...issues].slice(0, 4);
+          ds.issues = ["外から入りやすい傾向", ...issues].slice(0, 4);
         }
         ds.score = Math.min(Number(ds.score ?? 0) || 0, 12);
       };
@@ -1496,7 +1496,7 @@ export async function POST(req: NextRequest) {
         const ds = parsed.phases.downswing;
         const issues = Array.isArray(ds.issues) ? ds.issues : [];
         const hasOnlySoftTendency =
-          issues.length === 1 && /外から入りやすい傾向（要確認）/.test(String(issues[0]));
+          issues.length === 1 && /外から入りやすい傾向/.test(String(issues[0]));
         if (hasOnlySoftTendency && hasTwoGoods(ds.good)) {
           ds.issues = [];
           if ((ds.score ?? 0) < 20) ds.score = 20;
@@ -1526,7 +1526,7 @@ export async function POST(req: NextRequest) {
       if (earlyExtensionDetected == null) {
         const imp = parsed.phases.impact;
         const issues = Array.isArray(imp.issues) ? imp.issues : [];
-        const hasOnlySoftEarlyExt = issues.length === 1 && /早期伸展の懸念（要確認）/.test(String(issues[0]));
+        const hasOnlySoftEarlyExt = issues.length === 1 && /早期伸展の懸念/.test(String(issues[0]));
         if (hasOnlySoftEarlyExt && hasTwoGoods(imp.good)) {
           imp.issues = [];
           if ((imp.score ?? 0) < 20) imp.score = 20;
@@ -1576,7 +1576,7 @@ export async function POST(req: NextRequest) {
       } else if (tendency) {
         ds.score = Math.min(ds.score ?? 0, 12);
         if (!ds.issues?.some((t) => /外から入りやすい傾向/.test(String(t)))) {
-          ds.issues = ["外から入りやすい傾向（要確認）", ...(ds.issues ?? [])].slice(0, 4);
+          ds.issues = ["外から入りやすい傾向", ...(ds.issues ?? [])].slice(0, 4);
         }
         const sum = PHASE_ORDER.reduce((acc, key) => acc + (parsed.phases[key]?.score ?? 0), 0);
         const raw = Math.max(0, Math.min(100, Math.round((sum / (PHASE_ORDER.length * 20)) * 100)));
