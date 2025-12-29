@@ -214,6 +214,30 @@ export function rescoreSwingAnalysis(params: {
       ? applyPhaseGuardrails({ phases: majorGuarded, majorNg: mergedMajorNg, midHighOk: mergedMidHighOk })
       : majorGuarded;
 
+  // Low-skill outside-in safeguard:
+  // If overall score is low and Downswing already indicates outside-in tendency, treat it as a major NG
+  // so the total doesn't stay unrealistically high due to false negatives in the 2nd-pass judge.
+  if (deriveFromText) {
+    const ds = guardedPhases.downswing;
+    const dsIssues = buildIssuesText(ds);
+    const dsScore = clamp(Number.isFinite(ds?.score) ? ds.score : 0, 0, 20);
+    const roughTotal = computeRawTotalScoreFromPhases(guardedPhases);
+    const looksOutsideIn =
+      /外から入りやすい傾向/.test(dsIssues) ||
+      /クラブの軌道.*外側/.test(dsIssues) ||
+      /アウトサイドイン|カット軌道|外から下り|上から/.test(dsIssues);
+
+    if (roughTotal <= 68 && dsScore <= 10 && looksOutsideIn) {
+      guardedPhases.downswing = {
+        ...ds,
+        score: Math.min(dsScore, 8),
+        issues: Array.from(
+          new Set(["アウトサイドイン（確定）", ...(Array.isArray(ds.issues) ? ds.issues : [])])
+        ).slice(0, 4),
+      };
+    }
+  }
+
   const rawTotal = computeRawTotalScoreFromPhases(guardedPhases);
   const totalScore = applyCrossPhaseTotalCaps({
     totalScore: rawTotal,
