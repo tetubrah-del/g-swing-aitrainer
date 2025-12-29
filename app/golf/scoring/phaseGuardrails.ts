@@ -23,18 +23,15 @@ export function mergePhaseBoolMaps(a?: PhaseBoolMap, b?: PhaseBoolMap): PhaseBoo
   return Object.keys(out).length ? out : undefined;
 }
 
-function buildPhaseText(phase?: Partial<PhaseLike> | null): string {
+function buildIssuesText(phase?: Partial<PhaseLike> | null): string {
   if (!phase) return "";
-  const parts: string[] = [];
-  if (Array.isArray(phase.good)) parts.push(...phase.good);
-  if (Array.isArray(phase.issues)) parts.push(...phase.issues);
-  if (Array.isArray(phase.advice)) parts.push(...phase.advice);
-  return parts.join("／");
+  const issues = Array.isArray(phase.issues) ? phase.issues : [];
+  return issues.join("／");
 }
 
 function isOutsideInConfirmedFromText(params: { phases: Record<PhaseKey, PhaseLike>; summary?: string | null }): boolean {
   try {
-    const dsText = buildPhaseText(params.phases.downswing);
+    const dsText = buildIssuesText(params.phases.downswing);
     // Only treat as "confirmed" when explicitly stated in the Downswing findings.
     // (The overall summary may mention outside-in as a generic suggestion and is too noisy.)
     return OUTSIDE_IN_CONFIRMED.test(dsText);
@@ -59,13 +56,13 @@ export function deriveMajorNgFromText(params: { phases: Record<PhaseKey, PhaseLi
     impact: [
       /体勢崩壊/,
       /すくい打ち/,
-      // Strong early-extension cues (only treat as major when clearly stated)
-      /早期伸展/,
-      /骨盤.*前.*出/,
-      /腰.*前.*出/,
-      /前傾.*起き/,
-      /腰の突っ込み/,
-      /スペース.*潰/,
+      // Strong early-extension cues should be "confirmed" to avoid false positives.
+      /早期伸展（確定）/,
+      /骨盤.*前.*出.*（確定）/,
+      /腰.*前.*出.*（確定）/,
+      /前傾.*起き.*（確定）/,
+      /腰の突っ込み.*（確定）/,
+      /スペース.*潰.*（確定）/,
     ],
     finish: [/ふらつ/, /静止でき/, /立っていられ/],
     address: [/つま先/, /かかと/, /バランス崩/],
@@ -75,7 +72,7 @@ export function deriveMajorNgFromText(params: { phases: Record<PhaseKey, PhaseLi
   for (const key of PHASE_KEYS) {
     const rules = patterns[key];
     if (!rules?.length) continue;
-    const text = buildPhaseText(phases[key]);
+    const text = buildIssuesText(phases[key]);
     if (text && rules.some((r) => r.test(text))) out[key] = true;
   }
 
@@ -85,12 +82,11 @@ export function deriveMajorNgFromText(params: { phases: Record<PhaseKey, PhaseLi
 export function deriveMidHighOkFromText(params: { phases: Record<PhaseKey, PhaseLike>; summary?: string | null }): PhaseBoolMap | undefined {
   const { phases } = params;
   const out: PhaseBoolMap = {};
-  const dsText = buildPhaseText(phases.downswing);
+  const dsText = buildIssuesText(phases.downswing);
   if (
     dsText &&
     [
       OUTSIDE_IN_CONFIRMED,
-      /外から入りやすい傾向/,
       /上半身先行/,
       /早開き/,
       /体の開き/,
@@ -110,18 +106,18 @@ export function deriveMidHighOkFromText(params: { phases: Record<PhaseKey, Phase
     out.downswing = false;
   }
 
-  const impText = buildPhaseText(phases.impact);
+  const impText = buildIssuesText(phases.impact);
   if (
     impText &&
     [
       /体勢崩壊/,
       /すくい打ち/,
-      /早期伸展/,
-      /骨盤.*前.*出/,
-      /腰.*前.*出/,
-      /前傾.*起き/,
-      /腰の突っ込み/,
-      /スペース.*潰/,
+      /早期伸展（確定）/,
+      /骨盤.*前.*出.*（確定）/,
+      /腰.*前.*出.*（確定）/,
+      /前傾.*起き.*（確定）/,
+      /腰の突っ込み.*（確定）/,
+      /スペース.*潰.*（確定）/,
     ].some((r) => r.test(impText))
   ) {
     out.impact = false;
