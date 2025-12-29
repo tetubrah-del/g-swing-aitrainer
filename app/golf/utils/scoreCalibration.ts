@@ -171,7 +171,7 @@ export function computeRoundFallbackFromScore(scoreRaw: number): RoundEstimateMe
   const score = clamp(Number.isFinite(scoreRaw) ? scoreRaw : 0, 0, 100);
 
   // Calibrated for typical amateurs, with a non-linear "elite tail":
-  // - swing score ~50 -> ~105〜115
+  // - swing score ~50 -> ~110台前半
   // - swing score ~70 -> ~90前後
   // - swing score ~83 -> ~80台前半
   // - swing score ~93 -> ~70台後半
@@ -179,16 +179,16 @@ export function computeRoundFallbackFromScore(scoreRaw: number): RoundEstimateMe
   const mid = (() => {
     const s = score;
     // Piecewise linear interpolation to avoid over-penalizing high swing scores.
-    // Anchors: (0,140), (50,110), (70,92), (85,85), (95,76), (100,72)
+    // Anchors: (0,140), (50,115), (70,100), (85,85), (95,76), (100,72)
     const lerp = (x0: number, y0: number, x1: number, y1: number, x: number) =>
       y0 + ((y1 - y0) * (x - x0)) / (x1 - x0);
-    if (s <= 50) return lerp(0, 140, 50, 110, s);
-    if (s <= 70) return lerp(50, 110, 70, 92, s);
-    if (s <= 85) return lerp(70, 92, 85, 85, s);
+    if (s <= 50) return lerp(0, 140, 50, 115, s);
+    if (s <= 70) return lerp(50, 115, 70, 100, s);
+    if (s <= 85) return lerp(70, 100, 85, 85, s);
     if (s <= 95) return lerp(85, 85, 95, 76, s);
     return lerp(95, 76, 100, 72, s);
   })();
-  const spread = 4;
+  const spread = 5;
   const low = clamp(mid - spread, 60, 140);
   const high = clamp(mid + spread, 60, 140);
   const lowInt = Math.round(low);

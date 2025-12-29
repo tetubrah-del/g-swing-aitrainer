@@ -48,7 +48,7 @@ Input:
 
 Guidelines:
 - Output should be realistic, but slightly optimistic (assume average short game and reasonable course management).
-- Rough anchors: swing score ~70 => around 90s, ~83 => low/mid-80s, ~93 => high-70s, ~100 => around 72.
+- Rough anchors: swing score ~58 => around 105-115, ~70 => around 90s, ~83 => low/mid-80s, ~93 => high-70s, ~100 => around 72.
 - Return conservative but realistic metrics for FW keep %, GIR %, and OB count (18H equivalent).
 - Keep numbers human-readable integers; OB can be one decimal.
 - Output ONLY JSON with keys: strokeRange (string like "84〜88"), fwKeep (string "%"), gir (string "%"), ob (string "x.x 回"), source ("ai").

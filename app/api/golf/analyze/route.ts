@@ -1452,6 +1452,18 @@ export async function POST(req: NextRequest) {
       };
       const applyTendencyFromAdvice = (ds: { score?: number; issues?: unknown; advice?: unknown }) => {
         const issues = Array.isArray(ds.issues) ? ds.issues : [];
+        const sum = PHASE_ORDER.reduce((acc, key) => acc + (parsed.phases[key]?.score ?? 0), 0);
+        const roughTotal = Math.max(0, Math.min(100, Math.round((sum / (PHASE_ORDER.length * 20)) * 100)));
+        const isLowSkillBand = roughTotal <= 68;
+
+        if (isLowSkillBand) {
+          if (!issues.some((t) => /（確定）/.test(String(t)))) {
+            ds.issues = ["アウトサイドイン（確定）", ...issues].slice(0, 4);
+          }
+          ds.score = Math.min(Number(ds.score ?? 0) || 0, 8);
+          return;
+        }
+
         if (!issues.some((t) => /外から入りやすい傾向|体の開きが早い/.test(String(t)))) {
           ds.issues = ["外から入りやすい傾向（要確認）", ...issues].slice(0, 4);
         }
