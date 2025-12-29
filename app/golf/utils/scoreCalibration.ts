@@ -173,29 +173,35 @@ export function computeRoundFallbackFromScore(scoreRaw: number): RoundEstimateMe
   // Calibrated for typical amateurs, with a non-linear "elite tail":
   // - swing score ~50 -> ~105〜115
   // - swing score ~70 -> ~90前後
-  // - swing score ~83 -> ~75〜85
-  // - swing score ~95 -> ~65〜72
+  // - swing score ~83 -> ~80台前半
+  // - swing score ~93 -> ~70台後半
+  // - swing score ~100 -> ~72前後
   const mid = (() => {
     const s = score;
     // Piecewise linear interpolation to avoid over-penalizing high swing scores.
-    // Anchors: (0,140), (50,110), (70,90), (90,72), (100,65)
+    // Anchors: (0,140), (50,110), (70,92), (85,85), (95,76), (100,72)
     const lerp = (x0: number, y0: number, x1: number, y1: number, x: number) =>
       y0 + ((y1 - y0) * (x - x0)) / (x1 - x0);
     if (s <= 50) return lerp(0, 140, 50, 110, s);
-    if (s <= 70) return lerp(50, 110, 70, 90, s);
-    if (s <= 90) return lerp(70, 90, 90, 72, s);
-    return lerp(90, 72, 100, 65, s);
+    if (s <= 70) return lerp(50, 110, 70, 92, s);
+    if (s <= 85) return lerp(70, 92, 85, 85, s);
+    if (s <= 95) return lerp(85, 85, 95, 76, s);
+    return lerp(95, 76, 100, 72, s);
   })();
   const spread = 4;
-  const low = clamp(mid - spread, 70, 140);
-  const high = clamp(mid + spread, 70, 140);
+  const low = clamp(mid - spread, 60, 140);
+  const high = clamp(mid + spread, 60, 140);
+  const lowInt = Math.round(low);
+  const highInt = Math.max(lowInt, Math.round(high));
+  const strokeRange =
+    lowInt <= 72 ? (highInt <= 72 ? "アンダーパー" : `アンダーパー〜${highInt}`) : `${lowInt}〜${highInt}`;
 
   const fwKeep = clamp(25 + score * 0.35, 25, 70);
   const gir = clamp(10 + score * 0.3, 10, 55);
   const ob = clamp(7 - score * 0.045, 1.5, 7);
 
   return {
-    strokeRange: `${low}〜${high}`,
+    strokeRange,
     fwKeep: `${fwKeep.toFixed(0)}%`,
     gir: `${gir.toFixed(0)}%`,
     ob: `${ob.toFixed(1)} 回`,
