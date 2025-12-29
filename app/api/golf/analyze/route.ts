@@ -1427,8 +1427,14 @@ export async function POST(req: NextRequest) {
         const advice = Array.isArray(ds.advice) ? ds.advice : [];
         ds.advice = advice.filter(
           (t) =>
-            !/インサイド|内側|手元.*先行|フェース.*開|アウトサイドイン|外から|カット軌道|かぶせ|上から/.test(String(t))
+            !/インサイド|内側|手元.*先行|フェース.*開|アウトサイドイン|外から|カット軌道|かぶせ|上から|連動|同調/.test(String(t))
         );
+      };
+      const dropGenericImpactAdviceWhenNoIssues = (imp: { issues?: unknown; advice?: unknown }) => {
+        const issues = Array.isArray(imp.issues) ? imp.issues : [];
+        if (issues.length) return;
+        const advice = Array.isArray(imp.advice) ? imp.advice : [];
+        imp.advice = advice.filter((t) => !/骨盤|前傾|早期伸展|腰.*前|スペース.*潰|軸|体幹/.test(String(t)));
       };
       if (outsideInDetected?.value === false) {
         const ds = parsed.phases.downswing;
@@ -1436,7 +1442,7 @@ export async function POST(req: NextRequest) {
         const filtered = before.filter((t) => !/外から入りやすい傾向|アウトサイドイン（確定）|カット軌道（確定）|外から下りる（確定）|アウトサイドイン|カット軌道|外から下り/.test(String(t)));
         if (filtered.length !== before.length) {
           ds.issues = filtered;
-          if ((ds.score ?? 0) < 18 && hasTwoGoods(ds.good)) ds.score = 18;
+          if ((ds.score ?? 0) < 20 && hasTwoGoods(ds.good)) ds.score = 20;
           dropGenericDsAdviceWhenNoIssues(ds);
         }
       }
@@ -1449,13 +1455,13 @@ export async function POST(req: NextRequest) {
           issues.length === 1 && /外から入りやすい傾向（要確認）/.test(String(issues[0]));
         if (hasOnlySoftTendency && hasTwoGoods(ds.good)) {
           ds.issues = [];
-          if ((ds.score ?? 0) < 18) ds.score = 18;
+          if ((ds.score ?? 0) < 20) ds.score = 20;
           dropGenericDsAdviceWhenNoIssues(ds);
         }
         // If issues are empty but score is still low, treat it as a scoring mismatch and lift it.
         const nowIssues = Array.isArray(ds.issues) ? ds.issues : [];
-        if (!nowIssues.length && hasTwoGoods(ds.good) && (ds.score ?? 0) < 18) {
-          ds.score = 18;
+        if (!nowIssues.length && hasTwoGoods(ds.good) && (ds.score ?? 0) < 20) {
+          ds.score = 20;
           dropGenericDsAdviceWhenNoIssues(ds);
         }
       }
@@ -1465,7 +1471,23 @@ export async function POST(req: NextRequest) {
         const filtered = before.filter((t) => !/早期伸展|骨盤.*前.*出|腰.*前.*出|前傾.*起き|腰の突っ込み|スペース.*潰/.test(String(t)));
         if (filtered.length !== before.length) {
           imp.issues = filtered;
-          if ((imp.score ?? 0) < 14 && hasTwoGoods(imp.good)) imp.score = 14;
+          if ((imp.score ?? 0) < 20 && hasTwoGoods(imp.good)) imp.score = 20;
+          dropGenericImpactAdviceWhenNoIssues(imp);
+        }
+      }
+      if (earlyExtensionDetected == null) {
+        const imp = parsed.phases.impact;
+        const issues = Array.isArray(imp.issues) ? imp.issues : [];
+        const hasOnlySoftEarlyExt = issues.length === 1 && /早期伸展の懸念（要確認）/.test(String(issues[0]));
+        if (hasOnlySoftEarlyExt && hasTwoGoods(imp.good)) {
+          imp.issues = [];
+          if ((imp.score ?? 0) < 20) imp.score = 20;
+          dropGenericImpactAdviceWhenNoIssues(imp);
+        }
+        const nowIssues = Array.isArray(imp.issues) ? imp.issues : [];
+        if (!nowIssues.length && hasTwoGoods(imp.good) && (imp.score ?? 0) < 20) {
+          imp.score = 20;
+          dropGenericImpactAdviceWhenNoIssues(imp);
         }
       }
     } catch {
