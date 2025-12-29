@@ -86,10 +86,23 @@ function postprocessSinglePhaseResult(args: { phaseLabel: string; result: { scor
   const goodCount = result.good.filter((t) => t.trim().length > 0).length;
 
   if (phaseLabel === "ダウンスイング") {
+    const dropGenericAdviceWhenNoIssues = () => {
+      if (result.issues.length) return;
+      result.advice = result.advice.filter(
+        (t) =>
+          !/インサイド|内側|手元.*先行|フェース.*開|アウトサイドイン|外から|カット軌道|かぶせ|上から/.test(String(t))
+      );
+    };
     // Soft "要確認" alone is not enough evidence to keep the score low.
     if (result.issues.length === 1 && /外から入りやすい傾向（要確認）/.test(result.issues[0]) && goodCount >= 2) {
       result.issues = [];
-      result.score = Math.max(result.score, 15);
+      result.score = Math.max(result.score, 18);
+      dropGenericAdviceWhenNoIssues();
+    }
+    // If issues are empty but score is still low, lift it to match the rubric.
+    if (!result.issues.length && goodCount >= 2 && result.score < 18) {
+      result.score = 18;
+      dropGenericAdviceWhenNoIssues();
     }
   }
 
