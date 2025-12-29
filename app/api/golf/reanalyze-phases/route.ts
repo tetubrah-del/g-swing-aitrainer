@@ -185,6 +185,26 @@ function computeTotalScoreFromPhases(phases: Record<string, { score?: number }>)
   return Math.max(0, Math.min(100, Math.round((sum / (keys.length * 20)) * 100)));
 }
 
+function promoteHighNoIssueScores(phases: Record<string, { score?: number; good?: string[]; issues?: string[]; advice?: string[] }>) {
+  const promote = (key: "downswing" | "impact") => {
+    const phase = phases[key];
+    if (!phase) return;
+    const goodCount = Array.isArray(phase.good) ? phase.good.filter((t) => typeof t === "string" && t.trim().length > 0).length : 0;
+    const issuesCount = Array.isArray(phase.issues)
+      ? phase.issues.filter((t) => typeof t === "string" && t.trim().length > 0).length
+      : 0;
+    const score = Number(phase.score) || 0;
+    // Only bump when the model already considers it very high but forgot to give full marks,
+    // and there are no issues listed (i.e., no explicit defects to justify the gap).
+    if (issuesCount === 0 && goodCount >= 2 && score >= 18) {
+      phase.score = 20;
+    }
+  };
+  promote("downswing");
+  promote("impact");
+  return phases;
+}
+
 async function loadAuthorizedAnalysis(req: NextRequest, analysisId: AnalysisId) {
   const { anonymousUserId: tokenAnonymous } = readAnonymousFromRequest(req);
   const emailSession = readEmailSessionFromRequest(req);
@@ -385,6 +405,10 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
     result: { ...(nextResult as SwingAnalysis), totalScore: nextTotal },
     deriveFromText: true,
   });
+  // If we didn't reanalyze downswing/impact, but they have no issues and are already very high,
+  // promote to full score to avoid an unexplained "18/20" with empty improvements.
+  promoteHighNoIssueScores(rescored.phases as unknown as Record<string, { score?: number; good?: string[]; issues?: string[]; advice?: string[] }>);
+  rescored.totalScore = computeTotalScoreFromPhases(rescored.phases as unknown as Record<string, { score?: number }>);
 
   let previousReport: SwingAnalysis | null = null;
   const previousAnalysisId = stored.meta?.previousAnalysisId ?? null;
