@@ -493,7 +493,7 @@ function buildOverrideSig(indices: {
   return `ad:${join(indices.address)}|bs:${join(indices.backswing)}|top:${join(indices.top)}|ds:${join(indices.downswing)}|imp:${join(indices.impact)}|fin:${join(indices.finish)}`;
 }
 
-const PHASE_REEVAL_VERSION = "v2025-12-31-address-clubhead-zone-v68-address-frame-v1-shaft-scan";
+const PHASE_REEVAL_VERSION = "v2025-12-31-address-clubhead-zone-v68-address-frame-v6-hip-cap";
 
 async function judgeOutsideIn(frames: PhaseFrame[], args: { handedness?: string; clubType?: string; level?: string }): Promise<OutsideInJudge> {
   if (!frames.length) return null;
@@ -2639,22 +2639,46 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
                   if (ballPoint) (onPlaneUpdate as Record<string, unknown>).ball_point = ballPoint;
                   if (addrZone?.grip) (onPlaneUpdate as Record<string, unknown>).grip_point = addrZone.grip;
                   if (addrZone?.shoulder) (onPlaneUpdate as Record<string, unknown>).address_shoulder_point = addrZone.shoulder;
-                  if (addrZone?.side_shoulder) (onPlaneUpdate as Record<string, unknown>).address_shoulder_point_pose = addrZone.side_shoulder;
-                  if (addrZone?.side_hip) (onPlaneUpdate as Record<string, unknown>).address_hip_point = addrZone.side_hip;
-                  if (!addrZone?.side_shoulder || !addrZone?.side_hip) {
+                  {
                     const poseLandmarks = await Promise.all(
                       addrFrames.map((f) => extractAddressPoseLandmarks(f, meta?.handedness ?? null)),
                     );
-                    const poseShoulders = poseLandmarks
-                      .map((p) => p?.shoulder ?? null)
-                      .filter((p): p is { x: number; y: number } => !!p);
-                    const poseHips = poseLandmarks
-                      .map((p) => p?.hip ?? null)
-                      .filter((p): p is { x: number; y: number } => !!p);
-                    const poseShoulder = medianOf(poseShoulders);
-                    const poseHip = medianOf(poseHips);
-                    if (poseShoulder) (onPlaneUpdate as Record<string, unknown>).address_shoulder_point_pose = poseShoulder;
-                    if (poseHip) (onPlaneUpdate as Record<string, unknown>).address_hip_point = poseHip;
+                    const firstPose = poseLandmarks.find((p) => p?.shoulder || p?.hip) ?? null;
+                    const shoulder = firstPose?.shoulder ?? null;
+                    let hip = firstPose?.hip ?? null;
+                    if (shoulder && hip) {
+                      const dy = hip.y - shoulder.y;
+                      if (dy < 0.08 || dy > 0.32) {
+                        hip = null;
+                      } else {
+                        const maxDy = 0.18;
+                        if (dy > maxDy) {
+                          hip = { x: hip.x, y: clamp(shoulder.y + maxDy, 0, 1) };
+                        }
+                      }
+                    }
+                    if (shoulder) (onPlaneUpdate as Record<string, unknown>).address_shoulder_point_pose = shoulder;
+                    if (hip) (onPlaneUpdate as Record<string, unknown>).address_hip_point = hip;
+
+                    if (!shoulder && addrZone?.side_shoulder) {
+                      (onPlaneUpdate as Record<string, unknown>).address_shoulder_point_pose = addrZone.side_shoulder;
+                    }
+                    if (!hip && addrZone?.side_hip) {
+                      const fallbackHip = addrZone.side_hip;
+                      if (fallbackHip && shoulder) {
+                        const dy = fallbackHip.y - shoulder.y;
+                        if (dy < 0.08 || dy > 0.32) {
+                          (onPlaneUpdate as Record<string, unknown>).address_hip_point = {
+                            x: fallbackHip.x,
+                            y: clamp(shoulder.y + 0.2, 0, 1),
+                          };
+                        } else {
+                          (onPlaneUpdate as Record<string, unknown>).address_hip_point = fallbackHip;
+                        }
+                      } else if (fallbackHip) {
+                        (onPlaneUpdate as Record<string, unknown>).address_hip_point = fallbackHip;
+                      }
+                    }
                   }
                   if (addrZone) {
                     (onPlaneUpdate as Record<string, unknown>).address_point_confidence = {
