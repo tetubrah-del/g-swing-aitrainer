@@ -1052,6 +1052,14 @@ export default function OnPlaneSection(props: OnPlaneSectionProps) {
   // flip X for visualization so the plane aligns with the most common DTL expectation (left-up -> right-down).
   // This does NOT change stored data; it only affects rendering.
   const shouldFlipX = (() => {
+    if (addressLandmarksRaw?.ball && addressLandmarksRaw?.grip) {
+      const ballX = addressLandmarksRaw.ball.x;
+      const gripX = addressLandmarksRaw.grip.x;
+      if (Number.isFinite(ballX) && Number.isFinite(gripX) && Math.abs(ballX - gripX) > 0.05) {
+        // In DTL, grip should be left of ball; if reversed, flip X.
+        return gripX > ballX;
+      }
+    }
     const l = downswingPlaneRaw;
     if (!l) return false;
     const dx = lineDx(l);

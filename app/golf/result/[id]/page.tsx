@@ -492,6 +492,8 @@ const GolfResultPage = () => {
   }>({});
   const [isPhaseReevalLoading, setIsPhaseReevalLoading] = useState(false);
   const [phaseReevalError, setPhaseReevalError] = useState<string | null>(null);
+  const [isOnPlaneReevalLoading, setIsOnPlaneReevalLoading] = useState(false);
+  const [onPlaneReevalError, setOnPlaneReevalError] = useState<string | null>(null);
   const [phaseOverrideAppliedSig, setPhaseOverrideAppliedSig] = useState<string | null>(null);
   const [anonymousUserId, setAnonymousUserId] = useState<string | null>(null);
   const [previousHistory, setPreviousHistory] = useState<SwingAnalysisHistory | null>(null);
@@ -1290,6 +1292,52 @@ const GolfResultPage = () => {
     }
   };
 
+  const runOnPlaneEvaluation = async () => {
+    if (!data?.analysisId) return;
+    const address = manualPhase.address ?? [];
+    const backswing = manualPhase.backswing ?? [];
+    const top = manualPhase.top ?? [];
+    const downswing = manualPhase.downswing ?? [];
+    const impact = manualPhase.impact ?? [];
+    const finish = manualPhase.finish ?? [];
+    if (!top.length || !downswing.length || !impact.length) return;
+
+    try {
+      setIsOnPlaneReevalLoading(true);
+      setOnPlaneReevalError(null);
+      const res = await fetch("/api/golf/reanalyze-phases", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          analysisId: data.analysisId,
+          address,
+          backswing,
+          top,
+          downswing,
+          impact,
+          finish,
+          onPlaneOnly: true,
+        }),
+      });
+      const json = (await res.json().catch(() => null)) as GolfAnalysisResponse | { error?: string } | null;
+      if (!res.ok) {
+        const message =
+          (json && typeof json === "object" && "error" in json && json.error) || "オンプレーン診断に失敗しました";
+        throw new Error(message);
+      }
+      if (!json || typeof json !== "object" || !("result" in json)) {
+        throw new Error("invalid response");
+      }
+      const next = json as GolfAnalysisResponse;
+      setData(next);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "オンプレーン診断に失敗しました";
+      setOnPlaneReevalError(message);
+    } finally {
+      setIsOnPlaneReevalLoading(false);
+    }
+  };
+
   const analysisId = data?.analysisId ?? '';
 
   const sequenceFrames = useMemo(() => {
@@ -1368,6 +1416,12 @@ const GolfResultPage = () => {
       !!manualPhase.downswing?.length ||
       !!manualPhase.impact?.length ||
       !!manualPhase.finish?.length);
+  const isOnPlaneReevalEnabled =
+    !isOnPlaneReevalLoading &&
+    !isPhaseReevalLoading &&
+    !!manualPhase.top?.length &&
+    !!manualPhase.downswing?.length &&
+    !!manualPhase.impact?.length;
 
   const requiresManualEvaluation = sequenceFrames.length > 0;
   useEffect(() => {
@@ -2042,6 +2096,31 @@ const GolfResultPage = () => {
               aria-label="PRO案内"
               onClick={() => setProModalOpen(true)}
             />
+          </section>
+        )}
+
+        {(sequenceFrames.length > 0 || sequenceStages.length > 0) && (
+          <section className="rounded-xl bg-slate-900/70 border border-slate-700 p-4 space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 className="text-sm font-semibold">オンプレーン診断のみ再解析</h2>
+                <p className="text-xs text-slate-400 mt-1">
+                  TOP / ダウンスイング / インパクトの選択フレームを使ってオンプレーンのみ更新します。
+                </p>
+              </div>
+              <button
+                type="button"
+                className="rounded-md border border-slate-600 bg-slate-800 px-3 py-2 text-sm font-semibold text-slate-100 hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-50"
+                disabled={!isOnPlaneReevalEnabled}
+                onClick={() => void runOnPlaneEvaluation()}
+              >
+                {isOnPlaneReevalLoading ? "オンプレーン解析中…" : "オンプレーンだけ再解析"}
+              </button>
+            </div>
+            {onPlaneReevalError && <p className="text-xs text-rose-300">オンプレーン再解析エラー: {onPlaneReevalError}</p>}
+            {!isOnPlaneReevalEnabled && (
+              <p className="text-[11px] text-slate-400">TOP / DS / IMP を選択すると実行できます。</p>
+            )}
           </section>
         )}
 

@@ -69,6 +69,545 @@ function buildLineThroughUnitBox(params: {
   return { x1: best.a.x, y1: best.a.y, x2: best.b.x, y2: best.b.y };
 }
 
+function buildBestFitLine01(points: Array<{ x: number; y: number }>): { x1: number; y1: number; x2: number; y2: number } | null {
+  const pts = points.filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y));
+  if (pts.length < 2) return null;
+  let meanX = 0;
+  let meanY = 0;
+  for (const p of pts) {
+    meanX += p.x;
+    meanY += p.y;
+  }
+  meanX /= pts.length;
+  meanY /= pts.length;
+  let covXX = 0;
+  let covXY = 0;
+  let covYY = 0;
+  for (const p of pts) {
+    const dx = p.x - meanX;
+    const dy = p.y - meanY;
+    covXX += dx * dx;
+    covXY += dx * dy;
+    covYY += dy * dy;
+  }
+  covXX /= pts.length;
+  covXY /= pts.length;
+  covYY /= pts.length;
+  const trace = covXX + covYY;
+  const det = covXX * covYY - covXY * covXY;
+  const temp = Math.sqrt(Math.max(0, (trace * trace) / 4 - det));
+  const lambda = trace / 2 + temp;
+  let vx = lambda - covYY;
+  let vy = covXY;
+  if (Math.abs(vx) < 1e-6 && Math.abs(vy) < 1e-6) {
+    vx = covXY;
+    vy = lambda - covXX;
+  }
+  const norm = Math.hypot(vx, vy);
+  if (!Number.isFinite(norm) || norm < 1e-6) {
+    const a = pts[0]!;
+    const b = pts[pts.length - 1]!;
+    vx = b.x - a.x;
+    vy = b.y - a.y;
+  }
+  return buildLineThroughUnitBox({ anchor: { x: meanX, y: meanY }, dir: { x: vx, y: vy } });
+}
+
+function computeTraceSpread(points: Array<{ x: number; y: number }>): number {
+  if (points.length < 2) return 0;
+  let minX = 1;
+  let minY = 1;
+  let maxX = 0;
+  let maxY = 0;
+  for (const p of points) {
+    if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) continue;
+    minX = Math.min(minX, p.x);
+    minY = Math.min(minY, p.y);
+    maxX = Math.max(maxX, p.x);
+    maxY = Math.max(maxY, p.y);
+  }
+  return Math.hypot(maxX - minX, maxY - minY);
+}
+
+function countTraceUnique(points: Array<{ x: number; y: number }>, precision: number = 0.01): number {
+  if (!points.length) return 0;
+  const step = Math.max(precision, 0.001);
+  const seen = new Set<string>();
+  for (const p of points) {
+    if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) continue;
+    const key = `${Math.round(p.x / step)}:${Math.round(p.y / step)}`;
+    seen.add(key);
+  }
+  return seen.size;
+}
+
+function countTracePhases(points: Array<{ phase?: string | null }>): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const p of points) {
+    const key = String(p?.phase ?? "");
+    counts[key] = (counts[key] ?? 0) + 1;
+  }
+  return counts;
+}
+
+function buildPhaseWiseTrace(
+  gripTrace: Array<{ x: number; y: number; phase?: string; frameIndex?: number; timestampSec?: number }>,
+  poseTrace: Array<{ x: number; y: number; phase?: string; frameIndex?: number; timestampSec?: number }>
+): Array<{ x: number; y: number; phase?: string; frameIndex?: number; timestampSec?: number }> {
+  const phases: Array<"backswing" | "top" | "downswing" | "impact"> = ["backswing", "top", "downswing", "impact"];
+  const picked: Array<{ x: number; y: number; phase?: string; frameIndex?: number; timestampSec?: number }> = [];
+  for (const phase of phases) {
+    const g = gripTrace.filter((p) => p.phase === phase);
+    const p = poseTrace.filter((p) => p.phase === phase);
+    if (!g.length && !p.length) continue;
+    const gSpread = computeTraceSpread(g);
+    const pSpread = computeTraceSpread(p);
+    let useGrip = false;
+    if (phase === "top") {
+      useGrip = g.length > 0 && p.length === 0;
+    } else if (phase === "backswing") {
+      useGrip = g.length > 0 && (p.length < 2 || gSpread >= pSpread * 0.9);
+    } else {
+      useGrip = g.length > 0 && (p.length < 2 || gSpread > pSpread * 1.1);
+    }
+    const chosen = useGrip ? g : p.length ? p : g;
+    picked.push(...chosen);
+  }
+  const hasTop = picked.some((p) => p.phase === "top");
+  if (!hasTop) {
+    const topFromGrip = medianOf(gripTrace.filter((p) => p.phase === "top").map((p) => ({ x: p.x, y: p.y })));
+    const topFromPose = medianOf(poseTrace.filter((p) => p.phase === "top").map((p) => ({ x: p.x, y: p.y })));
+    const topPoint = topFromGrip ?? topFromPose ?? null;
+    if (topPoint) {
+      picked.push({ ...topPoint, phase: "top" });
+    } else {
+      const backMed = medianOf(picked.filter((p) => p.phase === "backswing").map((p) => ({ x: p.x, y: p.y })));
+      const downMed = medianOf(picked.filter((p) => p.phase === "downswing").map((p) => ({ x: p.x, y: p.y })));
+      if (backMed && downMed) {
+        picked.push({ x: (backMed.x + downMed.x) / 2, y: (backMed.y + downMed.y) / 2, phase: "top" });
+      }
+    }
+  }
+  return picked.sort((a, b) => (a.timestampSec ?? a.frameIndex ?? 0) - (b.timestampSec ?? b.frameIndex ?? 0));
+}
+
+function smoothTrace(
+  points: Array<{ x: number; y: number; phase?: string; frameIndex?: number; timestampSec?: number }>
+): Array<{ x: number; y: number; phase?: string; frameIndex?: number; timestampSec?: number }> {
+  if (points.length < 3) return points;
+  return points.map((p, idx) => {
+    const neighbors: Array<{ x: number; y: number }> = [];
+    for (let i = Math.max(0, idx - 1); i <= Math.min(points.length - 1, idx + 1); i += 1) {
+      const n = points[i];
+      if (!n || !Number.isFinite(n.x) || !Number.isFinite(n.y)) continue;
+      neighbors.push({ x: n.x, y: n.y });
+    }
+    if (!neighbors.length) return p;
+    const sum = neighbors.reduce((acc, n) => ({ x: acc.x + n.x, y: acc.y + n.y }), { x: 0, y: 0 });
+    const next = { x: sum.x / neighbors.length, y: sum.y / neighbors.length };
+    return { ...p, ...next };
+  });
+}
+
+function smoothTraceEma(
+  points: Array<{ x: number; y: number; phase?: string; frameIndex?: number; timestampSec?: number }>,
+  alpha: number
+): Array<{ x: number; y: number; phase?: string; frameIndex?: number; timestampSec?: number }> {
+  if (points.length < 2) return points;
+  const a = clamp(alpha, 0.05, 0.9);
+  let prev = { x: points[0]!.x, y: points[0]!.y };
+  const out: Array<{ x: number; y: number; phase?: string; frameIndex?: number; timestampSec?: number }> = [];
+  for (let i = 0; i < points.length; i += 1) {
+    const p = points[i]!;
+    const next = { x: a * p.x + (1 - a) * prev.x, y: a * p.y + (1 - a) * prev.y };
+    out.push({ ...p, ...next });
+    prev = next;
+  }
+  return out;
+}
+
+function densifyTrace(
+  points: Array<{ x: number; y: number; phase?: string; frameIndex?: number; timestampSec?: number }>,
+  targetCount: number
+): Array<{ x: number; y: number; phase?: string; frameIndex?: number; timestampSec?: number }> {
+  if (points.length < 2 || points.length >= targetCount) return points;
+  const sorted = [...points].sort((a, b) => (a.timestampSec ?? a.frameIndex ?? 0) - (b.timestampSec ?? b.frameIndex ?? 0));
+  const catmullRom = (p0: { x: number; y: number }, p1: { x: number; y: number }, p2: { x: number; y: number }, p3: { x: number; y: number }, t: number) => {
+    const t2 = t * t;
+    const t3 = t2 * t;
+    return {
+      x: 0.5 * ((2 * p1.x) + (-p0.x + p2.x) * t + (2 * p0.x - 5 * p1.x + 4 * p2.x - p3.x) * t2 + (-p0.x + 3 * p1.x - 3 * p2.x + p3.x) * t3),
+      y: 0.5 * ((2 * p1.y) + (-p0.y + p2.y) * t + (2 * p0.y - 5 * p1.y + 4 * p2.y - p3.y) * t2 + (-p0.y + 3 * p1.y - 3 * p2.y + p3.y) * t3),
+    };
+  };
+  const perSegment = Math.max(1, Math.ceil((targetCount - sorted.length) / Math.max(1, sorted.length - 1)));
+  const densified: Array<{ x: number; y: number; phase?: string; frameIndex?: number; timestampSec?: number }> = [];
+  for (let i = 0; i < sorted.length - 1; i += 1) {
+    const p1 = sorted[i]!;
+    const p2 = sorted[i + 1]!;
+    const p0 = sorted[i - 1] ?? p1;
+    const p3 = sorted[i + 2] ?? p2;
+    densified.push(p1);
+    for (let j = 1; j <= perSegment; j += 1) {
+      const t = j / (perSegment + 1);
+      const interp = catmullRom(p0, p1, p2, p3, t);
+      densified.push({
+        x: clamp(interp.x, 0, 1),
+        y: clamp(interp.y, 0, 1),
+        phase: p1.phase,
+        frameIndex: p1.frameIndex,
+        timestampSec: p1.timestampSec,
+      });
+    }
+  }
+  densified.push(sorted[sorted.length - 1]!);
+  return densified;
+}
+
+function estimateFpsFromMeta(
+  metaByIdxPose: Map<number, { timestampSec?: number }>
+): number {
+  const times: number[] = [];
+  metaByIdxPose.forEach((m) => {
+    if (typeof m.timestampSec === "number" && Number.isFinite(m.timestampSec)) times.push(m.timestampSec);
+  });
+  if (times.length < 2) return 30;
+  times.sort((a, b) => a - b);
+  const diffs: number[] = [];
+  for (let i = 1; i < times.length; i += 1) {
+    const dt = times[i]! - times[i - 1]!;
+    if (dt > 0.001 && dt < 0.5) diffs.push(dt);
+  }
+  if (!diffs.length) return 30;
+  diffs.sort((a, b) => a - b);
+  const mid = diffs[Math.floor(diffs.length / 2)]!;
+  return mid > 0 ? clamp(1 / mid, 5, 120) : 30;
+}
+
+function reconstructHandTrajectoryFromPoseFrames(params: {
+  poseByIdx: Map<number, Record<string, unknown>>;
+  metaByIdxPose: Map<number, { frameIndex: number; timestampSec?: number; phase: "backswing" | "top" | "downswing" | "impact" }>;
+  frameCount: number;
+  handedness?: "left" | "right" | null;
+}): {
+  raw: Array<{ x: number; y: number; conf: number; phase: "backswing" | "top" | "downswing" | "impact"; frameIndex: number; timestampSec?: number } | null>;
+  filtered: Array<{ x: number; y: number; conf: number; phase: "backswing" | "top" | "downswing" | "impact"; frameIndex: number; timestampSec?: number } | null>;
+  smoothed: Array<{ x: number; y: number; phase: "backswing" | "top" | "downswing" | "impact"; frameIndex: number; timestampSec?: number }>;
+  downswing: Array<{ x: number; y: number; phase: "backswing" | "top" | "downswing" | "impact"; frameIndex: number; timestampSec?: number }>;
+  debug: {
+    fps: number;
+    rawCount: number;
+    filteredCount: number;
+    interpolatedCount: number;
+    roiRejected: number;
+    speedRejected: number;
+    accelRejected: number;
+    shoulderWidthMedian: number | null;
+  };
+} | null {
+  if (params.frameCount < 2) return null;
+  const fps = estimateFpsFromMeta(params.metaByIdxPose);
+  const raw: Array<{ x: number; y: number; conf: number; phase: "backswing" | "top" | "downswing" | "impact"; frameIndex: number; timestampSec?: number } | null> = [];
+  const filtered: Array<{ x: number; y: number; conf: number; phase: "backswing" | "top" | "downswing" | "impact"; frameIndex: number; timestampSec?: number } | null> = [];
+  const shoulderWidths: number[] = [];
+  for (let i = 0; i < params.frameCount; i += 1) {
+    const pose = params.poseByIdx.get(i) ?? null;
+    const meta = params.metaByIdxPose.get(i) ?? null;
+    if (!meta) {
+      raw.push(null);
+      filtered.push(null);
+      continue;
+    }
+    const lw = readPosePoint(pose, ["leftWrist", "left_wrist", "leftHand", "left_hand"]);
+    const rw = readPosePoint(pose, ["rightWrist", "right_wrist", "rightHand", "right_hand"]);
+    const ls = readPosePoint(pose, ["leftShoulder", "left_shoulder"]);
+    const rs = readPosePoint(pose, ["rightShoulder", "right_shoulder"]);
+    const lh = readPosePoint(pose, ["leftHip", "left_hip"]);
+    const rh = readPosePoint(pose, ["rightHip", "right_hip"]);
+    const shoulderMid = ls && rs ? { x: (ls.x + rs.x) / 2, y: (ls.y + rs.y) / 2 } : null;
+    const hipMid = lh && rh ? { x: (lh.x + rh.x) / 2, y: (lh.y + rh.y) / 2 } : null;
+    const shoulderWidth = ls && rs ? Math.hypot(ls.x - rs.x, ls.y - rs.y) : null;
+    if (shoulderWidth) shoulderWidths.push(shoulderWidth);
+    const lead = computeLeadHandPosition(pose, params.handedness ?? null);
+    const avg = computeHandPositionAverage(pose);
+    let candidate: { x: number; y: number; conf: number } | null = null;
+    if (lw && rw) {
+      candidate = { x: (lw.x + rw.x) / 2, y: (lw.y + rw.y) / 2, conf: 1.0 };
+    } else if (lead) {
+      candidate = { x: lead.x, y: lead.y, conf: 0.85 };
+    } else if (avg) {
+      candidate = { x: avg.x, y: avg.y, conf: 0.75 };
+    } else if ((lw || rw) && shoulderMid) {
+      const w = lw ?? rw!;
+      candidate = {
+        x: w.x + (shoulderMid.x - w.x) * 0.15,
+        y: w.y + (shoulderMid.y - w.y) * 0.15,
+        conf: 0.6,
+      };
+    }
+    if (!candidate) {
+      raw.push(null);
+      filtered.push(null);
+      continue;
+    }
+    raw.push({
+      x: candidate.x,
+      y: candidate.y,
+      conf: candidate.conf,
+      phase: meta.phase,
+      frameIndex: meta.frameIndex,
+      timestampSec: meta.timestampSec,
+    });
+    filtered.push({
+      x: candidate.x,
+      y: candidate.y,
+      conf: candidate.conf,
+      phase: meta.phase,
+      frameIndex: meta.frameIndex,
+      timestampSec: meta.timestampSec,
+    });
+  }
+  const shoulderWidthMedianRaw = shoulderWidths.length ? shoulderWidths.sort((a, b) => a - b)[Math.floor(shoulderWidths.length / 2)]! : null;
+  const shoulderWidthMedian =
+    shoulderWidthMedianRaw && Number.isFinite(shoulderWidthMedianRaw)
+      ? clamp(shoulderWidthMedianRaw, 0.12, 0.35)
+      : null;
+  let roiRejected = 0;
+  let speedRejected = 0;
+  let accelRejected = 0;
+  let prevValid: { x: number; y: number; frameIndex: number; timestampSec?: number } | null = null;
+  let prevPrevValid: { x: number; y: number; frameIndex: number; timestampSec?: number } | null = null;
+  for (let i = 0; i < filtered.length; i += 1) {
+    const cur = filtered[i];
+    if (!cur) continue;
+    const pose = params.poseByIdx.get(i) ?? null;
+    const ls = readPosePoint(pose, ["leftShoulder", "left_shoulder"]);
+    const rs = readPosePoint(pose, ["rightShoulder", "right_shoulder"]);
+    const lh = readPosePoint(pose, ["leftHip", "left_hip"]);
+    const rh = readPosePoint(pose, ["rightHip", "right_hip"]);
+    const shoulderMid = ls && rs ? { x: (ls.x + rs.x) / 2, y: (ls.y + rs.y) / 2 } : null;
+    const hipMid = lh && rh ? { x: (lh.x + rh.x) / 2, y: (lh.y + rh.y) / 2 } : null;
+    const torsoMid = shoulderMid && hipMid ? { x: (shoulderMid.x + hipMid.x) / 2, y: (shoulderMid.y + hipMid.y) / 2 } : shoulderMid ?? hipMid;
+    const shoulderWidth = ls && rs ? Math.hypot(ls.x - rs.x, ls.y - rs.y) : shoulderWidthMedian;
+    const swBase = shoulderWidth ? clamp(shoulderWidth, 0.12, 0.35) : shoulderWidthMedian ?? 0.18;
+    if (torsoMid && swBase) {
+      const confScale = cur.conf < 1 ? 0.9 : 1;
+      const R = swBase * 2.2 * confScale + 0.04;
+      const d = Math.hypot(cur.x - torsoMid.x, cur.y - torsoMid.y);
+      const yMin = torsoMid.y - swBase * 1.2 * confScale;
+      const yMax = torsoMid.y + swBase * 2.2 * confScale;
+      if (d > R || cur.y < yMin || cur.y > yMax) {
+        filtered[i] = null;
+        roiRejected += 1;
+        continue;
+      }
+    }
+    if (prevValid) {
+      const dt = Math.max(
+        1 / fps,
+        typeof cur.timestampSec === "number" && typeof prevValid.timestampSec === "number"
+          ? Math.max(0.0001, cur.timestampSec - prevValid.timestampSec)
+          : 1 / fps
+      );
+      const dist = Math.hypot(cur.x - prevValid.x, cur.y - prevValid.y);
+      const sw = shoulderWidth ? clamp(shoulderWidth, 0.12, 0.35) : shoulderWidthMedian ?? 0.18;
+      const confScale = cur.conf < 1 ? 0.85 : 1;
+      const speed = dist / dt;
+      const maxSpeed = sw * 10.0 * confScale;
+      if (speed > maxSpeed) {
+        filtered[i] = null;
+        speedRejected += 1;
+        continue;
+      }
+      if (prevPrevValid) {
+        const dtPrev = Math.max(
+          1 / fps,
+          typeof prevValid.timestampSec === "number" && typeof prevPrevValid.timestampSec === "number"
+            ? Math.max(0.0001, prevValid.timestampSec - prevPrevValid.timestampSec)
+            : 1 / fps
+        );
+        const v1 = Math.hypot(prevValid.x - prevPrevValid.x, prevValid.y - prevPrevValid.y) / dtPrev;
+        const v2 = speed;
+        const baseAccel = (sw) * 40.0 * confScale;
+        if (Math.abs(v2 - v1) > baseAccel) {
+          filtered[i] = null;
+          accelRejected += 1;
+          continue;
+        }
+      }
+    }
+    prevPrevValid = prevValid;
+    prevValid = { x: cur.x, y: cur.y, frameIndex: cur.frameIndex, timestampSec: cur.timestampSec };
+  }
+  const validIdx = filtered.map((p, idx) => (p ? idx : -1)).filter((idx) => idx >= 0);
+  if (validIdx.length < 2) return null;
+  const smoothed: Array<{ x: number; y: number; phase: "backswing" | "top" | "downswing" | "impact"; frameIndex: number; timestampSec?: number }> = new Array(params.frameCount);
+  const validSeq = validIdx.map((idx) => ({ idx, point: filtered[idx]! }));
+  validSeq.forEach((item, seqIdx) => {
+    const neighbors: Array<{ x: number; y: number; weight: number }> = [];
+    for (let offset = -1; offset <= 1; offset += 1) {
+      const entry = validSeq[seqIdx + offset];
+      if (!entry) continue;
+      neighbors.push({ x: entry.point.x, y: entry.point.y, weight: entry.point.conf });
+    }
+    const weightSum = neighbors.reduce((acc, n) => acc + n.weight, 0) || 1;
+    const avg = neighbors.reduce(
+      (acc, n) => ({ x: acc.x + n.x * n.weight, y: acc.y + n.y * n.weight }),
+      { x: 0, y: 0 }
+    );
+    smoothed[item.idx] = {
+      x: avg.x / weightSum,
+      y: avg.y / weightSum,
+      phase: item.point.phase,
+      frameIndex: item.point.frameIndex,
+      timestampSec: item.point.timestampSec,
+    };
+  });
+  let interpolatedCount = 0;
+  const getPoint = (idx: number) => smoothed[idx];
+  const catmullRom = (p0: { x: number; y: number }, p1: { x: number; y: number }, p2: { x: number; y: number }, p3: { x: number; y: number }, t: number) => {
+    const t2 = t * t;
+    const t3 = t2 * t;
+    return {
+      x: 0.5 * ((2 * p1.x) + (-p0.x + p2.x) * t + (2 * p0.x - 5 * p1.x + 4 * p2.x - p3.x) * t2 + (-p0.x + 3 * p1.x - 3 * p2.x + p3.x) * t3),
+      y: 0.5 * ((2 * p1.y) + (-p0.y + p2.y) * t + (2 * p0.y - 5 * p1.y + 4 * p2.y - p3.y) * t2 + (-p0.y + 3 * p1.y - 3 * p2.y + p3.y) * t3),
+    };
+  };
+  for (let i = 0; i < validIdx.length - 1; i += 1) {
+    const i1 = validIdx[i]!;
+    const i2 = validIdx[i + 1]!;
+    if (i2 - i1 <= 1) continue;
+    const p1 = getPoint(i1)!;
+    const p2 = getPoint(i2)!;
+    const p0 = getPoint(validIdx[i - 1] ?? i1) ?? p1;
+    const p3 = getPoint(validIdx[i + 2] ?? i2) ?? p2;
+    for (let j = i1 + 1; j < i2; j += 1) {
+      const t = (j - i1) / (i2 - i1);
+      const interp = catmullRom(p0, p1, p2, p3, t);
+      const meta = params.metaByIdxPose.get(j);
+      if (!meta) continue;
+      smoothed[j] = { x: clamp(interp.x, 0, 1), y: clamp(interp.y, 0, 1), phase: meta.phase, frameIndex: meta.frameIndex, timestampSec: meta.timestampSec };
+      interpolatedCount += 1;
+    }
+  }
+  const firstIdx = validIdx[0]!;
+  const lastIdx = validIdx[validIdx.length - 1]!;
+  const firstPoint = smoothed[firstIdx]!;
+  const lastPoint = smoothed[lastIdx]!;
+  for (let i = 0; i < params.frameCount; i += 1) {
+    if (smoothed[i]) continue;
+    const meta = params.metaByIdxPose.get(i);
+    if (!meta) continue;
+    if (i < firstIdx) {
+      smoothed[i] = { ...firstPoint, phase: meta.phase, frameIndex: meta.frameIndex, timestampSec: meta.timestampSec };
+    } else if (i > lastIdx) {
+      smoothed[i] = { ...lastPoint, phase: meta.phase, frameIndex: meta.frameIndex, timestampSec: meta.timestampSec };
+    }
+  }
+  const compact = smoothed.filter(
+    (p): p is { x: number; y: number; phase: "backswing" | "top" | "downswing" | "impact"; frameIndex: number; timestampSec?: number } => !!p
+  );
+  const finalSmooth = compact.length >= 4 ? smoothTrace(compact) : compact;
+  const downswing = finalSmooth.filter((p) => p.phase === "downswing" || p.phase === "impact");
+  return {
+    raw,
+    filtered,
+    smoothed: finalSmooth,
+    downswing,
+    debug: {
+      fps,
+      rawCount: raw.filter(Boolean).length,
+      filteredCount: filtered.filter(Boolean).length,
+      interpolatedCount,
+      roiRejected,
+      speedRejected,
+      accelRejected,
+      shoulderWidthMedian: shoulderWidthMedian ?? null,
+    },
+  };
+}
+
+function filterTraceOutliers(
+  points: Array<{ x: number; y: number; phase?: string; frameIndex?: number; timestampSec?: number }>
+): {
+  filtered: Array<{ x: number; y: number; phase?: string; frameIndex?: number; timestampSec?: number }>;
+  removed: number;
+  threshold: number;
+} {
+  if (points.length < 4) return { filtered: points, removed: 0, threshold: 0 };
+  const dists: number[] = [];
+  for (let i = 1; i < points.length; i += 1) {
+    const a = points[i - 1]!;
+    const b = points[i]!;
+    dists.push(Math.hypot(b.x - a.x, b.y - a.y));
+  }
+  const sorted = [...dists].sort((a, b) => a - b);
+  const median = sorted.length ? sorted[Math.floor(sorted.length / 2)]! : 0;
+  const threshold = Math.max(0.06, median * 3);
+  const keep = new Array(points.length).fill(true);
+  for (let i = 1; i < points.length - 1; i += 1) {
+    const prev = points[i - 1]!;
+    const cur = points[i]!;
+    const next = points[i + 1]!;
+    const phase = String(cur.phase ?? "");
+    if (phase === "downswing" || phase === "impact" || phase === "top") continue;
+    const dPrev = Math.hypot(cur.x - prev.x, cur.y - prev.y);
+    const dNext = Math.hypot(next.x - cur.x, next.y - cur.y);
+    if (dPrev > threshold && dNext > threshold) keep[i] = false;
+  }
+  if (points.length > 2) {
+    const first = Math.hypot(points[1]!.x - points[0]!.x, points[1]!.y - points[0]!.y);
+    const firstPhase = String(points[0]!.phase ?? "");
+    if (firstPhase !== "downswing" && firstPhase !== "impact" && firstPhase !== "top" && first > threshold * 1.5) {
+      keep[0] = false;
+    }
+    const last = Math.hypot(
+      points[points.length - 1]!.x - points[points.length - 2]!.x,
+      points[points.length - 1]!.y - points[points.length - 2]!.y
+    );
+    const lastPhase = String(points[points.length - 1]!.phase ?? "");
+    if (lastPhase !== "downswing" && lastPhase !== "impact" && lastPhase !== "top" && last > threshold * 1.5) {
+      keep[points.length - 1] = false;
+    }
+  }
+  const filtered = points.filter((_, idx) => keep[idx]);
+  return {
+    filtered: filtered.length >= 2 ? filtered : points,
+    removed: points.length - filtered.length,
+    threshold,
+  };
+}
+
+function buildTraceFitLine(trace: Array<{ x: number; y: number; phase?: string }>): { line: PlaneLine01; unique: number; spread: number } | null {
+  if (!trace.length) return null;
+  const filtered = trace.filter((p) => p && Number.isFinite(p.x) && Number.isFinite(p.y));
+  if (filtered.length < 2) return null;
+  const phaseDown = filtered.filter((p) => String(p.phase ?? "").includes("down") || String(p.phase ?? "").includes("impact"));
+  const phaseTop = filtered.filter((p) => String(p.phase ?? "").includes("top"));
+  const phaseImpact = filtered.filter((p) => String(p.phase ?? "").includes("impact"));
+  const downCandidates = phaseDown.map((p) => ({ x: p.x, y: p.y }));
+  const downUnique = countTraceUnique(downCandidates, 0.01);
+  const downSpread = computeTraceSpread(downCandidates);
+  const useDownOnly = downCandidates.length >= 3 && downUnique >= 3 && downSpread >= 0.04;
+  const topPoint = medianOf(phaseTop.map((p) => ({ x: p.x, y: p.y })));
+  const impactPoint = medianOf(phaseImpact.map((p) => ({ x: p.x, y: p.y })));
+  if (!useDownOnly && topPoint && impactPoint) {
+    const dir = { x: impactPoint.x - topPoint.x, y: impactPoint.y - topPoint.y };
+    const line = buildLineThroughUnitBox({ anchor: topPoint, dir });
+    if (line) {
+      return { line, unique: 2, spread: Math.hypot(dir.x, dir.y) };
+    }
+  }
+  const candidates = (useDownOnly ? downCandidates : [...phaseTop, ...phaseDown, ...filtered]).map((p) => ({ x: p.x, y: p.y }));
+  if (candidates.length < 2) return null;
+  const unique = countTraceUnique(candidates, 0.01);
+  const spread = computeTraceSpread(candidates);
+  if (unique < 2 || spread < 0.02) return null;
+  const line = buildBestFitLine01(candidates);
+  if (!line) return null;
+  return { line, unique, spread };
+}
+
 function toPosePoint(value: unknown): { x: number; y: number } | null {
   const normalize = (n: number) => clamp(Math.abs(n) > 1.5 ? n / 100 : n, 0, 1);
   if (!value) return null;
@@ -103,7 +642,7 @@ function readPosePoint(pose: Record<string, unknown> | null | undefined, names: 
   return null;
 }
 
-function computeHandPosition(pose?: Record<string, unknown> | null): { x: number; y: number } | null {
+function computeHandPositionAverage(pose?: Record<string, unknown> | null): { x: number; y: number } | null {
   const lw = readPosePoint(pose, ["leftWrist", "left_wrist", "leftHand", "left_hand"]);
   const rw = readPosePoint(pose, ["rightWrist", "right_wrist", "rightHand", "right_hand"]);
   if (lw && rw) return { x: (lw.x + rw.x) / 2, y: (lw.y + rw.y) / 2 };
@@ -124,6 +663,42 @@ function computeHandPosition(pose?: Record<string, unknown> | null): { x: number
   const rh = readPosePoint(pose, ["rightHip", "right_hip"]);
   if (lh && rh) return { x: (lh.x + rh.x) / 2, y: (lh.y + rh.y) / 2 };
   return lh || rh || null;
+}
+
+function computeLeadHandPosition(
+  pose?: Record<string, unknown> | null,
+  handedness?: "left" | "right" | null
+): { x: number; y: number } | null {
+  if (!handedness) return computeHandPositionAverage(pose);
+  const lw = readPosePoint(pose, ["leftWrist", "left_wrist", "leftHand", "left_hand"]);
+  const rw = readPosePoint(pose, ["rightWrist", "right_wrist", "rightHand", "right_hand"]);
+  const primaryWrist = handedness === "left" ? rw : lw;
+  const secondaryWrist = handedness === "left" ? lw : rw;
+  if (primaryWrist) return primaryWrist;
+  if (secondaryWrist) return secondaryWrist;
+
+  // Fallbacks when wrists are occluded/blurred: elbows -> shoulders -> hips.
+  const le = readPosePoint(pose, ["leftElbow", "left_elbow"]);
+  const re = readPosePoint(pose, ["rightElbow", "right_elbow"]);
+  const primaryElbow = handedness === "left" ? re : le;
+  const secondaryElbow = handedness === "left" ? le : re;
+  if (primaryElbow) return primaryElbow;
+  if (secondaryElbow) return secondaryElbow;
+
+  const ls = readPosePoint(pose, ["leftShoulder", "left_shoulder"]);
+  const rs = readPosePoint(pose, ["rightShoulder", "right_shoulder"]);
+  const primaryShoulder = handedness === "left" ? rs : ls;
+  const secondaryShoulder = handedness === "left" ? ls : rs;
+  if (primaryShoulder) return primaryShoulder;
+  if (secondaryShoulder) return secondaryShoulder;
+
+  const lh = readPosePoint(pose, ["leftHip", "left_hip"]);
+  const rh = readPosePoint(pose, ["rightHip", "right_hip"]);
+  const primaryHip = handedness === "left" ? rh : lh;
+  const secondaryHip = handedness === "left" ? lh : rh;
+  if (primaryHip) return primaryHip;
+  if (secondaryHip) return secondaryHip;
+  return null;
 }
 
 function toShaftVector(value: unknown): { x: number; y: number } | null {
@@ -219,6 +794,14 @@ function medianOf(points: Array<{ x: number; y: number }>): { x: number; y: numb
   const x = xs.length % 2 ? xs[mid]! : (xs[mid - 1]! + xs[mid]!) / 2;
   const y = ys.length % 2 ? ys[mid]! : (ys[mid - 1]! + ys[mid]!) / 2;
   return { x: clamp(x, 0, 1), y: clamp(y, 0, 1) };
+}
+
+function medianOfPhase(
+  trace: Array<{ x: number; y: number; phase?: string | null }>,
+  phase: "backswing" | "top" | "downswing" | "impact"
+): { x: number; y: number } | null {
+  const pts = trace.filter((p) => String(p.phase ?? "").includes(phase)).map((p) => ({ x: p.x, y: p.y }));
+  return medianOf(pts);
 }
 
 function averageUnitDirections(vectors: Array<{ x: number; y: number }>): { x: number; y: number } | null {
@@ -493,7 +1076,7 @@ function buildOverrideSig(indices: {
   return `ad:${join(indices.address)}|bs:${join(indices.backswing)}|top:${join(indices.top)}|ds:${join(indices.downswing)}|imp:${join(indices.impact)}|fin:${join(indices.finish)}`;
 }
 
-const PHASE_REEVAL_VERSION = "v2025-12-31-address-clubhead-zone-v68-address-frame-v6-hip-cap";
+const PHASE_REEVAL_VERSION = "v2025-12-31-address-clubhead-zone-v68-address-frame-v6-hip-cap-hand-trace-v40";
 
 async function judgeOutsideIn(frames: PhaseFrame[], args: { handedness?: string; clubType?: string; level?: string }): Promise<OutsideInJudge> {
   if (!frames.length) return null;
@@ -790,8 +1373,21 @@ async function analyzeSinglePhase(
   return postprocessSinglePhaseResult({ phaseLabel: args.phaseLabel, result: parseSinglePhaseResult(parsed) });
 }
 
+async function analyzeSinglePhaseSafe(
+  frames: PhaseFrame[],
+  args: { phaseLabel: string; handedness?: string; clubType?: string; level?: string }
+): Promise<ReturnType<typeof analyzeSinglePhase> | null> {
+  try {
+    return await analyzeSinglePhase(frames, args);
+  } catch (err) {
+    console.error("[reanalyze-phases] analyzeSinglePhase failed", args.phaseLabel, err);
+    return null;
+  }
+}
+
 async function extractGripCentersFromFrames(params: {
   frames: PhaseFrame[];
+  strict?: boolean;
 }): Promise<Array<{ idx: number; grip: { x: number; y: number } | null }>> {
   // NOTE: We avoid askVisionAPI here because its system prompt is tuned for Japanese "analysis".
   // This is a strict extraction call with a dedicated system instruction for stability.
@@ -818,6 +1414,7 @@ Rules:
 - Do NOT reuse the same coordinates across frames; estimate each frame independently.
 - If the grip is visible but blurry, still estimate (do not return null).
 - Keep all x,y within [0,1].
+${params.strict ? "- IMPORTANT: If you output identical coordinates across many frames, the output is considered invalid. Use subtle movement if needed." : ""}
 
 Return JSON only:
 { "frames": [ { "idx": 0, "grip_point": { "x": 0.0, "y": 0.0 } | null }, ... ] }`;
@@ -847,7 +1444,9 @@ Return JSON only:
     response_format: { type: "json_object" },
   });
 
-  const structured = result.choices?.[0]?.message?.content ?? null;
+  // Prefer parsed when available (response_format can populate it).
+  const structured = (result as unknown as { choices?: Array<{ message?: { parsed?: unknown; content?: unknown } }> })
+    ?.choices?.[0]?.message?.parsed ?? result.choices?.[0]?.message?.content ?? null;
   const parsed =
     typeof structured === "string"
       ? (() => {
@@ -974,6 +1573,41 @@ async function refineGripCentersWithRoi(params: {
     refinedCount,
     refinedFrames: croppedFrames.length,
   };
+}
+
+async function refineGripCentersWithHints(params: {
+  frames: PhaseFrame[];
+  hints: Array<{ idx: number; point: { x: number; y: number } }>;
+  cropScale?: number;
+}): Promise<Array<{ idx: number; grip: { x: number; y: number } | null }>> {
+  const { frames, hints } = params;
+  if (!frames.length || !hints.length) return [];
+  const croppedFrames: PhaseFrame[] = [];
+  const croppedMeta: Array<{ idx: number; roi: RoiBox }> = [];
+  for (const hint of hints) {
+    const frame = frames[hint.idx];
+    if (!frame) continue;
+    const cropScale = clamp(params.cropScale ?? 0.5, 0.3, 0.8);
+    const cropped = await cropFrameAroundPoint(frame, hint.point, cropScale);
+    if (!cropped) continue;
+    croppedFrames.push(cropped.frame);
+    croppedMeta.push({ idx: hint.idx, roi: cropped.roi });
+  }
+  if (!croppedFrames.length) return [];
+  const roiResults = await extractGripCentersFromFrames({ frames: croppedFrames, strict: true });
+  const refined: Array<{ idx: number; grip: { x: number; y: number } | null }> = [];
+  roiResults.forEach((res, i) => {
+    const meta = croppedMeta[i];
+    if (!meta || !res?.grip) return;
+    refined.push({
+      idx: meta.idx,
+      grip: {
+        x: clamp(meta.roi.x + meta.roi.w * res.grip.x, 0, 1),
+        y: clamp(meta.roi.y + meta.roi.h * res.grip.y, 0, 1),
+      },
+    });
+  });
+  return refined;
 }
 
 function pickBestConfidence(values: Array<"high" | "medium" | "low">): "high" | "medium" | "low" {
@@ -2282,7 +2916,16 @@ async function detectClubheadByPcaShaftTipInRoi(
 
 export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisResponse | { error: string }>> {
   const body = (await req.json().catch(() => null)) as
-    | { analysisId?: string; address?: unknown; backswing?: unknown; top?: unknown; downswing?: unknown; impact?: unknown; finish?: unknown }
+    | {
+        analysisId?: string;
+        address?: unknown;
+        backswing?: unknown;
+        top?: unknown;
+        downswing?: unknown;
+        impact?: unknown;
+        finish?: unknown;
+        onPlaneOnly?: unknown;
+      }
     | null;
   const analysisIdRaw = body?.analysisId ?? null;
   if (!isValidAnalysisId(analysisIdRaw)) {
@@ -2296,6 +2939,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
   const downswingIndices = normalizeIndices(body?.downswing);
   const impactIndices = normalizeIndices(body?.impact);
   const finishIndices = normalizeIndices(body?.finish);
+  const onPlaneOnly = body?.onPlaneOnly === true;
 
   if (!addressIndices.length && !backswingIndices.length && !topIndices.length && !downswingIndices.length && !impactIndices.length && !finishIndices.length) {
     return json({ error: "no overrides" }, { status: 400 });
@@ -2314,6 +2958,8 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
         ? addressIndices[0]!
         : null;
   const effectiveAddressIndices = fixedAddressIndex ? [fixedAddressIndex] : addressIndices;
+  const storedPhaseOverrides = stored.meta?.phaseOverrideFrames ?? null;
+  const resolvePhaseIndices = (current: number[], fallback?: number[] | null) => (current.length ? current : normalizeIndices(fallback));
 
   const requestedOverrideSig = buildOverrideSig({
     address: effectiveAddressIndices,
@@ -2326,7 +2972,12 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
 
   // If the override set is unchanged, return the stored result as-is to prevent
   // re-evaluation jitter (vision outputs can vary even with the same frames).
-  if (stored?.result && stored?.meta?.phaseOverrideSig === requestedOverrideSig && stored?.meta?.phaseReevalVersion === PHASE_REEVAL_VERSION) {
+  if (
+    !onPlaneOnly &&
+    stored?.result &&
+    stored?.meta?.phaseOverrideSig === requestedOverrideSig &&
+    stored?.meta?.phaseReevalVersion === PHASE_REEVAL_VERSION
+  ) {
     const res = json(
       {
         analysisId,
@@ -2379,143 +3030,392 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
   let onPlaneUpdate: Record<string, unknown> | null = null;
 
   try {
-    if (effectiveAddressIndices.length) {
-      const picked = pickFrames(effectiveAddressIndices);
-      if (!picked.length) return json({ error: "invalid address frames" }, { status: 400 });
-      phaseUpdates.address = await analyzeSinglePhase(picked, {
-        phaseLabel: "アドレス",
-        handedness: meta?.handedness,
-        clubType: meta?.clubType,
-        level: meta?.level,
-      });
-    }
-    if (backswingIndices.length) {
-      const picked = pickFrames(backswingIndices);
-      if (!picked.length) return json({ error: "invalid backswing frames" }, { status: 400 });
-      phaseUpdates.backswing = await analyzeSinglePhase(picked, {
-        phaseLabel: "バックスイング",
-        handedness: meta?.handedness,
-        clubType: meta?.clubType,
-        level: meta?.level,
-      });
-    }
-    if (topIndices.length) {
-      const picked = pickFrames(topIndices);
-      if (!picked.length) return json({ error: "invalid top frames" }, { status: 400 });
-      phaseUpdates.top = await analyzeSinglePhase(picked, {
-        phaseLabel: "トップ",
-        handedness: meta?.handedness,
-        clubType: meta?.clubType,
-        level: meta?.level,
-      });
-    }
-    if (downswingIndices.length) {
-      const picked = pickFrames(downswingIndices);
-      if (!picked.length) return json({ error: "invalid downswing frames" }, { status: 400 });
-      const downswingResult = await analyzeSinglePhase(picked, {
-        phaseLabel: "ダウンスイング",
-        handedness: meta?.handedness,
-        clubType: meta?.clubType,
-        level: meta?.level,
-      });
-      // Judge outside-in with a bit more context (Top/Impact) when available.
-      const outsideInFrames: PhaseFrame[] = [
-        ...(topIndices.length ? pickFrames(topIndices).slice(-2) : []),
-        ...picked,
-        ...(impactIndices.length ? pickFrames(impactIndices).slice(0, 2) : []),
-      ].slice(0, 8);
-      const outsideInJudge = await judgeOutsideIn(outsideInFrames.length ? outsideInFrames : picked, {
-        handedness: meta?.handedness,
-        clubType: meta?.clubType,
-        level: meta?.level,
-      });
-      if (outsideInJudge?.value === true) {
-        if (outsideInJudge.confidence === "high") {
-          downswingResult.issues = Array.from(new Set(["アウトサイドイン（確定）", ...downswingResult.issues])).slice(0, 4);
-          downswingResult.issues = downswingResult.issues.filter((t) => !/外から入りやすい傾向/.test(t));
-          downswingResult.score = Math.min(downswingResult.score, 8);
+    if (!onPlaneOnly) {
+      if (effectiveAddressIndices.length) {
+        const picked = pickFrames(effectiveAddressIndices);
+        if (!picked.length) return json({ error: "invalid address frames" }, { status: 400 });
+        const res = await analyzeSinglePhaseSafe(picked, {
+          phaseLabel: "アドレス",
+          handedness: meta?.handedness,
+          clubType: meta?.clubType,
+          level: meta?.level,
+        });
+        if (res) phaseUpdates.address = res;
+      }
+      if (backswingIndices.length) {
+        const picked = pickFrames(backswingIndices);
+        if (!picked.length) return json({ error: "invalid backswing frames" }, { status: 400 });
+        const res = await analyzeSinglePhaseSafe(picked, {
+          phaseLabel: "バックスイング",
+          handedness: meta?.handedness,
+          clubType: meta?.clubType,
+          level: meta?.level,
+        });
+        if (res) phaseUpdates.backswing = res;
+      }
+      if (topIndices.length) {
+        const picked = pickFrames(topIndices);
+        if (!picked.length) return json({ error: "invalid top frames" }, { status: 400 });
+        const res = await analyzeSinglePhaseSafe(picked, {
+          phaseLabel: "トップ",
+          handedness: meta?.handedness,
+          clubType: meta?.clubType,
+          level: meta?.level,
+        });
+        if (res) phaseUpdates.top = res;
+      }
+      if (downswingIndices.length) {
+        const picked = pickFrames(downswingIndices);
+        if (!picked.length) return json({ error: "invalid downswing frames" }, { status: 400 });
+        const downswingResult = await analyzeSinglePhaseSafe(picked, {
+          phaseLabel: "ダウンスイング",
+          handedness: meta?.handedness,
+          clubType: meta?.clubType,
+          level: meta?.level,
+        });
+        if (!downswingResult) {
+          // Skip downswing updates if the vision call failed.
         } else {
-          if (!downswingResult.issues.some((t) => /外から入りやすい傾向/.test(t))) {
-            downswingResult.issues = ["外から入りやすい傾向", ...downswingResult.issues].slice(0, 4);
+          // Judge outside-in with a bit more context (Top/Impact) when available.
+          const outsideInFrames: PhaseFrame[] = [
+            ...(topIndices.length ? pickFrames(topIndices).slice(-2) : []),
+            ...picked,
+            ...(impactIndices.length ? pickFrames(impactIndices).slice(0, 2) : []),
+          ].slice(0, 8);
+          const outsideInJudge = await judgeOutsideIn(outsideInFrames.length ? outsideInFrames : picked, {
+            handedness: meta?.handedness,
+            clubType: meta?.clubType,
+            level: meta?.level,
+          });
+          if (outsideInJudge?.value === true) {
+          if (outsideInJudge.confidence === "high") {
+            downswingResult.issues = Array.from(new Set(["アウトサイドイン（確定）", ...downswingResult.issues])).slice(0, 4);
+            downswingResult.issues = downswingResult.issues.filter((t) => !/外から入りやすい傾向/.test(t));
+            downswingResult.score = Math.min(downswingResult.score, 8);
+          } else {
+            if (!downswingResult.issues.some((t) => /外から入りやすい傾向/.test(t))) {
+              downswingResult.issues = ["外から入りやすい傾向", ...downswingResult.issues].slice(0, 4);
+            }
+            downswingResult.issues = downswingResult.issues.filter((t) => !/（確定）/.test(t));
+            downswingResult.score = Math.min(downswingResult.score, 12);
           }
-          downswingResult.issues = downswingResult.issues.filter((t) => !/（確定）/.test(t));
-          downswingResult.score = Math.min(downswingResult.score, 12);
-        }
-      } else if (outsideInJudge?.value === false && outsideInJudge.confidence === "high") {
-        // If judged as NOT outside-in, remove the tendency wording to avoid false negatives (e.g., elite swings).
-        downswingResult.issues = downswingResult.issues.filter((t) => !/アウトサイドイン|外から入りやすい傾向|外から下り|カット軌道|上から/.test(t));
-        const goodCount = downswingResult.good.filter((t) => t.trim().length > 0).length;
-        if (!downswingResult.issues.length && goodCount >= 2) {
-          downswingResult.score = Math.max(downswingResult.score, 18);
+          } else if (outsideInJudge?.value === false && outsideInJudge.confidence === "high") {
+          // If judged as NOT outside-in, remove the tendency wording to avoid false negatives (e.g., elite swings).
+          downswingResult.issues = downswingResult.issues.filter((t) => !/アウトサイドイン|外から入りやすい傾向|外から下り|カット軌道|上から/.test(t));
+          const goodCount = downswingResult.good.filter((t) => t.trim().length > 0).length;
+          if (!downswingResult.issues.length && goodCount >= 2) {
+            downswingResult.score = Math.max(downswingResult.score, 18);
+          }
+          }
+          phaseUpdates.downswing = downswingResult;
         }
       }
-      phaseUpdates.downswing = downswingResult;
-    }
-    if (impactIndices.length) {
-      const picked = pickFrames(impactIndices);
-      if (!picked.length) return json({ error: "invalid impact frames" }, { status: 400 });
-      phaseUpdates.impact = await analyzeSinglePhase(picked, {
-        phaseLabel: "インパクト",
-        handedness: meta?.handedness,
-        clubType: meta?.clubType,
-        level: meta?.level,
-      });
-    }
-    if (finishIndices.length) {
-      const picked = pickFrames(finishIndices);
-      if (!picked.length) return json({ error: "invalid finish frames" }, { status: 400 });
-      phaseUpdates.finish = await analyzeSinglePhase(picked, {
-        phaseLabel: "フィニッシュ",
-        handedness: meta?.handedness,
-        clubType: meta?.clubType,
-        level: meta?.level,
-      });
+      if (impactIndices.length) {
+        const picked = pickFrames(impactIndices);
+        if (!picked.length) return json({ error: "invalid impact frames" }, { status: 400 });
+        const res = await analyzeSinglePhaseSafe(picked, {
+          phaseLabel: "インパクト",
+          handedness: meta?.handedness,
+          clubType: meta?.clubType,
+          level: meta?.level,
+        });
+        if (res) phaseUpdates.impact = res;
+      }
+      if (finishIndices.length) {
+        const picked = pickFrames(finishIndices);
+        if (!picked.length) return json({ error: "invalid finish frames" }, { status: 400 });
+        const res = await analyzeSinglePhaseSafe(picked, {
+          phaseLabel: "フィニッシュ",
+          handedness: meta?.handedness,
+          clubType: meta?.clubType,
+          level: meta?.level,
+        });
+        if (res) phaseUpdates.finish = res;
+      }
     }
 
             // On-plane: use the same user-selected phase frames (Top/Downswing/Impact) as evidence.
     // This allows older analyses (without on_plane in the original result JSON) to be backfilled on reevaluation.
-		    if (topIndices.length && downswingIndices.length && impactIndices.length) {
-		      const addressFrames = effectiveAddressIndices.length ? pickFramesWithIndex(effectiveAddressIndices.slice(0, 1)) : [];
-		      const backswingFrames = backswingIndices.length ? pickFramesWithIndex(backswingIndices.slice(0, 2)) : [];
-		      const topFrames = pickFramesWithIndex(topIndices.slice(0, 6));
-		      const dsFrames = pickFramesWithIndex(downswingIndices.slice(0, 8));
-		      const impFrames = pickFramesWithIndex(impactIndices.slice(0, 6));
+		    const onPlaneAddressIndices = resolvePhaseIndices(effectiveAddressIndices, storedPhaseOverrides?.address);
+		    const onPlaneBackswingIndices = resolvePhaseIndices(backswingIndices, storedPhaseOverrides?.backswing);
+		    const onPlaneTopIndices = resolvePhaseIndices(topIndices, storedPhaseOverrides?.top);
+		    const onPlaneDownswingIndices = resolvePhaseIndices(downswingIndices, storedPhaseOverrides?.downswing);
+		    const onPlaneImpactIndices = resolvePhaseIndices(impactIndices, storedPhaseOverrides?.impact);
+		    const onPlaneFinishIndices = resolvePhaseIndices(finishIndices, storedPhaseOverrides?.finish);
+		    const clampIndex = (n: number | null) => (n && Number.isFinite(n) ? Math.max(1, Math.min(frames.length, n)) : null);
+		    const rangeIndices = (start: number | null, end: number | null) => {
+		      if (!start || !end) return [];
+		      const s = clampIndex(start);
+		      const e = clampIndex(end);
+		      if (!s || !e) return [];
+		      const [from, to] = s <= e ? [s, e] : [e, s];
+		      const out: number[] = [];
+		      for (let i = from; i <= to; i += 1) out.push(i);
+		      return out;
+		    };
+		    const pickEvenly = <T,>(items: T[], maxCount: number): T[] => {
+		      if (items.length <= maxCount) return items;
+		      const out: T[] = [];
+		      const step = (items.length - 1) / Math.max(1, maxCount - 1);
+		      for (let i = 0; i < maxCount; i += 1) {
+		        out.push(items[Math.round(i * step)]!);
+		      }
+		      return out;
+		    };
+		    if (onPlaneTopIndices.length && onPlaneDownswingIndices.length && onPlaneImpactIndices.length) {
+		      const addressFrames = onPlaneAddressIndices.length ? pickFramesWithIndex(onPlaneAddressIndices.slice(0, 1)) : [];
+		      const backswingFrames = onPlaneBackswingIndices.length ? pickFramesWithIndex(onPlaneBackswingIndices.slice(0, 2)) : [];
+		      const topFrames = pickFramesWithIndex(onPlaneTopIndices.slice(0, 6));
+		      const dsFrames = pickFramesWithIndex(onPlaneDownswingIndices.slice(0, 8));
+		      const impFrames = pickFramesWithIndex(onPlaneImpactIndices.slice(0, 6));
+		      const addressIdx = clampIndex(onPlaneAddressIndices[0] ?? null) ?? clampIndex(onPlaneTopIndices[0] ?? null);
+		      const topIdx = clampIndex(onPlaneTopIndices[0] ?? null);
+		      const finishIdx =
+		        clampIndex(onPlaneFinishIndices[0] ?? null) ??
+		        clampIndex(onPlaneImpactIndices[onPlaneImpactIndices.length - 1] ?? null) ??
+		        clampIndex(onPlaneDownswingIndices[onPlaneDownswingIndices.length - 1] ?? null);
+		      const preTop = rangeIndices(addressIdx, topIdx);
+		      const postTop = rangeIndices(topIdx, finishIdx);
+		      const gripRangeIndices = Array.from(new Set([...preTop, ...postTop])).sort((a, b) => a - b);
+		      const gripFramesRange = gripRangeIndices.length ? pickFramesWithIndex(gripRangeIndices) : [];
 		      const framesForOnPlane = [...topFrames, ...dsFrames, ...impFrames].slice(0, 7);
 		      if (framesForOnPlane.length >= 3) {
 		        const prompt = buildOnPlanePrompt({ handedness: meta?.handedness, clubType: meta?.clubType, level: meta?.level });
-		        const raw = await askVisionAPI({ frames: framesForOnPlane, prompt });
-		        const parsed = parseOnPlane(raw);
+		        let parsed: ReturnType<typeof parseOnPlane> | null = null;
+		        try {
+		          const raw = await askVisionAPI({ frames: framesForOnPlane, prompt });
+		          parsed = parseOnPlane(raw);
+		        } catch (err) {
+		          console.error("[reanalyze-phases] on_plane vision failed", err);
+		          parsed = null;
+		        }
 	        const existingOnPlane = (stored.result as unknown as Record<string, unknown>)?.on_plane;
-	        const baseOnPlane =
-	          parsed ??
-	          (existingOnPlane && typeof existingOnPlane === "object"
-	            ? ({ ...(existingOnPlane as Record<string, unknown>) } as Record<string, unknown>)
-	            : null);
-	        if (baseOnPlane) onPlaneUpdate = baseOnPlane;
+	        const parsedOnPlane =
+	          parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : null;
+		        const baseOnPlane =
+		          parsedOnPlane ??
+		          (existingOnPlane && typeof existingOnPlane === "object"
+		            ? ({ ...(existingOnPlane as Record<string, unknown>) } as Record<string, unknown>)
+		            : null);
+		        if (baseOnPlane) onPlaneUpdate = baseOnPlane;
+
+		        if (!onPlaneUpdate) {
+		          onPlaneUpdate =
+		            existingOnPlane && typeof existingOnPlane === "object"
+		              ? ({ ...(existingOnPlane as Record<string, unknown>) } as Record<string, unknown>)
+		              : {};
+		        }
+
+		        const poseInputs = [...backswingFrames, ...topFrames, ...dsFrames, ...impFrames].slice(0, 16);
+		        const gripFramesForTrace = gripFramesRange.length ? gripFramesRange : poseInputs;
+		        const poseFramesForTrace = gripFramesRange.length
+		          ? pickEvenly(gripFramesRange, 24)
+		          : poseInputs.length
+		            ? poseInputs
+		            : gripFramesForTrace;
+		        const bsCount = Math.min(backswingFrames.length, 2);
+		        const topCount = Math.min(topFrames.length, 6);
+		        const dsCount = Math.min(dsFrames.length, 8);
+		        const metaByIdxGrip = new Map<number, { frameIndex: number; timestampSec: number | undefined; phase: "backswing" | "top" | "downswing" | "impact" }>();
+		        const metaByIdxPose = new Map<number, { frameIndex: number; timestampSec: number | undefined; phase: "backswing" | "top" | "downswing" | "impact" }>();
+		        const backswingIdx = clampIndex(onPlaneBackswingIndices[onPlaneBackswingIndices.length - 1] ?? null) ?? topIdx;
+		        const downswingIdx = clampIndex(onPlaneDownswingIndices[0] ?? null) ?? topIdx;
+		        const impactIdx = clampIndex(onPlaneImpactIndices[0] ?? null) ?? finishIdx;
+		        const gripIdxByFrameIndex = new Map<number, number>();
+		        gripFramesForTrace.forEach((src, idx) => {
+		          const frameNo = src.frameIndex;
+		          const mapped: "backswing" | "top" | "downswing" | "impact" =
+		            backswingIdx && frameNo <= backswingIdx
+		              ? "backswing"
+		              : topIdx && frameNo <= topIdx
+		                ? "top"
+		                : impactIdx && frameNo <= impactIdx
+		                  ? "downswing"
+		                  : "impact";
+		          metaByIdxGrip.set(idx, { frameIndex: src.frameIndex, timestampSec: src.timestampSec, phase: mapped });
+		          gripIdxByFrameIndex.set(src.frameIndex, idx);
+		        });
+		        poseFramesForTrace.forEach((src, idx) => {
+		          const frameNo = src.frameIndex;
+		          const mapped: "backswing" | "top" | "downswing" | "impact" =
+		            backswingIdx && frameNo <= backswingIdx
+		              ? "backswing"
+		              : topIdx && frameNo <= topIdx
+		                ? "top"
+		                : impactIdx && frameNo <= impactIdx
+		                  ? "downswing"
+		                  : "impact";
+		          metaByIdxPose.set(idx, { frameIndex: src.frameIndex, timestampSec: src.timestampSec, phase: mapped });
+		        });
+
+		        let gripTraceInfo: { trace: Array<{ x: number; y: number; frameIndex: number; timestampSec?: number; phase: "backswing" | "top" | "downswing" | "impact" }>; spread: number } | null = null;
+		        const addrGripAnchor = (() => {
+		          const fromUpdate =
+		            (onPlaneUpdate as Record<string, unknown>)?.grip_point &&
+		            typeof (onPlaneUpdate as Record<string, unknown>).grip_point === "object"
+		              ? normalizePoint01((onPlaneUpdate as Record<string, unknown>).grip_point)
+		              : null;
+		          if (fromUpdate) return fromUpdate;
+		          const fromExisting =
+		            existingOnPlane && typeof existingOnPlane === "object" && "grip_point" in (existingOnPlane as Record<string, unknown>)
+		              ? normalizePoint01((existingOnPlane as Record<string, unknown>).grip_point)
+		              : null;
+		          return fromExisting;
+		        })();
+		        let poseTraceInfo: {
+		          trace: Array<{ x: number; y: number; frameIndex: number; timestampSec?: number; phase: "backswing" | "top" | "downswing" | "impact" }>;
+		          unique: number;
+		          spread: number;
+		          source: "lead" | "avg" | "reconstruct";
+		        } | null = null;
+		        // Always try grip-based trace first so we can show hand path even when pose extraction is unavailable.
+		        try {
+		          const gripFrames = gripFramesForTrace.map((f) => ({ base64Image: f.base64Image, mimeType: f.mimeType, timestampSec: f.timestampSec }));
+		          const grips = await extractGripCentersFromFrames({ frames: gripFrames });
+		          const refined = await refineGripCentersWithRoi({ frames: gripFrames, initial: grips, anchor: addrGripAnchor });
+		          let gripsFinal = refined.refined;
+		          const gripTrace: Array<{ x: number; y: number; frameIndex: number; timestampSec?: number; phase: "backswing" | "top" | "downswing" | "impact" }> = [];
+		          gripsFinal.forEach((g) => {
+		            const meta = metaByIdxGrip.get(g.idx) ?? null;
+		            if (!meta || !g.grip) return;
+		            gripTrace.push({ x: g.grip.x, y: g.grip.y, frameIndex: meta.frameIndex, timestampSec: meta.timestampSec, phase: meta.phase });
+		          });
+		          gripTrace.sort((a, b) => (a.timestampSec ?? a.frameIndex) - (b.timestampSec ?? b.frameIndex));
+		          let gripSpread = computeTraceSpread(gripTrace);
+		          let gripUnique = countTraceUnique(gripTrace, 0.01);
+		          if (gripTrace.length >= 3 && (gripUnique <= 2 || gripSpread < 0.03)) {
+		            const strict = await extractGripCentersFromFrames({ frames: gripFrames, strict: true });
+		            const strictTrace: Array<{ x: number; y: number; frameIndex: number; timestampSec?: number; phase: "backswing" | "top" | "downswing" | "impact" }> = [];
+		            strict.forEach((g) => {
+		              const meta = metaByIdxGrip.get(g.idx) ?? null;
+		              if (!meta || !g.grip) return;
+		              strictTrace.push({ x: g.grip.x, y: g.grip.y, frameIndex: meta.frameIndex, timestampSec: meta.timestampSec, phase: meta.phase });
+		            });
+		            strictTrace.sort((a, b) => (a.timestampSec ?? a.frameIndex) - (b.timestampSec ?? b.frameIndex));
+		            const strictSpread = computeTraceSpread(strictTrace);
+		            const strictUnique = countTraceUnique(strictTrace, 0.01);
+		            if (strictUnique > gripUnique || (strictUnique === gripUnique && strictSpread > gripSpread)) {
+		              gripsFinal = strict;
+		              gripTrace.length = 0;
+		              strictTrace.forEach((p) => gripTrace.push(p));
+		              gripSpread = strictSpread;
+		              gripUnique = strictUnique;
+		              (onPlaneUpdate as Record<string, unknown>).pose_debug = {
+		                ...((onPlaneUpdate as Record<string, unknown>).pose_debug as Record<string, unknown> | undefined),
+		                grip_direct_retry_used: true,
+		                grip_direct_retry_unique: strictUnique,
+		                grip_direct_retry_spread: strictSpread,
+		              };
+		            }
+		          }
+		          if (gripTrace.length >= 3 && (gripUnique <= 2 || gripSpread < 0.03)) {
+		            const forceIndices = gripFrames.map((_, idx) => idx);
+		            const forced = await refineGripCentersWithRoi({
+		              frames: gripFrames,
+		              initial: gripsFinal,
+		              anchor: addrGripAnchor ?? medianOf(gripTrace.map((p) => ({ x: p.x, y: p.y }))),
+		              forceIndices,
+		            });
+		            gripsFinal = forced.refined;
+		            gripTrace.length = 0;
+		            gripsFinal.forEach((g) => {
+		              const meta = metaByIdxGrip.get(g.idx) ?? null;
+		              if (!meta || !g.grip) return;
+		              gripTrace.push({ x: g.grip.x, y: g.grip.y, frameIndex: meta.frameIndex, timestampSec: meta.timestampSec, phase: meta.phase });
+		            });
+		            gripTrace.sort((a, b) => (a.timestampSec ?? a.frameIndex) - (b.timestampSec ?? b.frameIndex));
+		            gripSpread = computeTraceSpread(gripTrace);
+		            gripUnique = countTraceUnique(gripTrace, 0.01);
+		            (onPlaneUpdate as Record<string, unknown>).pose_debug = {
+		              ...((onPlaneUpdate as Record<string, unknown>).pose_debug as Record<string, unknown> | undefined),
+		              grip_direct_force_refined: true,
+		              grip_direct_force_points: gripTrace.length,
+		            };
+		          }
+		          gripTraceInfo = { trace: gripTrace, spread: gripSpread };
+		          if (gripTrace.length >= 2) {
+		            onPlaneUpdate.hand_trace = gripTrace;
+		          }
+		          if (gripTrace.length >= 1) {
+		            const byPhase = (ph: "backswing" | "top" | "downswing" | "impact") =>
+		              medianOf(gripTrace.filter((p) => p.phase === ph).map((p) => ({ x: p.x, y: p.y })));
+		            onPlaneUpdate.hand_points = {
+		              backswing: byPhase("backswing"),
+		              top: byPhase("top"),
+		              downswing: byPhase("downswing"),
+		              impact: byPhase("impact"),
+		            };
+		          }
+		          const downswingPts = gripTrace
+		            .filter((p) => p.phase === "downswing" || p.phase === "impact")
+		            .map((p) => ({ x: p.x, y: p.y }));
+		          if (downswingPts.length >= 2) {
+		            const fit = buildBestFitLine01(downswingPts);
+		            if (fit) {
+		              onPlaneUpdate.downswing_plane = fit;
+		              onPlaneUpdate.plane_source = "hand_trace_fit";
+		              onPlaneUpdate.plane_confidence = "low";
+		            }
+		          }
+		          (onPlaneUpdate as Record<string, unknown>).pose_debug = {
+		            ...((onPlaneUpdate as Record<string, unknown>).pose_debug as Record<string, unknown> | undefined),
+		            grip_direct_used: true,
+		            grip_direct_points: gripTrace.length,
+		            grip_direct_roi_refined: refined.refinedCount,
+		            grip_direct_roi_frames: refined.refinedFrames,
+		            grip_direct_unique: gripUnique,
+		            grip_direct_spread: gripSpread,
+		            grip_direct_sample: gripTrace.slice(0, 6).map((p) => ({ x: p.x, y: p.y, phase: p.phase })),
+		            grip_direct_anchor_used: !!addrGripAnchor,
+		          };
+		        } catch (e) {
+		          (onPlaneUpdate as Record<string, unknown>).pose_debug = {
+		            ...((onPlaneUpdate as Record<string, unknown>).pose_debug as Record<string, unknown> | undefined),
+		            grip_direct_error: e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200),
+		          };
+		        }
 
 		        // Prefer deterministic plane lines from pose+shaftVector when available (2D estimate).
 		        try {
 		          // Pose-based hand tracing: keep the original (Top/Downswing/Impact) set for stability.
 		          // Address is handled separately to anchor the zone at the clubhead.
-		          const poseInputs = [...backswingFrames, ...topFrames, ...dsFrames, ...impFrames].slice(0, 16);
-		          const bsCount = Math.min(backswingFrames.length, 2);
-		          const topCount = Math.min(topFrames.length, 6);
-			          const dsCount = Math.min(dsFrames.length, 8);
-			          if (poseInputs.length >= 3) {
+		          if (poseFramesForTrace.length >= 3) {
 			            let poseError: string | null = null;
 			            let poseFrames: Awaited<ReturnType<typeof extractPoseKeypointsFromImages>> = [];
 			            try {
 			              poseFrames = await extractPoseKeypointsFromImages({
-			                frames: poseInputs.map((f) => ({ base64Image: f.base64Image, mimeType: f.mimeType })),
+			                frames: poseFramesForTrace.map((f) => ({
+			                  base64Image: f.base64Image,
+			                  mimeType: f.mimeType,
+			                  timestampSec: f.timestampSec,
+			                })),
 			              });
 			            } catch (e) {
 			              poseError = e instanceof Error ? e.message : String(e);
 			              poseFrames = [];
 			            }
+			            if ((poseError || poseFrames.length === 0) && !onPlaneUpdate) {
+			              onPlaneUpdate =
+			                existingOnPlane && typeof existingOnPlane === "object"
+			                  ? ({ ...(existingOnPlane as Record<string, unknown>) } as Record<string, unknown>)
+			                  : {};
+			            }
+			            if (poseError || poseFrames.length === 0) {
+			              (onPlaneUpdate as Record<string, unknown>).pose_debug = {
+			                ...((onPlaneUpdate as Record<string, unknown>).pose_debug as Record<string, unknown> | undefined),
+			                pose_error: poseError ?? null,
+			                pose_frames: poseFrames.length,
+			                pose_inputs: poseFramesForTrace.length,
+			              };
+			            }
+			            (onPlaneUpdate as Record<string, unknown>).pose_debug = {
+			              ...((onPlaneUpdate as Record<string, unknown>).pose_debug as Record<string, unknown> | undefined),
+			              pose_frames: poseFrames.length,
+			              pose_inputs: poseFramesForTrace.length,
+			            };
 
 		            const poseByIdx = new Map<number, Record<string, unknown>>();
 		            const shaftByIdx = new Map<number, { x: number; y: number }>();
-		            const metaByIdx = new Map<number, { frameIndex: number; timestampSec: number | undefined; phase: "backswing" | "top" | "downswing" | "impact" }>();
 		            poseFrames.forEach((f) => {
 		              if (!f || typeof f !== "object") return;
 	              poseByIdx.set(f.idx, (f.pose as unknown as Record<string, unknown>) ?? {});
@@ -2523,58 +3423,390 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
 	              const vec = toShaftVector(rawVec);
 	              if (vec) shaftByIdx.set(f.idx, vec);
 		            });
-		            poseInputs.forEach((src, idx) => {
-		              const mapped: "backswing" | "top" | "downswing" | "impact" =
-		                idx < bsCount ? "backswing" : idx < bsCount + topCount ? "top" : idx < bsCount + topCount + dsCount ? "downswing" : "impact";
-		              metaByIdx.set(idx, { frameIndex: src.frameIndex, timestampSec: src.timestampSec, phase: mapped });
-		            });
 
-		            const handTrace: Array<{ x: number; y: number; frameIndex: number; timestampSec?: number; phase: "backswing" | "top" | "downswing" | "impact" }> = [];
-		            const bsHands: Array<{ x: number; y: number }> = [];
-		            const topHands: Array<{ x: number; y: number }> = [];
-		            const dsHands: Array<{ x: number; y: number }> = [];
-		            const impHands: Array<{ x: number; y: number }> = [];
+		            const handTraceLead: Array<{ x: number; y: number; frameIndex: number; timestampSec?: number; phase: "backswing" | "top" | "downswing" | "impact" }> = [];
+		            const handTraceAvg: Array<{ x: number; y: number; frameIndex: number; timestampSec?: number; phase: "backswing" | "top" | "downswing" | "impact" }> = [];
+		            const bsHandsLead: Array<{ x: number; y: number }> = [];
+		            const topHandsLead: Array<{ x: number; y: number }> = [];
+		            const dsHandsLead: Array<{ x: number; y: number }> = [];
+		            const impHandsLead: Array<{ x: number; y: number }> = [];
+		            const bsHandsAvg: Array<{ x: number; y: number }> = [];
+		            const topHandsAvg: Array<{ x: number; y: number }> = [];
+		            const dsHandsAvg: Array<{ x: number; y: number }> = [];
+		            const impHandsAvg: Array<{ x: number; y: number }> = [];
 		            const bsVecs: Array<{ x: number; y: number }> = [];
 		            const topVecs: Array<{ x: number; y: number }> = [];
 		            const dsVecs: Array<{ x: number; y: number }> = [];
 		            const impVecs: Array<{ x: number; y: number }> = [];
-		            for (let i = 0; i < poseInputs.length; i += 1) {
+		            for (let i = 0; i < poseFramesForTrace.length; i += 1) {
 		              const pose = poseByIdx.get(i) ?? null;
-		              const hand = computeHandPosition(pose);
+		              const metaInfo = metaByIdxPose.get(i) ?? null;
+		              if (!metaInfo) continue;
+		              const handLead = computeLeadHandPosition(pose, meta?.handedness ?? null);
+		              const handAvg = computeHandPositionAverage(pose);
 		              const vec = shaftByIdx.get(i) ?? null;
-		              const meta = metaByIdx.get(i) ?? null;
-		              if (!meta) continue;
-		              if (hand) {
-		                handTrace.push({ x: hand.x, y: hand.y, frameIndex: meta.frameIndex, timestampSec: meta.timestampSec, phase: meta.phase });
-		                if (meta.phase === "backswing") bsHands.push(hand);
-		                if (meta.phase === "top") topHands.push(hand);
-		                if (meta.phase === "downswing") dsHands.push(hand);
-		                if (meta.phase === "impact") impHands.push(hand);
+		              if (handLead) {
+		                handTraceLead.push({
+		                  x: handLead.x,
+		                  y: handLead.y,
+		                  frameIndex: metaInfo.frameIndex,
+		                  timestampSec: metaInfo.timestampSec,
+		                  phase: metaInfo.phase,
+		                });
+		                if (metaInfo.phase === "backswing") bsHandsLead.push(handLead);
+		                if (metaInfo.phase === "top") topHandsLead.push(handLead);
+		                if (metaInfo.phase === "downswing") dsHandsLead.push(handLead);
+		                if (metaInfo.phase === "impact") impHandsLead.push(handLead);
+		              }
+		              if (handAvg) {
+		                handTraceAvg.push({
+		                  x: handAvg.x,
+		                  y: handAvg.y,
+		                  frameIndex: metaInfo.frameIndex,
+		                  timestampSec: metaInfo.timestampSec,
+		                  phase: metaInfo.phase,
+		                });
+		                if (metaInfo.phase === "backswing") bsHandsAvg.push(handAvg);
+		                if (metaInfo.phase === "top") topHandsAvg.push(handAvg);
+		                if (metaInfo.phase === "downswing") dsHandsAvg.push(handAvg);
+		                if (metaInfo.phase === "impact") impHandsAvg.push(handAvg);
 		              }
 		              if (vec) {
-		                if (meta.phase === "backswing") bsVecs.push(vec);
-		                if (meta.phase === "top") topVecs.push(vec);
-		                if (meta.phase === "downswing") dsVecs.push(vec);
-		                if (meta.phase === "impact") impVecs.push(vec);
+		                if (metaInfo.phase === "backswing") bsVecs.push(vec);
+		                if (metaInfo.phase === "top") topVecs.push(vec);
+		                if (metaInfo.phase === "downswing") dsVecs.push(vec);
+		                if (metaInfo.phase === "impact") impVecs.push(vec);
 		              }
 		            }
-		            handTrace.sort((a, b) => (a.timestampSec ?? a.frameIndex) - (b.timestampSec ?? b.frameIndex));
-		            const bsHand = medianOf(bsHands);
-		            const topHand = medianOf(topHands);
-		            const dsHand = medianOf(dsHands);
-		            const impHand = medianOf(impHands);
+		            handTraceLead.sort((a, b) => (a.timestampSec ?? a.frameIndex) - (b.timestampSec ?? b.frameIndex));
+		            handTraceAvg.sort((a, b) => (a.timestampSec ?? a.frameIndex) - (b.timestampSec ?? b.frameIndex));
+		            const leadUnique = countTraceUnique(handTraceLead, 0.01);
+		            const avgUnique = countTraceUnique(handTraceAvg, 0.01);
+		            const leadSpread = computeTraceSpread(handTraceLead);
+		            const avgSpread = computeTraceSpread(handTraceAvg);
+		            const useAvgTrace =
+		              handTraceAvg.length >= 2 &&
+		              (handTraceLead.length < 2 ||
+		                avgUnique > leadUnique ||
+		                (avgUnique === leadUnique && avgSpread > leadSpread));
+		            let handTrace = useAvgTrace ? handTraceAvg : handTraceLead;
+		            let poseTraceSource: "lead" | "avg" | "reconstruct" = useAvgTrace ? "avg" : "lead";
+		            let bsHand = medianOf(bsHandsLead);
+		            let topHand = medianOf(topHandsLead);
+		            let dsHand = medianOf(dsHandsLead);
+		            let impHand = medianOf(impHandsLead);
+		            const bsHandAvg = medianOf(bsHandsAvg);
+		            const topHandAvg = medianOf(topHandsAvg);
+		            const dsHandAvg = medianOf(dsHandsAvg);
+		            const impHandAvg = medianOf(impHandsAvg);
+
+		            const reconstructed = reconstructHandTrajectoryFromPoseFrames({
+		              poseByIdx,
+		              metaByIdxPose,
+		              frameCount: poseFramesForTrace.length,
+		              handedness: (meta?.handedness as "left" | "right" | null | undefined) ?? null,
+		            });
+		            const reconstructSpread = reconstructed ? computeTraceSpread(reconstructed.smoothed) : 0;
+		            const reconstructUnique = reconstructed ? countTraceUnique(reconstructed.smoothed, 0.01) : 0;
+		            if (reconstructed && reconstructed.smoothed.length >= 2 && reconstructSpread >= 0.08 && reconstructUnique >= 4) {
+		              handTrace = reconstructed.smoothed;
+		              poseTraceSource = "reconstruct";
+		              bsHand = medianOf(reconstructed.smoothed.filter((p) => p.phase === "backswing").map((p) => ({ x: p.x, y: p.y })));
+		              topHand = medianOf(reconstructed.smoothed.filter((p) => p.phase === "top").map((p) => ({ x: p.x, y: p.y })));
+		              dsHand = medianOf(reconstructed.smoothed.filter((p) => p.phase === "downswing").map((p) => ({ x: p.x, y: p.y })));
+		              impHand = medianOf(reconstructed.smoothed.filter((p) => p.phase === "impact").map((p) => ({ x: p.x, y: p.y })));
+		            } else if (leadSpread >= avgSpread && leadSpread >= 0.08) {
+		              handTrace = handTraceLead;
+		              poseTraceSource = "lead";
+		              bsHand = medianOf(bsHandsLead);
+		              topHand = medianOf(topHandsLead);
+		              dsHand = medianOf(dsHandsLead);
+		              impHand = medianOf(impHandsLead);
+		            } else if (avgSpread >= 0.08) {
+		              handTrace = handTraceAvg;
+		              poseTraceSource = "avg";
+		              bsHand = medianOf(bsHandsAvg);
+		              topHand = medianOf(topHandsAvg);
+		              dsHand = medianOf(dsHandsAvg);
+		              impHand = medianOf(impHandsAvg);
+		            }
 		            const bsVec = averageUnitDirections(bsVecs);
 		            const topVec = averageUnitDirections(topVecs);
 		            const dsVec = averageUnitDirections(dsVecs);
 		            const impVec = averageUnitDirections(impVecs);
-		            if (onPlaneUpdate) {
-		              onPlaneUpdate.hand_points = {
-		                backswing: bsHand,
-		                top: topHand,
-		                downswing: dsHand,
-		                impact: impHand,
+		            poseTraceInfo = {
+		              trace: handTrace,
+		              unique: countTraceUnique(handTrace, 0.01),
+		              spread: computeTraceSpread(handTrace),
+		              source: poseTraceSource,
+		            };
+		            let gripTrace = gripTraceInfo?.trace ?? [];
+		            let gripTraceSpreadLocal = gripTraceInfo?.spread ?? 0;
+		            const gripUniqueInitial = countTraceUnique(gripTrace, 0.01);
+		            if (poseTraceInfo && (gripUniqueInitial < 5 || gripTraceSpreadLocal < 0.12)) {
+		              const hintMap = new Map<number, { x: number; y: number }>();
+		              poseTraceInfo.trace.forEach((p) => {
+		                const idx = gripIdxByFrameIndex.get(p.frameIndex);
+		                if (idx == null) return;
+		                if (!hintMap.has(idx)) hintMap.set(idx, { x: p.x, y: p.y });
+		              });
+		              const hints = Array.from(hintMap.entries()).map(([idx, point]) => ({ idx, point }));
+		              if (hints.length >= 3) {
+		                const refined = await refineGripCentersWithHints({
+		                  frames: gripFramesForTrace,
+		                  hints,
+		                  cropScale: 0.45,
+		                });
+		                if (refined.length) {
+		                  const refinedTrace: Array<{ x: number; y: number; frameIndex: number; timestampSec?: number; phase: "backswing" | "top" | "downswing" | "impact" }> = [];
+		                  refined.forEach((g) => {
+		                    const meta = metaByIdxGrip.get(g.idx) ?? null;
+		                    if (!meta || !g.grip) return;
+		                    refinedTrace.push({
+		                      x: g.grip.x,
+		                      y: g.grip.y,
+		                      frameIndex: meta.frameIndex,
+		                      timestampSec: meta.timestampSec,
+		                      phase: meta.phase,
+		                    });
+		                  });
+		                  refinedTrace.sort((a, b) => (a.timestampSec ?? a.frameIndex) - (b.timestampSec ?? b.frameIndex));
+		                  const refinedSpread = computeTraceSpread(refinedTrace);
+		                  const refinedUnique = countTraceUnique(refinedTrace, 0.01);
+		                  if (refinedUnique > gripUniqueInitial || refinedSpread > gripTraceSpreadLocal) {
+		                    gripTrace = refinedTrace;
+		                    gripTraceInfo = { trace: refinedTrace, spread: refinedSpread };
+		                    gripTraceSpreadLocal = refinedSpread;
+		                    (onPlaneUpdate as Record<string, unknown>).pose_debug = {
+		                      ...((onPlaneUpdate as Record<string, unknown>).pose_debug as Record<string, unknown> | undefined),
+		                      grip_pose_hint_used: true,
+		                      grip_pose_hint_points: refinedTrace.length,
+		                      grip_pose_hint_unique: refinedUnique,
+		                      grip_pose_hint_spread: refinedSpread,
+		                    };
+		                  }
+		                }
+		              }
+		            }
+		            const gripHandPoints = {
+		              backswing: medianOfPhase(gripTrace, "backswing"),
+		              top: medianOfPhase(gripTrace, "top"),
+		              downswing: medianOfPhase(gripTrace, "downswing"),
+		              impact: medianOfPhase(gripTrace, "impact"),
+		            };
+		            const posePhaseCounts = countTracePhases(handTrace);
+		            const gripPhaseCounts = countTracePhases(gripTrace);
+		            const existingDebug = (onPlaneUpdate as Record<string, unknown>).pose_debug as Record<string, unknown> | undefined;
+		            if (existingDebug && !("hand_trace_all_frames" in existingDebug)) {
+		              const allFrames: Array<{
+		                frameIndex: number;
+		                timestampSec?: number;
+		                phase: "backswing" | "top" | "downswing" | "impact";
+		                lead: { x: number; y: number } | null;
+		                avg: { x: number; y: number } | null;
+		                lw: { x: number; y: number } | null;
+		                rw: { x: number; y: number } | null;
+		              }> = [];
+		              for (let i = 0; i < poseFramesForTrace.length; i += 1) {
+		                const pose = poseByIdx.get(i) ?? null;
+		                const metaInfo = metaByIdxPose.get(i);
+		                if (!metaInfo) continue;
+		                const lw = readPosePoint(pose, ["leftWrist", "left_wrist", "leftHand", "left_hand"]);
+		                const rw = readPosePoint(pose, ["rightWrist", "right_wrist", "rightHand", "right_hand"]);
+		                const lead = computeLeadHandPosition(pose, meta?.handedness ?? null);
+		                const avg = computeHandPositionAverage(pose);
+		                allFrames.push({
+		                  frameIndex: metaInfo.frameIndex,
+		                  timestampSec: metaInfo.timestampSec,
+		                  phase: metaInfo.phase,
+		                  lead,
+		                  avg,
+		                  lw,
+		                  rw,
+		                });
+		              }
+		              (onPlaneUpdate as Record<string, unknown>).pose_debug = {
+		                ...(existingDebug ?? {}),
+		                hand_trace_all_frames: allFrames,
 		              };
-		              if (handTrace.length) onPlaneUpdate.hand_trace = handTrace;
+		            }
+		            (onPlaneUpdate as Record<string, unknown>).pose_debug = {
+		              ...((onPlaneUpdate as Record<string, unknown>).pose_debug as Record<string, unknown> | undefined),
+		              pose_trace_points: handTrace.length,
+		              pose_trace_unique: poseTraceInfo.unique,
+		              pose_trace_spread: poseTraceInfo.spread,
+		              pose_trace_source: poseTraceInfo.source,
+		              pose_trace_collapsed: poseTraceInfo.unique < 4 || poseTraceInfo.spread < 0.08,
+		              pose_lead_unique: leadUnique,
+		              pose_lead_spread: leadSpread,
+		              pose_avg_unique: avgUnique,
+		              pose_avg_spread: avgSpread,
+		              pose_trace_sample: handTrace.slice(0, 6).map((p) => ({ x: p.x, y: p.y, phase: p.phase })),
+		              pose_trace_phase_counts: posePhaseCounts,
+		              grip_trace_phase_counts: gripPhaseCounts,
+		              pose_reconstruct_debug: reconstructed?.debug ?? null,
+		            };
+		            const poseTraceSpread = poseTraceInfo.spread;
+		            const gripTraceSpread = gripTraceInfo?.spread ?? 0;
+		            const poseUnique = poseTraceInfo.unique;
+		            const gripUnique = countTraceUnique(gripTrace, 0.01);
+		            const gripHighQuality = gripUnique >= 8 && gripTraceSpread >= 0.16;
+		            const gripUsable = gripUnique >= 6 && gripTraceSpread >= 0.12;
+		            const poseHasBackTop = (posePhaseCounts.backswing ?? 0) + (posePhaseCounts.top ?? 0) > 0;
+		            const gripHasBackTop = (gripPhaseCounts.backswing ?? 0) + (gripPhaseCounts.top ?? 0) > 0;
+		            const poseHasTop = (posePhaseCounts.top ?? 0) > 0;
+		            const gripCollapsed = gripUnique <= 2 || gripTraceSpread < 0.03;
+		            const poseCollapsed = poseUnique < 4 || poseTraceSpread < 0.08;
+		            const poseUsable = handTrace.length >= 2 && poseUnique >= 2 && poseTraceSpread >= 0.01;
+		            const poseReconstructUsable =
+		              poseTraceInfo.source === "reconstruct" && !poseCollapsed && poseTraceSpread >= 0.08 && poseUnique >= 4;
+		            const posePreferredForDisplay = poseUsable && !poseCollapsed && poseHasTop;
+		            const usePoseTrace =
+		              poseUsable &&
+		              !poseCollapsed &&
+		              (gripTrace.length < 2 || gripCollapsed || poseTraceSpread >= gripTraceSpread * 1.05);
+
+		            if (!onPlaneUpdate && (handTrace.length || bsHand || topHand || dsHand || impHand || gripTrace.length)) {
+		              onPlaneUpdate =
+		                existingOnPlane && typeof existingOnPlane === "object"
+		                  ? ({ ...(existingOnPlane as Record<string, unknown>) } as Record<string, unknown>)
+		                  : {};
+		            }
+		            if (onPlaneUpdate) {
+		              const gripTraceSpreadSafe = gripTraceSpread;
+		              const poseTraceSpreadSafe = poseTraceSpread;
+		              const bestIsPose =
+		                !gripHighQuality &&
+		                poseUsable &&
+		                !poseCollapsed &&
+		                (usePoseTrace ||
+		                  gripTrace.length < 2 ||
+		                  gripCollapsed ||
+		                  poseUnique > gripUnique ||
+		                  (poseUnique === gripUnique && poseTraceSpreadSafe > gripTraceSpreadSafe));
+		              if (bestIsPose) {
+		                onPlaneUpdate.hand_points = {
+		                  backswing: bsHand,
+		                  top: topHand,
+		                  downswing: dsHand,
+		                  impact: impHand,
+		                };
+		              }
+		              const currentHandPoints =
+		                onPlaneUpdate.hand_points && typeof onPlaneUpdate.hand_points === "object"
+		                  ? (onPlaneUpdate.hand_points as {
+		                      backswing?: { x: number; y: number } | null;
+		                      top?: { x: number; y: number } | null;
+		                      downswing?: { x: number; y: number } | null;
+		                      impact?: { x: number; y: number } | null;
+		                    })
+		                  : null;
+		              const poseTopPoint = medianOfPhase(handTrace, "top");
+		              if (gripHandPoints.backswing || gripHandPoints.top || gripHandPoints.downswing || gripHandPoints.impact) {
+		                onPlaneUpdate.hand_points = {
+		                  backswing: currentHandPoints?.backswing ?? gripHandPoints.backswing ?? null,
+		                  top: poseTopPoint ?? currentHandPoints?.top ?? gripHandPoints.top ?? null,
+		                  downswing: currentHandPoints?.downswing ?? gripHandPoints.downswing ?? null,
+		                  impact: currentHandPoints?.impact ?? gripHandPoints.impact ?? null,
+		                };
+		              }
+		              const finalTrace = bestIsPose ? handTrace : gripTrace;
+		              const useReconstructTrace = bestIsPose && poseTraceInfo?.source === "reconstruct" && !poseCollapsed;
+		              const lockPoseDisplay = posePreferredForDisplay || poseReconstructUsable;
+		              if (lockPoseDisplay) {
+		                const filtered = filterTraceOutliers(handTrace);
+		                const smoothed =
+		                  filtered.filtered.length >= 4 ? smoothTraceEma(filtered.filtered, 0.35) : filtered.filtered;
+		                onPlaneUpdate.hand_trace = densifyTrace(smoothed, 24);
+		                (onPlaneUpdate as Record<string, unknown>).pose_debug = {
+		                  ...((onPlaneUpdate as Record<string, unknown>).pose_debug as Record<string, unknown> | undefined),
+		                  hand_trace_source: "pose_for_display",
+		                  hand_trace_smoothed: filtered.filtered.length >= 4,
+		                  hand_trace_smoothing: filtered.filtered.length >= 4 ? "ema" : "none",
+		                  hand_trace_densified: true,
+		                  hand_trace_outliers_removed: filtered.removed,
+		                  hand_trace_outlier_threshold: filtered.threshold,
+		                };
+		              }
+		              if (finalTrace.length >= 2 && !lockPoseDisplay) {
+		                if (useReconstructTrace) {
+		                  onPlaneUpdate.hand_trace = densifyTrace(finalTrace, 24);
+		                  (onPlaneUpdate as Record<string, unknown>).pose_debug = {
+		                    ...((onPlaneUpdate as Record<string, unknown>).pose_debug as Record<string, unknown> | undefined),
+		                    hand_trace_source: "pose_reconstruct",
+		                    hand_trace_smoothed: true,
+		                    hand_trace_smoothing: "moving_avg_catmull",
+		                    hand_trace_densified: true,
+		                    hand_trace_outliers_removed: 0,
+		                    hand_trace_outlier_threshold: 0,
+		                  };
+		                } else {
+		                  const filtered = filterTraceOutliers(finalTrace);
+		                  const smoothed =
+		                    filtered.filtered.length >= 4 ? smoothTraceEma(filtered.filtered, 0.35) : filtered.filtered;
+		                  onPlaneUpdate.hand_trace = densifyTrace(smoothed, 24);
+		                  (onPlaneUpdate as Record<string, unknown>).pose_debug = {
+		                    ...((onPlaneUpdate as Record<string, unknown>).pose_debug as Record<string, unknown> | undefined),
+		                    hand_trace_source: bestIsPose ? "pose" : "grip",
+		                    hand_trace_smoothed: filtered.filtered.length >= 4,
+		                    hand_trace_smoothing: filtered.filtered.length >= 4 ? "ema" : "none",
+		                    hand_trace_densified: true,
+		                    hand_trace_outliers_removed: filtered.removed,
+		                    hand_trace_outlier_threshold: filtered.threshold,
+		                  };
+		                }
+		              }
+		              if (!gripHighQuality && !useReconstructTrace && !lockPoseDisplay) {
+		                const phaseWise = buildPhaseWiseTrace(gripUsable ? gripTrace : [], handTrace);
+		                if (phaseWise.length >= 2) {
+		                  const filtered = filterTraceOutliers(phaseWise);
+		                  const smoothed =
+		                    filtered.filtered.length >= 4 ? smoothTraceEma(filtered.filtered, 0.35) : filtered.filtered;
+		                  onPlaneUpdate.hand_trace = densifyTrace(smoothed, 24);
+		                  (onPlaneUpdate as Record<string, unknown>).pose_debug = {
+		                    ...((onPlaneUpdate as Record<string, unknown>).pose_debug as Record<string, unknown> | undefined),
+		                    hand_trace_source: gripUsable ? "phasewise_mix" : "pose_only_low_grip",
+		                    hand_trace_smoothed: filtered.filtered.length >= 4,
+		                    hand_trace_smoothing: filtered.filtered.length >= 4 ? "ema" : "none",
+		                    hand_trace_densified: true,
+		                    hand_trace_outliers_removed: filtered.removed,
+		                    hand_trace_outlier_threshold: filtered.threshold,
+		                  };
+		                }
+		              }
+		              if (gripHighQuality && gripTrace.length >= 2 && !lockPoseDisplay) {
+		                const filtered = filterTraceOutliers(gripTrace);
+		                const smoothed =
+		                  filtered.filtered.length >= 4 ? smoothTraceEma(filtered.filtered, 0.35) : filtered.filtered;
+		                onPlaneUpdate.hand_trace = densifyTrace(smoothed, 24);
+		                (onPlaneUpdate as Record<string, unknown>).pose_debug = {
+		                  ...((onPlaneUpdate as Record<string, unknown>).pose_debug as Record<string, unknown> | undefined),
+		                  hand_trace_source: "grip_quality_override",
+		                  hand_trace_smoothed: filtered.filtered.length >= 4,
+		                  hand_trace_smoothing: filtered.filtered.length >= 4 ? "ema" : "none",
+		                  hand_trace_densified: true,
+		                  hand_trace_outliers_removed: filtered.removed,
+		                  hand_trace_outlier_threshold: filtered.threshold,
+		                };
+		              }
+		              if (bestIsPose && !poseHasBackTop && gripHasBackTop && gripTrace.length >= 2) {
+		                onPlaneUpdate.hand_trace = gripTrace;
+		                (onPlaneUpdate as Record<string, unknown>).pose_debug = {
+		                  ...((onPlaneUpdate as Record<string, unknown>).pose_debug as Record<string, unknown> | undefined),
+		                  hand_trace_source: "grip_for_display",
+		                };
+		              }
+		              const downswingPts = finalTrace
+		                .filter((p) => p.phase === "downswing" || p.phase === "impact")
+		                .map((p) => ({ x: p.x, y: p.y }));
+		              if (downswingPts.length >= 2) {
+		                const fit = buildBestFitLine01(downswingPts);
+		                if (fit) {
+		                  onPlaneUpdate.downswing_plane = fit;
+		                  onPlaneUpdate.plane_source = bestIsPose ? "pose_trace_fit" : "hand_trace_fit";
+		                  onPlaneUpdate.plane_confidence = "low";
+		                }
+		              }
 		              // Clubhead/grip point (address) for zone anchor + reference plane.
               if (addressFrames.length) {
                 try {
@@ -2709,8 +3941,8 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
                 };
                 const shoulderPts: Array<{ x: number; y: number }> = [];
                 const hipPts: Array<{ x: number; y: number }> = [];
-                for (let i = 0; i < poseInputs.length; i += 1) {
-                  const metaInfo = metaByIdx.get(i);
+                for (let i = 0; i < poseFramesForTrace.length; i += 1) {
+                  const metaInfo = metaByIdxPose.get(i);
                   if (metaInfo?.phase !== "backswing") continue;
                   const shoulder = pickPosePoint(i, `${side}Shoulder`);
                   const hip = pickPosePoint(i, `${side}Hip`);
@@ -2747,7 +3979,14 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
 	                    rightHip: pick("rightHip"),
 	                  };
 	                };
+		                if (!onPlaneUpdate) {
+		                  onPlaneUpdate =
+		                    existingOnPlane && typeof existingOnPlane === "object"
+		                      ? ({ ...(existingOnPlane as Record<string, unknown>) } as Record<string, unknown>)
+		                      : {};
+		                }
 		                (onPlaneUpdate as Record<string, unknown>).pose_debug = {
+		                  ...((onPlaneUpdate as Record<string, unknown>).pose_debug as Record<string, unknown> | undefined),
 		                  model: process.env.OPENAI_POSE_MODEL ?? process.env.OPENAI_MODEL ?? "gpt-4o",
 		                  returned: poseFrames.length,
 		                  // capture errors to verify pose extraction is actually running
@@ -2756,25 +3995,29 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
 		                  hasBackHand: !!bsHand,
 		                  hasDownHand: !!dsHand,
 		                  hasImpactHand: !!impHand,
+		                  pose_trace_unique: poseUnique,
+		                  pose_trace_spread: poseTraceSpread,
+		                  grip_trace_unique: gripUnique,
+		                  grip_trace_spread: gripTraceSpread,
 		                  hasBackShaft: !!bsVec,
 		                  hasTopShaft: !!topVec,
 		                  hasDownShaft: !!dsVec,
 		                  hasImpactShaft: !!impVec,
-		                  backHandCount: bsHands.length,
-		                  topHandCount: topHands.length,
-		                  downHandCount: dsHands.length,
-		                  impactHandCount: impHands.length,
+		                  backHandCount: bsHandsLead.length,
+		                  topHandCount: topHandsLead.length,
+		                  downHandCount: dsHandsLead.length,
+		                  impactHandCount: impHandsLead.length,
 		                  poseKeys: {
 		                    backswing: poseKeys(0),
-		                    top: poseKeys(Math.min(bsCount, poseInputs.length - 1)),
-		                    downswing: poseKeys(Math.min(bsCount + topCount, poseInputs.length - 1)),
-		                    impact: poseKeys(Math.min(bsCount + topCount + dsCount, poseInputs.length - 1)),
+		                    top: poseKeys(Math.min(bsCount, poseFramesForTrace.length - 1)),
+		                    downswing: poseKeys(Math.min(bsCount + topCount, poseFramesForTrace.length - 1)),
+		                    impact: poseKeys(Math.min(bsCount + topCount + dsCount, poseFramesForTrace.length - 1)),
 		                  },
 	                  poseSample: {
 	                    backswing: poseSample(0),
-	                    top: poseSample(Math.min(bsCount, poseInputs.length - 1)),
-	                    downswing: poseSample(Math.min(bsCount + topCount, poseInputs.length - 1)),
-	                    impact: poseSample(Math.min(bsCount + topCount + dsCount, poseInputs.length - 1)),
+	                    top: poseSample(Math.min(bsCount, poseFramesForTrace.length - 1)),
+	                    downswing: poseSample(Math.min(bsCount + topCount, poseFramesForTrace.length - 1)),
+	                    impact: poseSample(Math.min(bsCount + topCount + dsCount, poseFramesForTrace.length - 1)),
 	                  },
 		                };
 		              }
@@ -2791,11 +4034,16 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
 		                normalizePlaneLine01(op.downswing_plane ?? op.downswingPlane ?? op.down_plane ?? op.downPlane) ??
 		                normalizePlaneLine01(visual?.downswing_plane);
 		              if (backLine) {
-		                const seg = computeLineEvidenceSegment(backLine, [...topHands, ...(topHand ? [topHand] : [])]);
+		                const seg = computeLineEvidenceSegment(backLine, [...topHandsAvg, ...(topHandAvg ? [topHandAvg] : [])]);
 		                if (seg) op.backswing_plane_evidence = seg;
 		              }
 		              if (downLine) {
-		                const seg = computeLineEvidenceSegment(downLine, [...dsHands, ...impHands, ...(dsHand ? [dsHand] : []), ...(impHand ? [impHand] : [])]);
+		                const seg = computeLineEvidenceSegment(downLine, [
+		                  ...dsHandsAvg,
+		                  ...impHandsAvg,
+		                  ...(dsHandAvg ? [dsHandAvg] : []),
+		                  ...(impHandAvg ? [impHandAvg] : []),
+		                ]);
 		                if (seg) op.downswing_plane_evidence = seg;
 		              }
 		            }
@@ -2814,16 +4062,73 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
 		                ? normalizePoint01((onPlaneUpdate as Record<string, unknown>).grip_point)
 		                : null;
 		            const anchorForRef = clubheadPoint ?? ballPoint;
+		            const zoneAnchor = anchorForRef ?? gripPoint ?? null;
+		            const addrHand = gripPoint ?? null;
+		            const addrHands: Array<{ x: number; y: number }> = [];
 		            const addrShaftVec = anchorForRef && gripPoint ? { x: gripPoint.x - anchorForRef.x, y: gripPoint.y - anchorForRef.y } : null;
 		            const fallbackRefVec = bsVec ?? downVec ?? dsVec ?? impVec;
-		            const referencePlane = anchorForRef
-		              ? buildLineThroughUnitBox({ anchor: anchorForRef, dir: addrShaftVec ?? fallbackRefVec ?? { x: 1, y: -1 } })
+		            const traceRefVec = (() => {
+		              if (fallbackRefVec) return fallbackRefVec;
+		              const trace = (gripTraceInfo?.trace?.length ? gripTraceInfo?.trace : poseTraceInfo?.trace) ?? [];
+		              const fit = trace.length >= 2 ? buildTraceFitLine(trace.map((p) => ({ x: p.x, y: p.y, phase: p.phase }))) : null;
+		              if (!fit) return null;
+		              return { x: fit.line.x2 - fit.line.x1, y: fit.line.y2 - fit.line.y1 };
+		            })();
+		            const traceAnchor =
+		              anchorForRef ??
+		              gripPoint ??
+		              medianOf((gripTraceInfo?.trace ?? []).map((p) => ({ x: p.x, y: p.y }))) ??
+		              medianOf((poseTraceInfo?.trace ?? []).map((p) => ({ x: p.x, y: p.y }))) ??
+		              null;
+		            const referenceAnchor = traceAnchor;
+		            let referencePlane = referenceAnchor
+		              ? buildLineThroughUnitBox({ anchor: referenceAnchor, dir: addrShaftVec ?? traceRefVec ?? { x: 1, y: -1 } })
 		              : null;
-		            const downswingPlane = (dsHand ?? impHand) && downVec ? buildLineThroughUnitBox({ anchor: dsHand ?? impHand, dir: downVec }) : null;
+		            let referencePlaneSource: "shaft_vector_2d" | "trace_ref" | null = referencePlane ? "shaft_vector_2d" : null;
+		            const poseCollapsedForRef =
+		              !poseTraceInfo || poseTraceInfo.unique < 4 || poseTraceInfo.spread < 0.08;
+		            if (poseCollapsedForRef && gripTraceInfo?.trace?.length) {
+		              const gripDown = gripTraceInfo.trace
+		                .filter((p) => p.phase === "downswing" || p.phase === "impact")
+		                .map((p) => ({ x: p.x, y: p.y }));
+		              const traceLine = gripDown.length >= 2 ? buildBestFitLine01(gripDown) : null;
+		              if (traceLine) {
+		                referencePlane = traceLine;
+		                referencePlaneSource = "trace_ref";
+		                (onPlaneUpdate as Record<string, unknown>).pose_debug = {
+		                  ...((onPlaneUpdate as Record<string, unknown>).pose_debug as Record<string, unknown> | undefined),
+		                  reference_plane_source: "grip_trace_fit",
+		                };
+		              }
+		            }
+		            const downswingPlane =
+		              (dsHandAvg ?? impHandAvg) && downVec ? buildLineThroughUnitBox({ anchor: dsHandAvg ?? impHandAvg, dir: downVec }) : null;
 
+		            if (!onPlaneUpdate) {
+		              onPlaneUpdate =
+		                existingOnPlane && typeof existingOnPlane === "object"
+		                  ? ({ ...(existingOnPlane as Record<string, unknown>) } as Record<string, unknown>)
+		                  : {};
+		            }
 		            if (onPlaneUpdate) {
+		              const planeSource = String((onPlaneUpdate as Record<string, unknown>).plane_source ?? "");
+		              const traceFit = buildTraceFitLine((onPlaneUpdate.hand_trace as Array<{ x: number; y: number; phase?: string }>) ?? []);
+		              const hasTraceFit = planeSource === "hand_trace_fit" || planeSource === "pose_trace_fit";
 		              if (referencePlane) onPlaneUpdate.reference_plane = referencePlane;
-		              if (downswingPlane) onPlaneUpdate.downswing_plane = downswingPlane;
+		              if (traceFit && !referencePlane && (!hasTraceFit || planeSource === "shaft_vector_2d")) {
+		                onPlaneUpdate.downswing_plane = traceFit.line;
+		                onPlaneUpdate.plane_source = "hand_trace_fit";
+		                onPlaneUpdate.plane_confidence = "low";
+		                if (process.env.NODE_ENV !== "production") {
+		                  (onPlaneUpdate as Record<string, unknown>).pose_debug = {
+		                    ...((onPlaneUpdate as Record<string, unknown>).pose_debug as Record<string, unknown> | undefined),
+		                    trace_fit_unique: traceFit.unique,
+		                    trace_fit_spread: traceFit.spread,
+		                  };
+		                }
+		              } else if (!hasTraceFit && downswingPlane) {
+		                onPlaneUpdate.downswing_plane = downswingPlane;
+		              }
 		              if (referencePlane) {
 		                const seg = computeLineEvidenceSegment(referencePlane, [
 		                  ...(zoneAnchor ? [zoneAnchor] : []),
@@ -2833,11 +4138,16 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
 		                if (seg) onPlaneUpdate.reference_plane_evidence = seg;
 		              }
 		              if (downswingPlane) {
-		                const seg = computeLineEvidenceSegment(downswingPlane, [...dsHands, ...impHands, ...(dsHand ? [dsHand] : []), ...(impHand ? [impHand] : [])]);
+		                const seg = computeLineEvidenceSegment(downswingPlane, [
+		                  ...dsHandsAvg,
+		                  ...impHandsAvg,
+		                  ...(dsHandAvg ? [dsHandAvg] : []),
+		                  ...(impHandAvg ? [impHandAvg] : []),
+		                ]);
 		                if (seg) onPlaneUpdate.downswing_plane_evidence = seg;
 		              }
 		              if (referencePlane || downswingPlane) {
-		                onPlaneUpdate.plane_source = "shaft_vector_2d";
+		                onPlaneUpdate.plane_source = referencePlaneSource ?? "shaft_vector_2d";
 		                onPlaneUpdate.plane_confidence = referencePlane ? "medium" : "low";
 		              }
 
@@ -2860,9 +4170,9 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
 		                spread < 0.03 ||
 		                (!topHand && !dsHand && !impHand);
 
-		              if (needsGripFallback) {
+		            if (needsGripFallback) {
 		                try {
-		                  const gripFrames = poseInputs.map((f) => ({ base64Image: f.base64Image, mimeType: f.mimeType, timestampSec: f.timestampSec }));
+		                  const gripFrames = gripFramesForTrace.map((f) => ({ base64Image: f.base64Image, mimeType: f.mimeType, timestampSec: f.timestampSec }));
 		                  const grips = await extractGripCentersFromFrames({ frames: gripFrames });
 		                  const addrGrip =
 		                    (onPlaneUpdate as Record<string, unknown>)?.grip_point &&
@@ -2873,13 +4183,15 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
 		                  const gripsFinal = refined.refined;
 		                  const gripTrace: Array<{ x: number; y: number; frameIndex: number; timestampSec?: number; phase: "backswing" | "top" | "downswing" | "impact" }> = [];
 		                  gripsFinal.forEach((g) => {
-		                    const meta = metaByIdx.get(g.idx) ?? null;
+		                    const meta = metaByIdxGrip.get(g.idx) ?? null;
 		                    if (!meta || !g.grip) return;
 		                    gripTrace.push({ x: g.grip.x, y: g.grip.y, frameIndex: meta.frameIndex, timestampSec: meta.timestampSec, phase: meta.phase });
 		                  });
 		                  gripTrace.sort((a, b) => (a.timestampSec ?? a.frameIndex) - (b.timestampSec ?? b.frameIndex));
 		                  if (gripTrace.length >= 2) {
 		                    onPlaneUpdate.hand_trace = gripTrace;
+		                  }
+		                  if (gripTrace.length >= 1) {
 		                    const byPhase = (ph: "backswing" | "top" | "downswing" | "impact") =>
 		                      medianOf(gripTrace.filter((p) => p.phase === ph).map((p) => ({ x: p.x, y: p.y })));
 		                    onPlaneUpdate.hand_points = {
@@ -2888,24 +4200,20 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
 		                      downswing: byPhase("downswing"),
 		                      impact: byPhase("impact"),
 		                    };
-		                    if (process.env.NODE_ENV !== "production") {
-		                      (onPlaneUpdate as Record<string, unknown>).pose_debug = {
-		                        ...((onPlaneUpdate as Record<string, unknown>).pose_debug as Record<string, unknown> | undefined),
-		                        grip_fallback_used: true,
-		                        grip_fallback_points: gripTrace.length,
-		                        grip_fallback_roi_refined: refined.refinedCount,
-		                        grip_fallback_roi_frames: refined.refinedFrames,
-		                        grip_fallback_sample: gripTrace.slice(0, 5).map((p) => ({ x: p.x, y: p.y, phase: p.phase })),
-		                      };
-		                    }
 		                  }
+		                  (onPlaneUpdate as Record<string, unknown>).pose_debug = {
+		                    ...((onPlaneUpdate as Record<string, unknown>).pose_debug as Record<string, unknown> | undefined),
+		                    grip_fallback_used: true,
+		                    grip_fallback_points: gripTrace.length,
+		                    grip_fallback_roi_refined: refined.refinedCount,
+		                    grip_fallback_roi_frames: refined.refinedFrames,
+		                    grip_fallback_sample: gripTrace.slice(0, 5).map((p) => ({ x: p.x, y: p.y, phase: p.phase })),
+		                  };
 		                } catch (e) {
-		                  if (process.env.NODE_ENV !== "production") {
-		                    (onPlaneUpdate as Record<string, unknown>).pose_debug = {
-		                      ...((onPlaneUpdate as Record<string, unknown>).pose_debug as Record<string, unknown> | undefined),
-		                      grip_fallback_error: e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200),
-		                    };
-		                  }
+		                  (onPlaneUpdate as Record<string, unknown>).pose_debug = {
+		                    ...((onPlaneUpdate as Record<string, unknown>).pose_debug as Record<string, unknown> | undefined),
+		                    grip_fallback_error: e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200),
+		                  };
 		                }
 		              }
 
@@ -2959,8 +4267,118 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
 		              }
 		            }
 		          }
-		        } catch {
-		          // ignore (keep LLM output)
+		        } catch (e) {
+		          if (!onPlaneUpdate) {
+		            onPlaneUpdate =
+		              existingOnPlane && typeof existingOnPlane === "object"
+		                ? ({ ...(existingOnPlane as Record<string, unknown>) } as Record<string, unknown>)
+		                : {};
+		          }
+		          (onPlaneUpdate as Record<string, unknown>).pose_debug = {
+		            ...((onPlaneUpdate as Record<string, unknown>).pose_debug as Record<string, unknown> | undefined),
+		            pose_block_error: e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200),
+		          };
+		        }
+
+		        if (onPlaneUpdate) {
+		          const traceSnapshot = Array.isArray(onPlaneUpdate.hand_trace)
+		            ? (onPlaneUpdate.hand_trace as Array<{ x: number; y: number; phase?: string }>).slice(0, 8)
+		            : [];
+		          (onPlaneUpdate as Record<string, unknown>).pose_debug = {
+		            ...((onPlaneUpdate as Record<string, unknown>).pose_debug as Record<string, unknown> | undefined),
+		            hand_trace_len: Array.isArray(onPlaneUpdate.hand_trace) ? onPlaneUpdate.hand_trace.length : 0,
+		            hand_trace_sample: traceSnapshot.map((p) => ({ x: p.x, y: p.y, phase: p.phase })),
+		            hand_trace_phase_counts: Array.isArray(onPlaneUpdate.hand_trace) ? countTracePhases(onPlaneUpdate.hand_trace as Array<{ phase?: string | null }>) : {},
+		          };
+		          const gripTrace = gripTraceInfo?.trace ?? [];
+		          const gripUnique = countTraceUnique(gripTrace, 0.01);
+		          const gripSpread = gripTraceInfo?.spread ?? 0;
+		          const gripCollapsed = gripUnique <= 2 || gripSpread < 0.03;
+		          const posePhaseCounts = poseTraceInfo ? countTracePhases(poseTraceInfo.trace) : {};
+		          const gripPhaseCounts = countTracePhases(gripTrace);
+		          const poseHasBackTop = (posePhaseCounts.backswing ?? 0) + (posePhaseCounts.top ?? 0) > 0;
+		          const gripHasBackTop = (gripPhaseCounts.backswing ?? 0) + (gripPhaseCounts.top ?? 0) > 0;
+		          const poseCollapsed =
+		            !poseTraceInfo || poseTraceInfo.unique < 4 || poseTraceInfo.spread < 0.08;
+		          if (poseCollapsed && gripTrace.length >= 2) {
+		            const filtered = filterTraceOutliers(gripTrace);
+		            const smoothed =
+		              filtered.filtered.length >= 4 ? smoothTraceEma(filtered.filtered, 0.35) : filtered.filtered;
+		            onPlaneUpdate.hand_trace = densifyTrace(smoothed, 24);
+		            (onPlaneUpdate as Record<string, unknown>).pose_debug = {
+		              ...((onPlaneUpdate as Record<string, unknown>).pose_debug as Record<string, unknown> | undefined),
+		              hand_trace_source: "grip_low_confidence",
+		              hand_trace_smoothed: filtered.filtered.length >= 4,
+		              hand_trace_smoothing: filtered.filtered.length >= 4 ? "ema" : "none",
+		              hand_trace_densified: true,
+		              hand_trace_outliers_removed: filtered.removed,
+		              hand_trace_outlier_threshold: filtered.threshold,
+		            };
+		          }
+		          if (poseTraceInfo) {
+		            (onPlaneUpdate as Record<string, unknown>).pose_debug = {
+		              ...((onPlaneUpdate as Record<string, unknown>).pose_debug as Record<string, unknown> | undefined),
+		              pose_trace_points: poseTraceInfo.trace.length,
+		              pose_trace_unique: poseTraceInfo.unique,
+		              pose_trace_spread: poseTraceInfo.spread,
+		              grip_trace_unique: gripUnique,
+		              grip_trace_spread: gripSpread,
+		              pose_trace_phase_counts: posePhaseCounts,
+		              grip_trace_phase_counts: gripPhaseCounts,
+		            };
+		          }
+		          if (
+		            poseTraceInfo &&
+		            poseTraceInfo.source !== "reconstruct" &&
+		            poseTraceInfo.unique >= 2 &&
+		            poseTraceInfo.spread >= 0.01 &&
+		            gripCollapsed &&
+		            (!gripHasBackTop || poseHasBackTop)
+		          ) {
+		            const filtered = filterTraceOutliers(poseTraceInfo.trace);
+		            const smoothed =
+		              filtered.filtered.length >= 4 ? smoothTraceEma(filtered.filtered, 0.35) : filtered.filtered;
+		            onPlaneUpdate.hand_trace = densifyTrace(smoothed, 24);
+		            (onPlaneUpdate as Record<string, unknown>).pose_debug = {
+		              ...((onPlaneUpdate as Record<string, unknown>).pose_debug as Record<string, unknown> | undefined),
+		              hand_trace_source: "pose_collapse_override",
+		              hand_trace_smoothed: filtered.filtered.length >= 4,
+		              hand_trace_smoothing: filtered.filtered.length >= 4 ? "ema" : "none",
+		              hand_trace_densified: true,
+		              hand_trace_outliers_removed: filtered.removed,
+		              hand_trace_outlier_threshold: filtered.threshold,
+		            };
+		            const downswingPts = poseTraceInfo.trace
+		              .filter((p) => p.phase === "downswing" || p.phase === "impact")
+		              .map((p) => ({ x: p.x, y: p.y }));
+		            if (downswingPts.length >= 2) {
+		              const fit = buildBestFitLine01(downswingPts);
+		              if (fit) {
+		                onPlaneUpdate.downswing_plane = fit;
+		                onPlaneUpdate.plane_source = "pose_trace_fit";
+		                onPlaneUpdate.plane_confidence = "low";
+		              }
+		            }
+		          }
+		        }
+
+		        // Final safeguard: if a trace exists, derive a fit line even if pose block failed.
+        if (onPlaneUpdate && Array.isArray(onPlaneUpdate.hand_trace)) {
+          const planeSource = String((onPlaneUpdate as Record<string, unknown>).plane_source ?? "");
+          const hasRefPlane = !!(onPlaneUpdate as Record<string, unknown>).reference_plane;
+          const traceFit = buildTraceFitLine(onPlaneUpdate.hand_trace as Array<{ x: number; y: number; phase?: string }>);
+          if (traceFit && !planeSource && !hasRefPlane) {
+            onPlaneUpdate.downswing_plane = traceFit.line;
+            onPlaneUpdate.plane_source = "hand_trace_fit";
+            onPlaneUpdate.plane_confidence = "low";
+		            if (process.env.NODE_ENV !== "production") {
+		              (onPlaneUpdate as Record<string, unknown>).pose_debug = {
+		                ...((onPlaneUpdate as Record<string, unknown>).pose_debug as Record<string, unknown> | undefined),
+		                trace_fit_unique: traceFit.unique,
+		                trace_fit_spread: traceFit.spread,
+		              };
+		            }
+		          }
 		        }
       }
     }
@@ -2994,28 +4412,33 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
     }
   }
 
-  const nextResult = {
-    ...stored.result,
-    phases: {
-      ...stored.result.phases,
-      ...(phaseUpdates.address ? { address: phaseUpdates.address } : null),
-      ...(phaseUpdates.backswing ? { backswing: phaseUpdates.backswing } : null),
-      ...(phaseUpdates.top ? { top: phaseUpdates.top } : null),
-      ...(phaseUpdates.downswing ? { downswing: phaseUpdates.downswing } : null),
-      ...(phaseUpdates.impact ? { impact: phaseUpdates.impact } : null),
-      ...(phaseUpdates.finish ? { finish: phaseUpdates.finish } : null),
-    },
-  };
+  let baseResult: SwingAnalysis = stored.result as SwingAnalysis;
+  let phaseComparison: ReturnType<typeof buildPhaseComparison> | null = null;
+  if (!onPlaneOnly) {
+    const nextResult = {
+      ...stored.result,
+      phases: {
+        ...stored.result.phases,
+        ...(phaseUpdates.address ? { address: phaseUpdates.address } : null),
+        ...(phaseUpdates.backswing ? { backswing: phaseUpdates.backswing } : null),
+        ...(phaseUpdates.top ? { top: phaseUpdates.top } : null),
+        ...(phaseUpdates.downswing ? { downswing: phaseUpdates.downswing } : null),
+        ...(phaseUpdates.impact ? { impact: phaseUpdates.impact } : null),
+        ...(phaseUpdates.finish ? { finish: phaseUpdates.finish } : null),
+      },
+    };
 
-  const nextTotal = computeTotalScoreFromPhases(nextResult.phases as Record<string, { score?: number }>);
-  const rescored = rescoreSwingAnalysis({
-    result: { ...(nextResult as SwingAnalysis), totalScore: nextTotal },
-    deriveFromText: true,
-  });
-  // If we didn't reanalyze downswing/impact, but they have no issues and are already very high,
-  // promote to full score to avoid an unexplained "18/20" with empty improvements.
-  promoteHighNoIssueScores(rescored.phases as unknown as Record<string, { score?: number; good?: string[]; issues?: string[]; advice?: string[] }>);
-  rescored.totalScore = computeTotalScoreFromPhases(rescored.phases as unknown as Record<string, { score?: number }>);
+    const nextTotal = computeTotalScoreFromPhases(nextResult.phases as Record<string, { score?: number }>);
+    const rescored = rescoreSwingAnalysis({
+      result: { ...(nextResult as SwingAnalysis), totalScore: nextTotal },
+      deriveFromText: true,
+    });
+    // If we didn't reanalyze downswing/impact, but they have no issues and are already very high,
+    // promote to full score to avoid an unexplained "18/20" with empty improvements.
+    promoteHighNoIssueScores(rescored.phases as unknown as Record<string, { score?: number; good?: string[]; issues?: string[]; advice?: string[] }>);
+    rescored.totalScore = computeTotalScoreFromPhases(rescored.phases as unknown as Record<string, { score?: number }>);
+    baseResult = rescored;
+  }
 
   let previousReport: SwingAnalysis | null = null;
   const previousAnalysisId = stored.meta?.previousAnalysisId ?? null;
@@ -3026,14 +4449,16 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
     }
   }
 
-  const phaseComparison = previousReport ? buildPhaseComparison(previousReport, rescored) : null;
+  if (!onPlaneOnly) {
+    phaseComparison = previousReport ? buildPhaseComparison(previousReport, baseResult) : null;
+  }
   const previousOnPlane =
     (previousReport as unknown as Record<string, unknown> | null)?.on_plane ??
     (previousReport as unknown as Record<string, unknown> | null)?.onPlane ??
     null;
   const finalResult = {
-    ...rescored,
-    comparison: phaseComparison ?? rescored.comparison,
+    ...baseResult,
+    comparison: onPlaneOnly ? baseResult.comparison : phaseComparison ?? baseResult.comparison,
     on_plane:
       onPlaneUpdate
         ? { ...onPlaneUpdate, ...(previousOnPlane ? { previous: previousOnPlane } : null) }
@@ -3042,20 +4467,23 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
 
   const updated = {
     ...stored,
-    meta: {
-      ...(stored.meta ?? {}),
-      phaseOverrideSig: requestedOverrideSig,
-      phaseReevalVersion: PHASE_REEVAL_VERSION,
-      ...(fixedAddressIndex ? { addressFrameIndex: fixedAddressIndex } : null),
-      phaseOverrideFrames: {
-        ...(effectiveAddressIndices.length ? { address: effectiveAddressIndices } : null),
-        ...(backswingIndices.length ? { backswing: backswingIndices } : null),
-        ...(topIndices.length ? { top: topIndices } : null),
-        ...(downswingIndices.length ? { downswing: downswingIndices } : null),
-        ...(impactIndices.length ? { impact: impactIndices } : null),
-        ...(finishIndices.length ? { finish: finishIndices } : null),
-      },
-    },
+    meta: onPlaneOnly
+      ? { ...(stored.meta ?? {}) }
+      : {
+          ...(stored.meta ?? {}),
+          phaseOverrideSig: requestedOverrideSig,
+          phaseReevalVersion: PHASE_REEVAL_VERSION,
+          ...(fixedAddressIndex ? { addressFrameIndex: fixedAddressIndex } : null),
+          phaseOverrideFrames: {
+            ...(storedPhaseOverrides ?? {}),
+            ...(effectiveAddressIndices.length ? { address: effectiveAddressIndices } : null),
+            ...(backswingIndices.length ? { backswing: backswingIndices } : null),
+            ...(topIndices.length ? { top: topIndices } : null),
+            ...(downswingIndices.length ? { downswing: downswingIndices } : null),
+            ...(impactIndices.length ? { impact: impactIndices } : null),
+            ...(finishIndices.length ? { finish: finishIndices } : null),
+          },
+        },
     result: finalResult,
   };
   await saveAnalysis(updated);
