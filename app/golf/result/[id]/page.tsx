@@ -72,6 +72,15 @@ const phaseOrder: Array<keyof GolfAnalysisResponse['result']['phases']> = [
 const SHOW_SWING_TYPE_DIAGNOSIS_UI = false;
 const SHOW_SWING_STYLE_COMMENT_UI = false;
 
+const normalizeFrameIndex = (raw: unknown, length: number): number | null => {
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return null;
+  const rounded = Math.round(n);
+  if (rounded >= 1 && rounded <= length) return rounded - 1; // 1-based
+  if (rounded >= 0 && rounded < length) return rounded; // 0-based
+  return null;
+};
+
 type IssueRule = {
   key: string;
   patterns: RegExp[];
@@ -1444,6 +1453,68 @@ const GolfResultPage = () => {
     (result as unknown as Record<string, unknown>)?.onPlane ??
     (result as unknown as Record<string, unknown>)?.onPlaneData ??
     null;
+  const onPlaneOverlayFrames = (() => {
+    const seq = result?.sequence;
+    const frames = Array.isArray(seq?.frames) ? seq.frames : [];
+    const urls = frames.map((f) => (f && typeof (f as { url?: unknown }).url === 'string' ? (f as { url: string }).url : null));
+    const validAt = (idx0: number | null) => (idx0 == null ? null : urls[idx0] && urls[idx0]!.startsWith('data:image/') ? urls[idx0] : null);
+
+    const pickFromManual = (indices1Based: number[] | undefined | null) => {
+      if (!Array.isArray(indices1Based) || !indices1Based.length) return null;
+      for (const n of indices1Based) {
+        const idx0 = normalizeFrameIndex(n, urls.length);
+        const url = validAt(idx0);
+        if (url) return url;
+      }
+      return null;
+    };
+
+    const pickFromStage = (stageKey: string) => {
+      const stages = Array.isArray(seq?.stages) ? seq!.stages : [];
+      const found = stages.find((s) => s && typeof (s as { stage?: unknown }).stage === 'string' && (s as { stage: string }).stage === stageKey);
+      const indices = found && Array.isArray((found as { keyFrameIndices?: unknown }).keyFrameIndices) ? (found as { keyFrameIndices: unknown[] }).keyFrameIndices : [];
+      for (const raw of indices) {
+        const idx0 = normalizeFrameIndex(raw, urls.length);
+        const url = validAt(idx0);
+        if (url) return url;
+      }
+      return null;
+    };
+
+    const adUrl =
+      pickFromManual(manualPhase.address) ??
+      pickFromStage('address') ??
+      pickFromStage('address_to_backswing') ??
+      validAt(normalizeFrameIndex(PHASE_FRAME_MAP.address?.[0], urls.length));
+    const bsUrl =
+      pickFromManual(manualPhase.backswing) ??
+      pickFromStage('address_to_backswing') ??
+      pickFromStage('backswing_to_top') ??
+      validAt(normalizeFrameIndex(PHASE_FRAME_MAP.backswing?.[0], urls.length));
+    const topUrl =
+      pickFromManual(manualPhase.top) ??
+      pickFromStage('backswing_to_top') ??
+      pickFromStage('top_to_downswing') ??
+      validAt(normalizeFrameIndex(PHASE_FRAME_MAP.top?.[0], urls.length));
+    const dsUrl =
+      pickFromManual(manualPhase.downswing) ??
+      pickFromStage('top_to_downswing') ??
+      pickFromStage('downswing_to_impact') ??
+      validAt(normalizeFrameIndex(PHASE_FRAME_MAP.downswing?.[0], urls.length));
+    const impUrl =
+      pickFromManual(manualPhase.impact) ??
+      pickFromStage('impact') ??
+      pickFromStage('downswing_to_impact') ??
+      validAt(normalizeFrameIndex(PHASE_FRAME_MAP.impact?.[0], urls.length));
+
+    const out: Array<{ url: string; label: string }> = [];
+    if (adUrl) out.push({ url: adUrl, label: 'Address' });
+    if (bsUrl) out.push({ url: bsUrl, label: 'Backswing' });
+    if (topUrl) out.push({ url: topUrl, label: 'Top' });
+    if (dsUrl) out.push({ url: dsUrl, label: 'Downswing' });
+    if (impUrl) out.push({ url: impUrl, label: 'Impact' });
+    return out;
+  })();
 
   return (
     <main className="min-h-screen bg-slate-950 text-slate-50 flex justify-center">
@@ -1974,7 +2045,11 @@ const GolfResultPage = () => {
           </section>
         )}
 
-        <OnPlaneSection onPlaneData={onPlaneData} isPro={userState.hasProAccess} />
+        <OnPlaneSection
+          onPlaneData={onPlaneData}
+          isPro={userState.hasProAccess}
+          overlayFrames={userState.hasProAccess ? onPlaneOverlayFrames : null}
+        />
 
         <ProUpsellModal
           open={proModalOpen}

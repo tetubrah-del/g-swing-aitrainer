@@ -81,6 +81,20 @@ export interface GolfAnalyzeMeta {
   previousAnalysisId?: AnalysisId | null;
   impactIndex?: number;
   scoringVersion?: string;
+  /**
+   * Version tag for reevaluation logic (server-side). Bumped when reevaluation heuristics change,
+   * so the same `phaseOverrideSig` can be recomputed once after deployment.
+   */
+  phaseReevalVersion?: string;
+  /**
+   * Signature of the last user-selected phase-frame overrides used to generate the current result.
+   * Used to avoid re-running nondeterministic vision evaluation when the override set is unchanged.
+   */
+  phaseOverrideSig?: string;
+  /**
+   * Last applied override frame indices (1-based, as shown in the UI).
+   */
+  phaseOverrideFrames?: Partial<Record<"address" | "backswing" | "top" | "downswing" | "impact" | "finish", number[]>>;
 }
 
 export type AuthProvider = "google" | "email";

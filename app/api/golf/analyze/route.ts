@@ -769,6 +769,99 @@ function computeHandPosition(pose?: Record<string, unknown> | null): { x: number
   return lw || rw || null;
 }
 
+function buildLineThroughUnitBox(params: {
+  anchor: { x: number; y: number };
+  dir: { x: number; y: number };
+}): { x1: number; y1: number; x2: number; y2: number } | null {
+  const { anchor, dir } = params;
+  if (!Number.isFinite(anchor.x) || !Number.isFinite(anchor.y) || !Number.isFinite(dir.x) || !Number.isFinite(dir.y)) return null;
+  const dx = dir.x;
+  const dy = dir.y;
+  const len = Math.hypot(dx, dy);
+  if (len < 1e-6) return null;
+  const ux = dx / len;
+  const uy = dy / len;
+
+  const points: Array<{ x: number; y: number }> = [];
+  const pushIfIn = (x: number, y: number) => {
+    if (x < -1e-6 || x > 1 + 1e-6 || y < -1e-6 || y > 1 + 1e-6) return;
+    const cx = Math.min(1, Math.max(0, x));
+    const cy = Math.min(1, Math.max(0, y));
+    points.push({ x: cx, y: cy });
+  };
+
+  if (Math.abs(ux) > 1e-6) {
+    const t0 = (0 - anchor.x) / ux;
+    pushIfIn(0, anchor.y + t0 * uy);
+    const t1 = (1 - anchor.x) / ux;
+    pushIfIn(1, anchor.y + t1 * uy);
+  }
+  if (Math.abs(uy) > 1e-6) {
+    const t0 = (0 - anchor.y) / uy;
+    pushIfIn(anchor.x + t0 * ux, 0);
+    const t1 = (1 - anchor.y) / uy;
+    pushIfIn(anchor.x + t1 * ux, 1);
+  }
+
+  // De-dup (rough)
+  const uniq: Array<{ x: number; y: number }> = [];
+  for (const p of points) {
+    if (!uniq.some((q) => Math.hypot(q.x - p.x, q.y - p.y) < 0.02)) uniq.push(p);
+  }
+  if (uniq.length < 2) return null;
+
+  let best: { a: { x: number; y: number }; b: { x: number; y: number }; d: number } | null = null;
+  for (let i = 0; i < uniq.length; i += 1) {
+    for (let j = i + 1; j < uniq.length; j += 1) {
+      const d = Math.hypot(uniq[i]!.x - uniq[j]!.x, uniq[i]!.y - uniq[j]!.y);
+      if (!best || d > best.d) best = { a: uniq[i]!, b: uniq[j]!, d };
+    }
+  }
+  if (!best) return null;
+  return { x1: best.a.x, y1: best.a.y, x2: best.b.x, y2: best.b.y };
+}
+
+function toShaftVector(value: unknown): { x: number; y: number } | null {
+  if (!Array.isArray(value) || value.length < 2) return null;
+  const dx = Number(value[0]);
+  const dy = Number(value[1]);
+  if (!Number.isFinite(dx) || !Number.isFinite(dy)) return null;
+  return { x: dx, y: dy };
+}
+
+function averageDirections(v1: { x: number; y: number } | null, v2: { x: number; y: number } | null): { x: number; y: number } | null {
+  if (!v1 && !v2) return null;
+  if (v1 && !v2) return v1;
+  if (!v1 && v2) return v2;
+  const a = v1!;
+  const b = v2!;
+  const la = Math.hypot(a.x, a.y);
+  const lb = Math.hypot(b.x, b.y);
+  if (la < 1e-6 || lb < 1e-6) return la >= lb ? a : b;
+  const ax = a.x / la;
+  const ay = a.y / la;
+  let bx = b.x / lb;
+  let by = b.y / lb;
+  // Direction sign is arbitrary for lines; align before averaging.
+  const dot = ax * bx + ay * by;
+  if (dot < 0) {
+    bx *= -1;
+    by *= -1;
+  }
+  const sx = ax + bx;
+  const sy = ay + by;
+  const ls = Math.hypot(sx, sy);
+  if (ls < 1e-6) return { x: ax, y: ay };
+  return { x: sx / ls, y: sy / ls };
+}
+
+function angleDeltaDeg(lineA: { x1: number; y1: number; x2: number; y2: number }, lineB: { x1: number; y1: number; x2: number; y2: number }): number {
+  const a = Math.atan2(lineA.y2 - lineA.y1, lineA.x2 - lineA.x1);
+  const b = Math.atan2(lineB.y2 - lineB.y1, lineB.x2 - lineB.x1);
+  const d = Math.atan2(Math.sin(b - a), Math.cos(b - a));
+  return Math.abs((d * 180) / Math.PI);
+}
+
 async function extractPreviewFramesFromBuffer(params: {
   buffer: Buffer;
   mimeType: string;
@@ -1756,16 +1849,20 @@ export async function POST(req: NextRequest) {
         return [];
       });
 
-      const byIdx = new Map<number, Record<string, unknown>>();
+      const poseByIdx = new Map<number, Record<string, unknown>>();
+      const shaftByIdx = new Map<number, { x: number; y: number }>();
       poseFrames.forEach((f) => {
         if (f && typeof f === "object") {
-          byIdx.set(f.idx, (f.pose as unknown as Record<string, unknown>) ?? {});
+          poseByIdx.set(f.idx, (f.pose as unknown as Record<string, unknown>) ?? {});
+          const raw = (f.club as unknown as { shaftVector?: unknown } | undefined)?.shaftVector ?? null;
+          const vec = toShaftVector(raw);
+          if (vec) shaftByIdx.set(f.idx, vec);
         }
       });
 
-      const poseTop = byIdx.get(0) ?? null;
-      const poseDs = byIdx.get(1) ?? null;
-      const poseImp = byIdx.get(2) ?? null;
+      const poseTop = poseByIdx.get(0) ?? null;
+      const poseDs = poseByIdx.get(1) ?? null;
+      const poseImp = poseByIdx.get(2) ?? null;
 
       const topAngle = computeShoulderAngleRad(poseTop);
       const dsAngle = computeShoulderAngleRad(poseDs);
@@ -1779,6 +1876,41 @@ export async function POST(req: NextRequest) {
 
       const faceUnstableHint =
         parsed.phases?.impact?.issues?.some((t) => /フェース|開き|face/i.test(String(t))) ?? false;
+
+      // On-plane 2D line estimate: use shaft vector (grip→head) anchored at hands, clipped to the image bounds.
+      try {
+        const topHandForPlane = computeHandPosition(poseTop);
+        const dsHandForPlane = computeHandPosition(poseDs);
+        const impHandForPlane = computeHandPosition(poseImp);
+        const topVec = shaftByIdx.get(0) ?? null;
+        const dsVec = shaftByIdx.get(1) ?? null;
+        const impVec = shaftByIdx.get(2) ?? null;
+        const backswingPlane =
+          topHandForPlane && topVec ? buildLineThroughUnitBox({ anchor: topHandForPlane, dir: topVec }) : null;
+        const downAnchor = dsHandForPlane ?? impHandForPlane;
+        const downVec = averageDirections(dsVec, impVec);
+        const downswingPlane =
+          downAnchor && downVec ? buildLineThroughUnitBox({ anchor: downAnchor, dir: downVec }) : null;
+
+        if (backswingPlane || downswingPlane) {
+          const base =
+            result.on_plane && typeof result.on_plane === "object" ? (result.on_plane as Record<string, unknown>) : {};
+          const merged: Record<string, unknown> = { ...base };
+          if (backswingPlane) merged.backswing_plane = backswingPlane;
+          if (downswingPlane) merged.downswing_plane = downswingPlane;
+          merged.plane_source = "shaft_vector_2d";
+          if (backswingPlane && downswingPlane) {
+            const d = angleDeltaDeg(backswingPlane, downswingPlane);
+            merged.plane_confidence = d <= 25 ? "high" : d <= 40 ? "medium" : "low";
+            merged.plane_angle_delta_deg = Math.round(d);
+          } else {
+            merged.plane_confidence = "low";
+          }
+          result.on_plane = merged;
+        }
+      } catch (err) {
+        console.warn("[golf/analyze] on-plane plane line estimate failed", err);
+      }
 
       if (
         typeof topAngle === "number" &&
