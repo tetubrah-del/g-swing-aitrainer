@@ -117,6 +117,14 @@ const sanitizeOneLinerForFree = (text: string | null): string | null => {
   return s.length > 80 ? `${s.slice(0, 80)}…` : s;
 };
 
+const resolveReanalyzeTs = (data: unknown): number | null => {
+  const obj = getObj(data);
+  if (!obj) return null;
+  const debug = getObj(obj.pose_debug ?? obj.poseDebug ?? obj.poseDebug);
+  if (!debug) return null;
+  return readNumber(debug.reanalyze_ts ?? debug.reanalyzeTs ?? debug.reanalyzeTS);
+};
+
 type PhaseDeviationKey = 'top_to_downswing' | 'late_downswing' | 'impact';
 
 const resolveDeviationCm = (data: unknown, key: PhaseDeviationKey): number | null => {
@@ -198,9 +206,8 @@ function OnPlaneFrameOverlay(props: {
   tone: ScoreTone;
 }) {
   const frames = props.frames.filter((f) => typeof f?.url === 'string' && f.url.startsWith('data:image/'));
-  const addressFrame = frames.find((f) => f.label === 'Address') ?? null;
-  const [viewMode, setViewMode] = useState<'overlay' | 'address'>(() => (addressFrame ? 'address' : 'overlay'));
-  const displayFrames = viewMode === 'address' && addressFrame ? [addressFrame] : frames;
+  const [selectedLabel, setSelectedLabel] = useState<string | null>(null);
+  const displayFrames = selectedLabel ? frames.filter((f) => f.label === selectedLabel) : frames;
 
   const [aspectRatio, setAspectRatio] = useState<number | null>(null);
   const firstUrl = displayFrames[0]?.url ?? null;
@@ -229,7 +236,7 @@ function OnPlaneFrameOverlay(props: {
 
   if (displayFrames.length < 1) return null;
 
-  const opacity = viewMode === 'overlay' ? (displayFrames.length >= 3 ? 0.32 : 0.38) : 1.0;
+  const opacity = selectedLabel ? 1.0 : displayFrames.length >= 3 ? 0.32 : 0.38;
   const borderOf = (label: string) =>
     label === 'Address'
       ? 'border-emerald-400/30'
@@ -237,7 +244,7 @@ function OnPlaneFrameOverlay(props: {
         ? 'border-violet-400/30'
         : label === 'Top'
       ? 'border-sky-400/30'
-      : label === 'Downswing'
+      : label.startsWith('Downswing')
         ? 'border-amber-300/30'
         : label === 'Impact'
           ? 'border-rose-300/30'
@@ -258,7 +265,7 @@ function OnPlaneFrameOverlay(props: {
                       ? 'bg-violet-300'
                       : f.label === 'Top'
                     ? 'bg-sky-300'
-                    : f.label === 'Downswing'
+                  : f.label.startsWith('Downswing')
                       ? 'bg-amber-200'
                       : f.label === 'Impact'
                         ? 'bg-rose-300'
@@ -268,26 +275,29 @@ function OnPlaneFrameOverlay(props: {
               {f.label}
             </span>
           ))}
-          {addressFrame ? (
-            <div className="ml-2 inline-flex items-center gap-1 rounded-full border border-slate-700 bg-slate-950/40 p-0.5">
+          {frames.length ? (
+            <div className="ml-2 inline-flex flex-wrap items-center gap-1 rounded-full border border-slate-700 bg-slate-950/40 p-0.5">
               <button
                 type="button"
-                onClick={() => setViewMode('overlay')}
+                onClick={() => setSelectedLabel(null)}
                 className={`rounded-full px-2 py-1 text-[11px] ${
-                  viewMode === 'overlay' ? 'bg-slate-200/10 text-slate-100' : 'text-slate-400 hover:text-slate-200'
+                  selectedLabel === null ? 'bg-slate-200/10 text-slate-100' : 'text-slate-400 hover:text-slate-200'
                 }`}
               >
                 重ね
               </button>
-              <button
-                type="button"
-                onClick={() => setViewMode('address')}
-                className={`rounded-full px-2 py-1 text-[11px] ${
-                  viewMode === 'address' ? 'bg-slate-200/10 text-slate-100' : 'text-slate-400 hover:text-slate-200'
-                }`}
-              >
-                Address
-              </button>
+              {frames.map((f) => (
+                <button
+                  key={f.label}
+                  type="button"
+                  onClick={() => setSelectedLabel(f.label)}
+                  className={`rounded-full px-2 py-1 text-[11px] ${
+                    selectedLabel === f.label ? 'bg-slate-200/10 text-slate-100' : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  {f.label}
+                </button>
+              ))}
             </div>
           ) : null}
         </div>
@@ -301,7 +311,7 @@ function OnPlaneFrameOverlay(props: {
               key={`${f.label}-${idx}`}
               src={f.url}
               alt={`${f.label} frame`}
-              className={`absolute inset-0 h-full w-full object-contain ${viewMode === 'overlay' ? 'mix-blend-screen' : 'mix-blend-normal'}`}
+              className={`absolute inset-0 h-full w-full object-contain ${selectedLabel ? 'mix-blend-normal' : 'mix-blend-screen'}`}
               style={{ opacity }}
               loading="lazy"
             />
@@ -1046,12 +1056,16 @@ export default function OnPlaneSection(props: OnPlaneSectionProps) {
   const addressLandmarksRaw = resolveAddressLandmarks(onPlaneData);
   const zoneEval = resolveZoneEval(onPlaneData);
   const zoneThetaDeg = resolveZoneThetaDeg(onPlaneData) ?? null;
+  const onPlaneSource = readString(getObj(onPlaneData)?.source);
+  const reanalyzeTs = resolveReanalyzeTs(onPlaneData);
+  const reanalyzeLabel = reanalyzeTs ? new Date(reanalyzeTs).toLocaleString('ja-JP', { hour12: false }) : null;
 
   // Display heuristic:
   // If extracted shaft-vector lines consistently tilt "right-up -> left-down" (negative slope),
   // flip X for visualization so the plane aligns with the most common DTL expectation (left-up -> right-down).
   // This does NOT change stored data; it only affects rendering.
   const shouldFlipX = (() => {
+    if (onPlaneSource === 'video') return false;
     if (addressLandmarksRaw?.ball && addressLandmarksRaw?.grip) {
       const ballX = addressLandmarksRaw.ball.x;
       const gripX = addressLandmarksRaw.grip.x;
@@ -1186,6 +1200,7 @@ export default function OnPlaneSection(props: OnPlaneSectionProps) {
         <div>
           <h2 className="text-sm font-semibold">オンプレーン診断</h2>
           <p className="text-xs text-slate-400 mt-1">手元（グリップ中心）のダウンスイング軌道が、参照プレーンのゾーン内をどれだけ通過できているか</p>
+          {reanalyzeLabel ? <p className="text-[11px] text-slate-500 mt-1">再解析: {reanalyzeLabel}</p> : null}
         </div>
         {typeof score === 'number' ? (
           <span className={`inline-flex items-center rounded-full px-2 py-1 text-[11px] ring-1 ${toneClass.ring} ${toneClass.bg} ${toneClass.text}`}>

@@ -66,6 +66,12 @@ export interface SwingAnalysis {
     improved: string[];
     regressed: string[];
   };
+  phaseFrames?: Partial<
+    Record<
+      "address" | "backswing" | "top" | "downswing" | "impact" | "finish",
+      { url: string; timestampSec?: number }
+    >
+  >;
   sequence?: SequenceReview;
   on_plane?: unknown;
   swingStyle?: import("@/app/lib/swing/style").SwingStyleAssessment;

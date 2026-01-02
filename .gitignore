@@ -23,6 +23,7 @@
 # misc
 .DS_Store
 *.pem
+.venv/
 
 # local sqlite data
 /data/*.db

@@ -71,6 +71,15 @@ class HttpError extends Error {
   }
 }
 
+const normalizeFrameIndex = (raw: unknown, length: number): number | null => {
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return null;
+  const rounded = Math.round(n);
+  if (rounded >= 1 && rounded <= length) return rounded - 1; // 1-based
+  if (rounded >= 0 && rounded < length) return rounded; // 0-based
+  return null;
+};
+
 async function resolveUserContext(req: NextRequest): Promise<UserContext> {
   const { anonymousUserId: tokenAnonymous } = readAnonymousFromRequest(req);
   const anonymousUserId = tokenAnonymous ?? null;
@@ -1766,6 +1775,62 @@ export async function POST(req: NextRequest) {
         return { ...stage, keyFrameIndices: [idx] };
       }) ?? undefined;
 
+    const phaseFramesFromSequence = (() => {
+      if (!cleanedSequenceFrames.length) return null;
+      const sourceStages = parsed.sequenceStages ?? stagesWithMotion ?? [];
+      if (!sourceStages.length) return null;
+      const mapping: Array<{ stage: string; phase: PhaseKey }> = [
+        { stage: "address", phase: "address" },
+        { stage: "address_to_backswing", phase: "backswing" },
+        { stage: "backswing_to_top", phase: "top" },
+        { stage: "top_to_downswing", phase: "downswing" },
+        { stage: "downswing_to_impact", phase: "impact" },
+        { stage: "impact", phase: "impact" },
+        { stage: "finish", phase: "finish" },
+      ];
+      const out: Partial<Record<PhaseKey, { url: string; timestampSec?: number }>> = {};
+      for (const { stage, phase } of mapping) {
+        const found = sourceStages.find((s) => s.stage === stage);
+        const idxRaw = found?.keyFrameIndices?.[0];
+        const idx0 = normalizeFrameIndex(idxRaw, cleanedSequenceFrames.length);
+        if (idx0 == null) continue;
+        const frame = cleanedSequenceFrames[idx0];
+        if (!frame?.url || !frame.url.startsWith("data:image/")) continue;
+        out[phase] = { url: frame.url, timestampSec: frame.timestampSec };
+      }
+      return Object.keys(out).length ? out : null;
+    })();
+
+    const phaseFramesFromExtractedEntries = await Promise.all(
+      PHASE_ORDER.map(async (phase) => {
+        const frame = frames[phase];
+        if (!frame?.base64Image) return [phase, null] as const;
+        const normalized = await normalizePhaseFrame(frame, req.url).catch((err) => {
+          console.warn("[golf/analyze] phase frame normalize failed", err);
+          return null;
+        });
+        if (!normalized?.base64Image) return [phase, null] as const;
+        const mime = normalizeMime(normalized.mimeType);
+        const base64 = normalized.base64Image.replace(/\s+/g, "");
+        if (!base64) return [phase, null] as const;
+        return [
+          phase,
+          {
+            url: `data:${mime};base64,${base64}`,
+            timestampSec: normalized.timestampSec,
+          },
+        ] as const;
+      })
+    );
+    const phaseFramesFromExtracted = Object.fromEntries(
+      phaseFramesFromExtractedEntries.filter((entry): entry is readonly [string, { url: string; timestampSec?: number }] => !!entry[1])
+    );
+
+    const phaseFramesForUi = {
+      ...(phaseFramesFromExtracted ?? {}),
+      ...(phaseFramesFromSequence ?? {}),
+    };
+
     const result: SwingAnalysis = {
       analysisId,
       createdAt: new Date(timestamp).toISOString(),
@@ -1774,6 +1839,7 @@ export async function POST(req: NextRequest) {
       summary: parsed.summary,
       recommendedDrills: parsed.recommendedDrills ?? [],
       comparison: parsed.comparison,
+      phaseFrames: phaseFramesForUi,
       on_plane:
         parsed.onPlane && typeof parsed.onPlane === "object"
           ? {

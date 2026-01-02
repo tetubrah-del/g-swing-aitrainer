@@ -1,6 +1,10 @@
 import "server-only";
 
 import OpenAI from "openai";
+import fs from "node:fs/promises";
+import path from "node:path";
+import os from "node:os";
+import sharp from "sharp";
 
 import { extractPoseKeypointsFromImagesMediaPipe } from "@/app/lib/pose/mediapipePose";
 
@@ -29,6 +33,8 @@ export type ExtractedPoseFrame = {
 const client = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
   baseURL: process.env.OPENAI_API_BASE ?? undefined,
+  // Server-only file, but MediaPipe stubs define document; avoid browser guard trips.
+  dangerouslyAllowBrowser: true,
 });
 
 const resolvePoseModel = () => {
@@ -59,6 +65,17 @@ IMPORTANT:
 
 Do not add explanations.`;
 
+const POSE_DEBUG_SAVE = (process.env.POSE_DEBUG_SAVE ?? "false").toLowerCase() === "true";
+const POSE_DEBUG_SAVE_IMAGES = (process.env.POSE_DEBUG_SAVE_IMAGES ?? "false").toLowerCase() === "true";
+const POSE_DEBUG_DIR = process.env.POSE_DEBUG_DIR ?? path.join(os.tmpdir(), "pose-llm-debug");
+const POSE_DEBUG_IMAGES_DIR = process.env.POSE_DEBUG_IMAGES_DIR ?? path.join(os.tmpdir(), "pose-llm-debug-images");
+const POSE_LLM_ROI_ENABLED = (process.env.POSE_LLM_ROI_ENABLED ?? "false").toLowerCase() === "true";
+const POSE_LLM_ROI_X = Number(process.env.POSE_LLM_ROI_X ?? "0.1");
+const POSE_LLM_ROI_Y = Number(process.env.POSE_LLM_ROI_Y ?? "0.05");
+const POSE_LLM_ROI_W = Number(process.env.POSE_LLM_ROI_W ?? "0.8");
+const POSE_LLM_ROI_H = Number(process.env.POSE_LLM_ROI_H ?? "0.9");
+const POSE_LLM_ROI_LONG_EDGE = Number(process.env.POSE_LLM_ROI_LONG_EDGE ?? "0");
+
 function parseJsonContent(content: unknown) {
   if (content === null || content === undefined) return {};
   if (typeof content === "object") return content;
@@ -68,6 +85,42 @@ function parseJsonContent(content: unknown) {
   } catch {
     return {};
   }
+}
+
+const clamp01 = (value: number, fallback: number) => {
+  if (!Number.isFinite(value)) return fallback;
+  return Math.max(0, Math.min(1, value));
+};
+
+async function cropFrameForLLM(frame: { base64Image: string; mimeType: string }) {
+  if (!POSE_LLM_ROI_ENABLED) return frame;
+  const buffer = Buffer.from(frame.base64Image, "base64");
+  let pipeline = sharp(buffer);
+  const metadata = await pipeline.metadata();
+  const width = metadata.width ?? 0;
+  const height = metadata.height ?? 0;
+  if (width <= 1 || height <= 1) return frame;
+  const roiX = clamp01(POSE_LLM_ROI_X, 0.1);
+  const roiY = clamp01(POSE_LLM_ROI_Y, 0.05);
+  const roiW = clamp01(POSE_LLM_ROI_W, 0.8);
+  const roiH = clamp01(POSE_LLM_ROI_H, 0.9);
+  const left = Math.max(0, Math.min(width - 1, Math.round(width * roiX)));
+  const top = Math.max(0, Math.min(height - 1, Math.round(height * roiY)));
+  const cropWidth = Math.max(1, Math.min(width - left, Math.round(width * roiW)));
+  const cropHeight = Math.max(1, Math.min(height - top, Math.round(height * roiH)));
+  pipeline = pipeline.extract({ left, top, width: cropWidth, height: cropHeight });
+  const targetLongEdge = Number.isFinite(POSE_LLM_ROI_LONG_EDGE) ? Math.max(0, Math.round(POSE_LLM_ROI_LONG_EDGE)) : 0;
+  if (targetLongEdge > 0) {
+    const longEdge = Math.max(cropWidth, cropHeight);
+    if (longEdge > 0 && longEdge !== targetLongEdge) {
+      const scale = targetLongEdge / longEdge;
+      const nextWidth = Math.max(1, Math.round(cropWidth * scale));
+      const nextHeight = Math.max(1, Math.round(cropHeight * scale));
+      pipeline = pipeline.resize(nextWidth, nextHeight, { fit: "fill" });
+    }
+  }
+  const out = await pipeline.jpeg({ quality: 90 }).toBuffer();
+  return { base64Image: out.toString("base64"), mimeType: "image/jpeg" };
 }
 
 export async function extractPoseKeypointsFromImages(params: {
@@ -93,13 +146,26 @@ export async function extractPoseKeypointsFromImages(params: {
     | { type: "image_url"; image_url: { url: string; detail?: "low" | "high" } };
 
   const extractBatch = async (batch: Array<{ base64Image: string; mimeType: string }>, batchOffset: number) => {
+    const processedBatch = POSE_LLM_ROI_ENABLED
+      ? await Promise.all(batch.map((frame) => cropFrameForLLM(frame)))
+      : batch;
     const content: OpenAIRequestMessageContent[] = [
       {
         type: "text",
         text: `Return JSON only. Always include {"frames":[...]} with frames.length === ${batch.length}. If unsure about a keypoint, use null. Each frame is independent; do not copy-paste coordinates across frames.`,
       },
     ];
-    batch.forEach((f, idx) => {
+    processedBatch.forEach((f, idx) => {
+      if (POSE_DEBUG_SAVE_IMAGES) {
+        const mime = String(f.mimeType || "image/jpeg");
+        const ext = mime.includes("/") ? `.${mime.split("/")[1]}` : ".jpg";
+        const fileName = `pose-input-${Date.now()}-${batchOffset + idx}${ext}`;
+        const outPath = path.join(POSE_DEBUG_IMAGES_DIR, fileName);
+        void fs
+          .mkdir(POSE_DEBUG_IMAGES_DIR, { recursive: true })
+          .then(() => fs.writeFile(outPath, Buffer.from(f.base64Image, "base64")))
+          .catch(() => null);
+      }
       content.push({ type: "text", text: `frame #${idx}` });
       content.push({
         type: "image_url",
@@ -109,6 +175,15 @@ export async function extractPoseKeypointsFromImages(params: {
 
     let lastError: string | null = null;
     for (let attempt = 0; attempt < 2; attempt += 1) {
+      const retryHint =
+        attempt === 0
+          ? []
+          : [
+              {
+                type: "text" as const,
+                text: "RETRY: The previous response returned too many null keypoints. If a golfer is visible, estimate the main body joints. Only use null when a body part is fully occluded.",
+              },
+            ];
       const result = await client.chat.completions.create({
         model: resolvePoseModel(),
         messages: [
@@ -120,6 +195,7 @@ export async function extractPoseKeypointsFromImages(params: {
                 ? content
                 : [
                     ...content,
+                    ...retryHint,
                     {
                       type: "text",
                       text: `REMINDER: frames must have exactly ${batch.length} items with idx 0..${batch.length - 1} (no omissions).`,
@@ -137,6 +213,20 @@ export async function extractPoseKeypointsFromImages(params: {
       const structured = (result as any).choices?.[0]?.message?.parsed ?? result.choices?.[0]?.message?.content;
       const json = parseJsonContent(structured) as { frames?: unknown };
       const frames = Array.isArray(json.frames) ? (json.frames as unknown[]) : [];
+      if (POSE_DEBUG_SAVE) {
+        const fileName = `pose-llm-raw-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.json`;
+        const outPath = path.join(POSE_DEBUG_DIR, fileName);
+        const payload = {
+          createdAt: new Date().toISOString(),
+          batchSize: batch.length,
+          batchOffset,
+          model: resolvePoseModel(),
+          raw: structured,
+          parsed: json,
+        };
+        await fs.mkdir(POSE_DEBUG_DIR, { recursive: true });
+        await fs.writeFile(outPath, JSON.stringify(payload, null, 2), "utf8");
+      }
 
       const out: ExtractedPoseFrame[] = [];
       for (let i = 0; i < frames.length; i += 1) {
@@ -153,11 +243,18 @@ export async function extractPoseKeypointsFromImages(params: {
         });
       }
 
-      // If the model returned fewer frames than requested, retry once.
-      if (out.length >= Math.max(1, Math.floor(batch.length * 0.75))) {
+      const hasAnyPose = out.some((frame) => {
+        const pose = frame.pose as Record<string, { x?: number; y?: number } | null> | undefined;
+        if (!pose) return false;
+        return Object.values(pose).some((p) => !!p && Number.isFinite(p.x) && Number.isFinite(p.y));
+      });
+      // If the model returned fewer frames than requested or all-null poses, retry once.
+      if (out.length >= Math.max(1, Math.floor(batch.length * 0.75)) && hasAnyPose) {
         return out;
       }
-      lastError = `pose batch returned ${out.length}/${batch.length} frames`;
+      lastError = hasAnyPose
+        ? `pose batch returned ${out.length}/${batch.length} frames`
+        : `pose batch returned ${out.length}/${batch.length} frames (all null poses)`;
     }
 
     throw new Error(lastError ?? "pose extraction failed");

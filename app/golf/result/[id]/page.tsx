@@ -194,18 +194,23 @@ const getDisplayMiss = (text?: string | null): string => {
 const getFrameRange = (
   phaseKey: string,
   sequenceStages?: SequenceStageFeedback[],
-  manual?: { backswing?: number[]; top?: number[]; downswing?: number[]; impact?: number[] }
+  manual?: { address?: number[]; backswing?: number[]; top?: number[]; downswing?: number[]; impact?: number[]; finish?: number[] }
 ): [number, number] | null => {
   try {
+    const manualAddress = Array.isArray(manual?.address) ? manual!.address : undefined;
     const manualBackswing = Array.isArray(manual?.backswing) ? manual!.backswing : undefined;
     const manualTop = Array.isArray(manual?.top) ? manual!.top : undefined;
     const manualDownswing = Array.isArray(manual?.downswing) ? manual!.downswing : undefined;
     const manualImpact = Array.isArray(manual?.impact) ? manual!.impact : undefined;
+    const manualFinish = Array.isArray(manual?.finish) ? manual!.finish : undefined;
+    if (phaseKey === 'address' && manualAddress?.length)
+      return [manualAddress[0], manualAddress[manualAddress.length - 1]];
     if (phaseKey === 'backswing' && manualBackswing?.length)
       return [manualBackswing[0], manualBackswing[manualBackswing.length - 1]];
     if (phaseKey === 'top' && manualTop?.length) return [manualTop[0], manualTop[manualTop.length - 1]];
     if (phaseKey === 'downswing' && manualDownswing?.length) return [manualDownswing[0], manualDownswing[manualDownswing.length - 1]];
     if (phaseKey === 'impact' && manualImpact?.length) return [manualImpact[0], manualImpact[manualImpact.length - 1]];
+    if (phaseKey === 'finish' && manualFinish?.length) return [manualFinish[0], manualFinish[manualFinish.length - 1]];
 
     // sequenceStagesから実際のフェーズフレーム番号を取得
     if (sequenceStages && Array.isArray(sequenceStages) && sequenceStages.length > 0) {
@@ -680,7 +685,10 @@ const GolfResultPage = () => {
 
     // まずローカル保存済みの診断を優先表示し、サーバーにデータが無い場合のダミー表示を防ぐ
     const local = typeof window !== 'undefined' ? getReportById(id) : null;
-    if (local?.result) {
+    const hasLocalFrames =
+      !!local?.result?.phaseFrames ||
+      (Array.isArray(local?.result?.sequence?.frames) && local!.result!.sequence!.frames.length > 0);
+    if (local?.result && hasLocalFrames) {
       setData(local);
       setSwingTypes(deriveSwingTypes(local.result));
       setSwingTypeResult(deriveSwingTypeResult(local.result));
@@ -1156,6 +1164,7 @@ const GolfResultPage = () => {
       setSwingTypeLLM(null);
       const res = await fetch("/api/golf/reanalyze-phases", {
         method: "POST",
+        credentials: "include",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ analysisId: data.analysisId, address, backswing, top, downswing, impact, finish }),
       });
@@ -1307,6 +1316,7 @@ const GolfResultPage = () => {
       setOnPlaneReevalError(null);
       const res = await fetch("/api/golf/reanalyze-phases", {
         method: "POST",
+        credentials: "include",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           analysisId: data.analysisId,
@@ -1508,65 +1518,152 @@ const GolfResultPage = () => {
     (result as unknown as Record<string, unknown>)?.onPlaneData ??
     null;
   const onPlaneOverlayFrames = (() => {
+    if (sequenceFrames.length > 0) {
+      const urlAt = (idx1: number | null) => {
+        if (idx1 == null) return null;
+        const idx0 = normalizeFrameIndex(idx1, sequenceFrames.length);
+        const url = idx0 == null ? null : sequenceFrames[idx0]?.url ?? null;
+        return typeof url === 'string' && url.startsWith('data:image/') ? url : null;
+      };
+      const rangeOf = (key: string) => getFrameRange(key, sequenceStages, manualPhase);
+      const pickStart = (key: string) => rangeOf(key)?.[0] ?? null;
+      const pickEnd = (key: string) => rangeOf(key)?.[1] ?? null;
+
+      const addressIdx = manualPhase.address?.[0] ?? pickStart('address');
+      const backswingIdx = manualPhase.backswing?.[0] ?? pickStart('backswing');
+      const topIdx = manualPhase.top?.[0] ?? pickStart('top');
+      const downswingRange = rangeOf('downswing');
+      const impactIdx = manualPhase.impact?.[0] ?? pickStart('impact');
+      const finishIdx = manualPhase.finish?.[0] ?? pickStart('finish');
+
+      const downswing1Idx = manualPhase.downswing?.[0] ?? downswingRange?.[0] ?? null;
+      const downswing2Idx =
+        manualPhase.downswing?.[1] ??
+        pickStart('downswing_to_impact') ??
+        (downswingRange && downswingRange[1] !== downswingRange[0] ? downswingRange[1] : null) ??
+        (downswingRange && impactIdx ? Math.round((downswingRange[0] + impactIdx) / 2) : null);
+
+      const phaseOut = [
+        { label: 'Address', url: urlAt(addressIdx) },
+        { label: 'Backswing', url: urlAt(backswingIdx) },
+        { label: 'Top', url: urlAt(topIdx) },
+        { label: 'Downswing 1', url: urlAt(downswing1Idx) },
+        { label: 'Downswing 2', url: urlAt(downswing2Idx) },
+        { label: 'Impact', url: urlAt(impactIdx) },
+        { label: 'Finish', url: urlAt(finishIdx) },
+      ].filter((entry): entry is { label: string; url: string } => !!entry.url);
+      if (phaseOut.length) return phaseOut;
+    }
+
+    const phaseFramesRaw =
+      (result as unknown as { phaseFrames?: Record<string, { url?: unknown; timestampSec?: number }> })?.phaseFrames ??
+      (result as unknown as { phase_frames?: Record<string, { url?: unknown; timestampSec?: number }> })?.phase_frames ??
+      null;
+    if (phaseFramesRaw && typeof phaseFramesRaw === 'object') {
+      const phaseOrder = [
+        { key: 'address', label: 'Address' },
+        { key: 'backswing', label: 'Backswing' },
+        { key: 'top', label: 'Top' },
+        { key: 'downswing', label: 'Downswing 1' },
+        { key: 'impact', label: 'Impact' },
+        { key: 'finish', label: 'Finish' },
+      ];
+      const phaseOut = phaseOrder
+        .map((entry) => {
+          const record = (phaseFramesRaw as Record<string, { url?: unknown }>)[entry.key];
+          const url = typeof record?.url === 'string' ? record.url : null;
+          if (!url || !url.startsWith('data:image/')) return null;
+          return { url, label: entry.label };
+        })
+        .filter(Boolean) as Array<{ url: string; label: string }>;
+      if (phaseOut.length) return phaseOut;
+    }
+
     const seq = result?.sequence;
     const frames = Array.isArray(seq?.frames) ? seq.frames : [];
     const urls = frames.map((f) => (f && typeof (f as { url?: unknown }).url === 'string' ? (f as { url: string }).url : null));
     const validAt = (idx0: number | null) => (idx0 == null ? null : urls[idx0] && urls[idx0]!.startsWith('data:image/') ? urls[idx0] : null);
+    const stages = Array.isArray(seq?.stages) ? seq!.stages : [];
 
-    const pickFromManual = (indices1Based: number[] | undefined | null) => {
-      if (!Array.isArray(indices1Based) || !indices1Based.length) return null;
-      for (const n of indices1Based) {
-        const idx0 = normalizeFrameIndex(n, urls.length);
-        const url = validAt(idx0);
-        if (url) return url;
+    const pickManualIndex = (indices1Based: number[] | undefined | null, pos = 0) => {
+      if (!Array.isArray(indices1Based) || indices1Based.length <= pos) return null;
+      return normalizeFrameIndex(indices1Based[pos], urls.length);
+    };
+    const pickStageIndex = (stageKeys: string[]) => {
+      for (const stageKey of stageKeys) {
+        const found = stages.find((s) => s && typeof (s as { stage?: unknown }).stage === 'string' && (s as { stage: string }).stage === stageKey);
+        const indices = found && Array.isArray((found as { keyFrameIndices?: unknown }).keyFrameIndices) ? (found as { keyFrameIndices: unknown[] }).keyFrameIndices : [];
+        for (const raw of indices) {
+          const idx0 = normalizeFrameIndex(raw, urls.length);
+          if (idx0 != null) return idx0;
+        }
       }
       return null;
     };
 
-    const pickFromStage = (stageKey: string) => {
-      const stages = Array.isArray(seq?.stages) ? seq!.stages : [];
-      const found = stages.find((s) => s && typeof (s as { stage?: unknown }).stage === 'string' && (s as { stage: string }).stage === stageKey);
-      const indices = found && Array.isArray((found as { keyFrameIndices?: unknown }).keyFrameIndices) ? (found as { keyFrameIndices: unknown[] }).keyFrameIndices : [];
-      for (const raw of indices) {
-        const idx0 = normalizeFrameIndex(raw, urls.length);
-        const url = validAt(idx0);
-        if (url) return url;
-      }
-      return null;
-    };
+    const adIdx =
+      pickStageIndex(['address']) ??
+      pickStageIndex(['address_to_backswing']) ??
+      pickManualIndex(manualPhase.address) ??
+      normalizeFrameIndex(PHASE_FRAME_MAP.address?.[0], urls.length);
+    const bsIdx =
+      pickStageIndex(['address_to_backswing']) ??
+      pickStageIndex(['backswing_to_top']) ??
+      pickManualIndex(manualPhase.backswing) ??
+      normalizeFrameIndex(PHASE_FRAME_MAP.backswing?.[0], urls.length);
+    const topIdx =
+      pickStageIndex(['backswing_to_top']) ??
+      pickStageIndex(['top_to_downswing']) ??
+      pickManualIndex(manualPhase.top) ??
+      normalizeFrameIndex(PHASE_FRAME_MAP.top?.[0], urls.length);
+    const dsEarlyIdx =
+      pickStageIndex(['top_to_downswing']) ??
+      pickManualIndex(manualPhase.downswing, 0) ??
+      normalizeFrameIndex(PHASE_FRAME_MAP.downswing?.[0], urls.length);
+    const dsLateIdx =
+      pickStageIndex(['downswing_to_impact']) ??
+      pickManualIndex(manualPhase.downswing, 1) ??
+      normalizeFrameIndex(PHASE_FRAME_MAP.downswing?.[1], urls.length);
+    const impactIdx =
+      pickStageIndex(['impact']) ??
+      pickManualIndex(manualPhase.impact) ??
+      normalizeFrameIndex(PHASE_FRAME_MAP.impact?.[0], urls.length);
 
-    const adUrl =
-      pickFromManual(manualPhase.address) ??
-      pickFromStage('address') ??
-      pickFromStage('address_to_backswing') ??
-      validAt(normalizeFrameIndex(PHASE_FRAME_MAP.address?.[0], urls.length));
-    const bsUrl =
-      pickFromManual(manualPhase.backswing) ??
-      pickFromStage('address_to_backswing') ??
-      pickFromStage('backswing_to_top') ??
-      validAt(normalizeFrameIndex(PHASE_FRAME_MAP.backswing?.[0], urls.length));
-    const topUrl =
-      pickFromManual(manualPhase.top) ??
-      pickFromStage('backswing_to_top') ??
-      pickFromStage('top_to_downswing') ??
-      validAt(normalizeFrameIndex(PHASE_FRAME_MAP.top?.[0], urls.length));
-    const dsUrl =
-      pickFromManual(manualPhase.downswing) ??
-      pickFromStage('top_to_downswing') ??
-      pickFromStage('downswing_to_impact') ??
-      validAt(normalizeFrameIndex(PHASE_FRAME_MAP.downswing?.[0], urls.length));
-    const impUrl =
-      pickFromManual(manualPhase.impact) ??
-      pickFromStage('impact') ??
-      pickFromStage('downswing_to_impact') ??
-      validAt(normalizeFrameIndex(PHASE_FRAME_MAP.impact?.[0], urls.length));
+    const adUrl = validAt(adIdx);
+    const bsUrl = validAt(bsIdx);
+    const topUrl = validAt(topIdx);
+    const dsEarlyUrl = validAt(dsEarlyIdx);
+    const dsLateUrl = validAt(dsLateIdx);
+    const impUrl = validAt(impactIdx);
+    const impactLabel = impactIdx != null && dsLateIdx != null && impactIdx === dsLateIdx ? 'Impact (Downswing 2と同一)' : 'Impact';
 
     const out: Array<{ url: string; label: string }> = [];
     if (adUrl) out.push({ url: adUrl, label: 'Address' });
     if (bsUrl) out.push({ url: bsUrl, label: 'Backswing' });
     if (topUrl) out.push({ url: topUrl, label: 'Top' });
-    if (dsUrl) out.push({ url: dsUrl, label: 'Downswing' });
-    if (impUrl) out.push({ url: impUrl, label: 'Impact' });
+    if (dsEarlyUrl) out.push({ url: dsEarlyUrl, label: 'Downswing 1' });
+    if (dsLateUrl) out.push({ url: dsLateUrl, label: 'Downswing 2' });
+    if (impUrl) out.push({ url: impUrl, label: impactLabel });
+    if (out.length) return out;
+
+    const debugList =
+      (onPlaneData as Record<string, unknown> | null)?.debug_frames ??
+      (onPlaneData as Record<string, unknown> | null)?.debugFrames ??
+      null;
+    if (Array.isArray(debugList)) {
+      const picked = debugList
+        .map((entry) => {
+          if (!entry || typeof entry !== 'object') return null;
+          const url = typeof (entry as { url?: unknown }).url === 'string' ? (entry as { url: string }).url : null;
+          if (!url || !url.startsWith('data:image/')) return null;
+          const label =
+            typeof (entry as { label?: unknown }).label === 'string' ? (entry as { label: string }).label : 'Frame';
+          return { url, label };
+        })
+        .filter(Boolean) as Array<{ url: string; label: string }>;
+      if (picked.length) return picked;
+    }
+
     return out;
   })();
 
