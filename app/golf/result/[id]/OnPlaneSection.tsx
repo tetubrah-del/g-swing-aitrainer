@@ -931,7 +931,7 @@ const resolveHandPoints = (
 
 const resolveHandTrace = (onPlaneData: unknown): Array<{ x: number; y: number; phase?: string }> | null => {
   const obj = getObj(onPlaneData);
-  const raw = obj?.hand_trace ?? obj?.handTrace;
+  const raw = obj?.hand_trace_display ?? obj?.handTraceDisplay ?? obj?.hand_trace ?? obj?.handTrace;
   if (!Array.isArray(raw)) return null;
   const out: Array<{ x: number; y: number; phase?: string }> = [];
   for (const entry of raw) {
