@@ -245,6 +245,29 @@ function normalizeMime(mime?: string | null): string {
   return "image/jpeg";
 }
 
+function pickVideoExtension(mimeType: string, filename?: string | null) {
+  if (mimeType.startsWith("video/")) {
+    const ext = mimeType.split("/")[1];
+    if (ext) return `.${ext.replace(/[^\w.]+/g, "")}`;
+  }
+  if (filename) {
+    const ext = path.extname(filename);
+    if (ext) return ext;
+  }
+  return ".mp4";
+}
+
+async function persistSourceVideo(params: { buffer: Buffer; mimeType: string; filename?: string | null }) {
+  if (!params.mimeType.startsWith("video/")) return null;
+  const dir = process.env.GOLF_VIDEO_STORAGE_DIR ?? path.join(os.tmpdir(), "golf-video-store");
+  await fs.mkdir(dir, { recursive: true });
+  const ext = pickVideoExtension(params.mimeType, params.filename ?? null);
+  const name = `${Date.now()}-${crypto.randomUUID()}${ext}`;
+  const filePath = path.join(dir, name);
+  await fs.writeFile(filePath, params.buffer);
+  return `file://${filePath}`;
+}
+
 function isValidBase64Image(str: string | undefined | null): boolean {
   if (!str || typeof str !== "string") return false;
   try {
@@ -1154,6 +1177,9 @@ export async function POST(req: NextRequest) {
         ? level
         : "intermediate";
 
+    const analysisId: AnalysisId =
+      typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `golf-${Date.now()}`;
+
     const meta: GolfAnalyzeMeta = {
       handedness: normalizedHandedness,
       clubType: normalizedClub,
@@ -1207,6 +1233,10 @@ export async function POST(req: NextRequest) {
 
     const buffer = Buffer.from(await file.arrayBuffer());
     const mimeType = file.type || "application/octet-stream";
+    const sourceVideoUrl = await persistSourceVideo({ buffer, mimeType, filename: file.name });
+    if (sourceVideoUrl) {
+      meta.sourceVideoUrl = sourceVideoUrl;
+    }
 
     const extractedFrames = await extractPhaseFrames({ buffer, mimeType });
     const frames = mergePhaseFrames(providedFrames, extractedFrames);
@@ -1692,9 +1722,6 @@ export async function POST(req: NextRequest) {
     } catch {
       // ignore
     }
-
-    const analysisId: AnalysisId =
-      typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `golf-${Date.now()}`;
 
     const timestamp = Date.now();
     const normalizedSequenceFrames: Array<(PhaseFrame & { timestampSec?: number }) | null> = resolvedSequence.length

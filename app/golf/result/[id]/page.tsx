@@ -1508,6 +1508,24 @@ const GolfResultPage = () => {
     (result as unknown as Record<string, unknown>)?.onPlaneData ??
     null;
   const onPlaneOverlayFrames = (() => {
+    const debugList =
+      (onPlaneData as Record<string, unknown> | null)?.debug_frames ??
+      (onPlaneData as Record<string, unknown> | null)?.debugFrames ??
+      null;
+    if (Array.isArray(debugList)) {
+      const picked = debugList
+        .map((entry) => {
+          if (!entry || typeof entry !== 'object') return null;
+          const url = typeof (entry as { url?: unknown }).url === 'string' ? (entry as { url: string }).url : null;
+          if (!url || !url.startsWith('data:image/')) return null;
+          const label =
+            typeof (entry as { label?: unknown }).label === 'string' ? (entry as { label: string }).label : 'Frame';
+          return { url, label };
+        })
+        .filter(Boolean) as Array<{ url: string; label: string }>;
+      if (picked.length) return picked;
+    }
+
     const seq = result?.sequence;
     const frames = Array.isArray(seq?.frames) ? seq.frames : [];
     const urls = frames.map((f) => (f && typeof (f as { url?: unknown }).url === 'string' ? (f as { url: string }).url : null));
@@ -1550,22 +1568,32 @@ const GolfResultPage = () => {
       pickFromStage('backswing_to_top') ??
       pickFromStage('top_to_downswing') ??
       validAt(normalizeFrameIndex(PHASE_FRAME_MAP.top?.[0], urls.length));
-    const dsUrl =
-      pickFromManual(manualPhase.downswing) ??
+    const pickFromManualAt = (indices1Based: number[] | undefined | null, pos: number) => {
+      if (!Array.isArray(indices1Based) || indices1Based.length <= pos) return null;
+      const idx0 = normalizeFrameIndex(indices1Based[pos], urls.length);
+      return validAt(idx0);
+    };
+
+    const dsEarlyUrl =
+      pickFromManualAt(manualPhase.downswing, 0) ??
       pickFromStage('top_to_downswing') ??
-      pickFromStage('downswing_to_impact') ??
       validAt(normalizeFrameIndex(PHASE_FRAME_MAP.downswing?.[0], urls.length));
+    const dsLateUrl =
+      pickFromManualAt(manualPhase.downswing, 1) ??
+      pickFromStage('downswing_to_impact') ??
+      validAt(normalizeFrameIndex(PHASE_FRAME_MAP.downswing?.[1], urls.length));
     const impUrl =
       pickFromManual(manualPhase.impact) ??
       pickFromStage('impact') ??
-      pickFromStage('downswing_to_impact') ??
-      validAt(normalizeFrameIndex(PHASE_FRAME_MAP.impact?.[0], urls.length));
+      validAt(normalizeFrameIndex(PHASE_FRAME_MAP.impact?.[0], urls.length)) ??
+      dsLateUrl;
 
     const out: Array<{ url: string; label: string }> = [];
     if (adUrl) out.push({ url: adUrl, label: 'Address' });
     if (bsUrl) out.push({ url: bsUrl, label: 'Backswing' });
     if (topUrl) out.push({ url: topUrl, label: 'Top' });
-    if (dsUrl) out.push({ url: dsUrl, label: 'Downswing' });
+    if (dsEarlyUrl) out.push({ url: dsEarlyUrl, label: 'Downswing 1' });
+    if (dsLateUrl) out.push({ url: dsLateUrl, label: 'Downswing 2' });
     if (impUrl) out.push({ url: impUrl, label: 'Impact' });
     return out;
   })();

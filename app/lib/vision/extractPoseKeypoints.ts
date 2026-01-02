@@ -72,7 +72,9 @@ function parseJsonContent(content: unknown) {
 
 export async function extractPoseKeypointsFromImages(params: {
   frames: Array<{ base64Image: string; mimeType: string; timestampSec?: number }>;
+  allowLLM?: boolean;
 }): Promise<ExtractedPoseFrame[]> {
+  const allowLLM = params.allowLLM !== false;
   const useMediaPipe =
     process.env.POSE_PROVIDER === "mediapipe" ||
     process.env.USE_MEDIAPIPE_POSE === "1";
@@ -80,9 +82,14 @@ export async function extractPoseKeypointsFromImages(params: {
     try {
       return await extractPoseKeypointsFromImagesMediaPipe(params);
     } catch (error) {
+      if (!allowLLM) {
+        console.warn("[pose] mediapipe failed; LLM fallback disabled", error);
+        return [];
+      }
       console.warn("[pose] mediapipe failed, fallback to vision", error);
     }
   }
+  if (!allowLLM) return [];
   if (!client.apiKey) {
     throw new Error("OPENAI_API_KEY is not set (pose extraction)");
   }

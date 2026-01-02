@@ -13,6 +13,7 @@ import type { PhaseFrame } from "@/app/lib/vision/extractPhaseFrames";
 import { askVisionAPI } from "@/app/lib/vision/askVisionAPI";
 import { rescoreSwingAnalysis } from "@/app/golf/scoring/phaseGuardrails";
 import { extractPoseKeypointsFromImages } from "@/app/lib/vision/extractPoseKeypoints";
+import { extractVideoWindowFrames } from "@/app/lib/vision/extractVideoWindowFrames";
 import OpenAI from "openai";
 import sharp from "sharp";
 
@@ -264,6 +265,54 @@ function densifyTrace(
   return densified;
 }
 
+function densifyTraceByWindows(
+  points: Array<{ x: number; y: number; phase?: string; frameIndex?: number; timestampSec?: number }>,
+  windows: Array<{ start: number; end: number }>,
+  extraPoints: number
+): { points: Array<{ x: number; y: number; phase?: string; frameIndex?: number; timestampSec?: number }>; inserted: number } {
+  if (points.length < 2 || !windows.length || extraPoints <= 0) {
+    return { points, inserted: 0 };
+  }
+  const sorted = [...points].sort((a, b) => (a.timestampSec ?? a.frameIndex ?? 0) - (b.timestampSec ?? b.frameIndex ?? 0));
+  const catmullRom = (p0: { x: number; y: number }, p1: { x: number; y: number }, p2: { x: number; y: number }, p3: { x: number; y: number }, t: number) => {
+    const t2 = t * t;
+    const t3 = t2 * t;
+    return {
+      x: 0.5 * ((2 * p1.x) + (-p0.x + p2.x) * t + (2 * p0.x - 5 * p1.x + 4 * p2.x - p3.x) * t2 + (-p0.x + 3 * p1.x - 3 * p2.x + p3.x) * t3),
+      y: 0.5 * ((2 * p1.y) + (-p0.y + p2.y) * t + (2 * p0.y - 5 * p1.y + 4 * p2.y - p3.y) * t2 + (-p0.y + 3 * p1.y - 3 * p2.y + p3.y) * t3),
+    };
+  };
+  const inWindow = (t: number) => windows.some((w) => t >= w.start && t <= w.end);
+  const densified: Array<{ x: number; y: number; phase?: string; frameIndex?: number; timestampSec?: number }> = [];
+  let inserted = 0;
+  for (let i = 0; i < sorted.length - 1; i += 1) {
+    const p1 = sorted[i]!;
+    const p2 = sorted[i + 1]!;
+    densified.push(p1);
+    const t1 = p1.timestampSec ?? p1.frameIndex ?? 0;
+    const t2 = p2.timestampSec ?? p2.frameIndex ?? 0;
+    if (!inWindow(t1) && !inWindow(t2)) continue;
+    const p0 = sorted[i - 1] ?? p1;
+    const p3 = sorted[i + 2] ?? p2;
+    for (let j = 1; j <= extraPoints; j += 1) {
+      const t = j / (extraPoints + 1);
+      const interp = catmullRom(p0, p1, p2, p3, t);
+      densified.push({
+        x: clamp(interp.x, 0, 1),
+        y: clamp(interp.y, 0, 1),
+        phase: p1.phase,
+        frameIndex: p1.frameIndex,
+        timestampSec: typeof p1.timestampSec === "number" && typeof p2.timestampSec === "number"
+          ? p1.timestampSec + (p2.timestampSec - p1.timestampSec) * t
+          : p1.timestampSec,
+      });
+      inserted += 1;
+    }
+  }
+  densified.push(sorted[sorted.length - 1]!);
+  return { points: densified, inserted };
+}
+
 function estimateFpsFromMeta(
   metaByIdxPose: Map<number, { timestampSec?: number }>
 ): number {
@@ -309,15 +358,20 @@ function reconstructHandTrajectoryFromPoseFrames(params: {
   const fps = estimateFpsFromMeta(params.metaByIdxPose);
   const raw: Array<{ x: number; y: number; conf: number; phase: "backswing" | "top" | "downswing" | "impact"; frameIndex: number; timestampSec?: number } | null> = [];
   const filtered: Array<{ x: number; y: number; conf: number; phase: "backswing" | "top" | "downswing" | "impact"; frameIndex: number; timestampSec?: number } | null> = [];
+  const candidates: Array<{ x: number; y: number; conf: number; phase: "backswing" | "top" | "downswing" | "impact"; frameIndex: number; timestampSec?: number } | null> = [];
+  const transforms: Array<{ origin: { x: number; y: number }; scale: number } | null> = new Array(params.frameCount).fill(null);
+  const shoulderAvailable: boolean[] = new Array(params.frameCount).fill(false);
+  const hipAvailable: boolean[] = new Array(params.frameCount).fill(false);
+  const localIdxByFrameIndex = new Map<number, number>();
   const shoulderWidths: number[] = [];
   for (let i = 0; i < params.frameCount; i += 1) {
     const pose = params.poseByIdx.get(i) ?? null;
     const meta = params.metaByIdxPose.get(i) ?? null;
     if (!meta) {
-      raw.push(null);
-      filtered.push(null);
+      candidates.push(null);
       continue;
     }
+    localIdxByFrameIndex.set(meta.frameIndex, i);
     const lw = readPosePoint(pose, ["leftWrist", "left_wrist", "leftHand", "left_hand"]);
     const rw = readPosePoint(pose, ["rightWrist", "right_wrist", "rightHand", "right_hand"]);
     const ls = readPosePoint(pose, ["leftShoulder", "left_shoulder"]);
@@ -328,6 +382,11 @@ function reconstructHandTrajectoryFromPoseFrames(params: {
     const hipMid = lh && rh ? { x: (lh.x + rh.x) / 2, y: (lh.y + rh.y) / 2 } : null;
     const shoulderWidth = ls && rs ? Math.hypot(ls.x - rs.x, ls.y - rs.y) : null;
     if (shoulderWidth) shoulderWidths.push(shoulderWidth);
+    if (shoulderMid && shoulderWidth && Number.isFinite(shoulderWidth) && shoulderWidth > 1e-4) {
+      transforms[i] = { origin: shoulderMid, scale: shoulderWidth };
+      shoulderAvailable[i] = true;
+    }
+    if (hipMid) hipAvailable[i] = true;
     const lead = computeLeadHandPosition(pose, params.handedness ?? null);
     const avg = computeHandPositionAverage(pose);
     let candidate: { x: number; y: number; conf: number } | null = null;
@@ -346,19 +405,10 @@ function reconstructHandTrajectoryFromPoseFrames(params: {
       };
     }
     if (!candidate) {
-      raw.push(null);
-      filtered.push(null);
+      candidates.push(null);
       continue;
     }
-    raw.push({
-      x: candidate.x,
-      y: candidate.y,
-      conf: candidate.conf,
-      phase: meta.phase,
-      frameIndex: meta.frameIndex,
-      timestampSec: meta.timestampSec,
-    });
-    filtered.push({
+    candidates.push({
       x: candidate.x,
       y: candidate.y,
       conf: candidate.conf,
@@ -372,30 +422,109 @@ function reconstructHandTrajectoryFromPoseFrames(params: {
     shoulderWidthMedianRaw && Number.isFinite(shoulderWidthMedianRaw)
       ? clamp(shoulderWidthMedianRaw, 0.12, 0.35)
       : null;
+  const firstTransform = transforms.find((t) => t) ?? null;
+  if (firstTransform) {
+    for (let i = 0; i < transforms.length && !transforms[i]; i += 1) {
+      transforms[i] = firstTransform;
+    }
+  }
+  let lastTransform: { origin: { x: number; y: number }; scale: number } | null = null;
+  for (let i = 0; i < transforms.length; i += 1) {
+    if (transforms[i]) {
+      lastTransform = transforms[i];
+    } else if (lastTransform) {
+      transforms[i] = lastTransform;
+    }
+  }
+  const toLocal = (p: { x: number; y: number }, t: { origin: { x: number; y: number }; scale: number }) => ({
+    x: (p.x - t.origin.x) / t.scale,
+    y: (p.y - t.origin.y) / t.scale,
+  });
+  const toGlobal = (p: { x: number; y: number }, t: { origin: { x: number; y: number }; scale: number }) => ({
+    x: t.origin.x + p.x * t.scale,
+    y: t.origin.y + p.y * t.scale,
+  });
+  for (let i = 0; i < candidates.length; i += 1) {
+    const candidate = candidates[i];
+    const transform = transforms[i];
+    if (!candidate || !transform) {
+      raw.push(null);
+      filtered.push(null);
+      continue;
+    }
+    const local = toLocal(candidate, transform);
+    raw.push({ ...candidate, x: local.x, y: local.y });
+    filtered.push({ ...candidate, x: local.x, y: local.y });
+  }
+  const confidenceMin = 0.15;
+  const lowMask = new Array(filtered.length).fill(false);
+  let lowStreak = 0;
+  for (let i = 0; i < filtered.length; i += 1) {
+    const cur = filtered[i];
+    if (!cur) {
+      lowStreak = 0;
+      continue;
+    }
+    if (cur.conf < confidenceMin) {
+      lowStreak += 1;
+      if (lowStreak >= 2) {
+        lowMask[i] = true;
+        if (i > 0) lowMask[i - 1] = true;
+      }
+    } else {
+      lowStreak = 0;
+    }
+  }
   let roiRejected = 0;
   let speedRejected = 0;
   let accelRejected = 0;
   let prevValid: { x: number; y: number; frameIndex: number; timestampSec?: number } | null = null;
   let prevPrevValid: { x: number; y: number; frameIndex: number; timestampSec?: number } | null = null;
+  let roiCenterLocal: { x: number; y: number } | null = null;
+  let roiScale = 1;
+  let roiMissingStreak = 0;
   for (let i = 0; i < filtered.length; i += 1) {
     const cur = filtered[i];
+    if (lowMask[i]) {
+      filtered[i] = null;
+      continue;
+    }
     if (!cur) continue;
     const pose = params.poseByIdx.get(i) ?? null;
-    const ls = readPosePoint(pose, ["leftShoulder", "left_shoulder"]);
-    const rs = readPosePoint(pose, ["rightShoulder", "right_shoulder"]);
     const lh = readPosePoint(pose, ["leftHip", "left_hip"]);
     const rh = readPosePoint(pose, ["rightHip", "right_hip"]);
-    const shoulderMid = ls && rs ? { x: (ls.x + rs.x) / 2, y: (ls.y + rs.y) / 2 } : null;
+    const transform = transforms[i];
     const hipMid = lh && rh ? { x: (lh.x + rh.x) / 2, y: (lh.y + rh.y) / 2 } : null;
-    const torsoMid = shoulderMid && hipMid ? { x: (shoulderMid.x + hipMid.x) / 2, y: (shoulderMid.y + hipMid.y) / 2 } : shoulderMid ?? hipMid;
-    const shoulderWidth = ls && rs ? Math.hypot(ls.x - rs.x, ls.y - rs.y) : shoulderWidthMedian;
-    const swBase = shoulderWidth ? clamp(shoulderWidth, 0.12, 0.35) : shoulderWidthMedian ?? 0.18;
-    if (torsoMid && swBase) {
-      const confScale = cur.conf < 1 ? 0.9 : 1;
-      const R = swBase * 2.2 * confScale + 0.04;
-      const d = Math.hypot(cur.x - torsoMid.x, cur.y - torsoMid.y);
-      const yMin = torsoMid.y - swBase * 1.2 * confScale;
-      const yMax = torsoMid.y + swBase * 2.2 * confScale;
+    const hipLocal = hipMid && transform ? toLocal(hipMid, transform) : null;
+    const hasBodyAnchor = shoulderAvailable[i] || hipAvailable[i];
+    if (hasBodyAnchor && hipLocal) {
+      const hipCenter = { x: hipLocal.x * 0.5, y: hipLocal.y * 0.5 };
+      const hipCenterOk = hipCenter.y > -0.3 && hipCenter.y < 0.9;
+      if (hipCenterOk) {
+        roiCenterLocal = hipCenter;
+        roiScale = 1;
+        roiMissingStreak = 0;
+      } else if (transform) {
+        roiCenterLocal = { x: 0, y: 0.35 };
+        roiScale = 1;
+        roiMissingStreak = 0;
+      }
+    } else if (hasBodyAnchor && transform) {
+      roiCenterLocal = { x: 0, y: 0.35 };
+      roiScale = 1;
+      roiMissingStreak = 0;
+    } else if (roiCenterLocal) {
+      roiMissingStreak += 1;
+      const targetScale = roiMissingStreak >= 3 ? 1.8 : roiMissingStreak >= 2 ? 1.4 : 1.1;
+      roiScale = clamp(roiScale * targetScale, 1, 1.8);
+    }
+    const torsoLocal = roiCenterLocal ?? { x: 0, y: 0.35 };
+    const confScale = cur.conf < 1 ? 0.9 : 1;
+    if (roiMissingStreak < 3) {
+      const R = (2.2 * confScale + 0.2) * roiScale;
+      const d = Math.hypot(cur.x - torsoLocal.x, cur.y - torsoLocal.y);
+      const yMin = torsoLocal.y - (1.2 * confScale + 0.2) * roiScale;
+      const yMax = torsoLocal.y + (2.2 * confScale + 0.4) * roiScale;
       if (d > R || cur.y < yMin || cur.y > yMax) {
         filtered[i] = null;
         roiRejected += 1;
@@ -410,10 +539,9 @@ function reconstructHandTrajectoryFromPoseFrames(params: {
           : 1 / fps
       );
       const dist = Math.hypot(cur.x - prevValid.x, cur.y - prevValid.y);
-      const sw = shoulderWidth ? clamp(shoulderWidth, 0.12, 0.35) : shoulderWidthMedian ?? 0.18;
-      const confScale = cur.conf < 1 ? 0.85 : 1;
+      const confScaleSpeed = cur.conf < 1 ? 0.85 : 1;
       const speed = dist / dt;
-      const maxSpeed = sw * 10.0 * confScale;
+      const maxSpeed = 10.0 * confScaleSpeed;
       if (speed > maxSpeed) {
         filtered[i] = null;
         speedRejected += 1;
@@ -428,7 +556,7 @@ function reconstructHandTrajectoryFromPoseFrames(params: {
         );
         const v1 = Math.hypot(prevValid.x - prevPrevValid.x, prevValid.y - prevPrevValid.y) / dtPrev;
         const v2 = speed;
-        const baseAccel = (sw) * 40.0 * confScale;
+        const baseAccel = 40.0 * confScaleSpeed;
         if (Math.abs(v2 - v1) > baseAccel) {
           filtered[i] = null;
           accelRejected += 1;
@@ -440,7 +568,24 @@ function reconstructHandTrajectoryFromPoseFrames(params: {
     prevValid = { x: cur.x, y: cur.y, frameIndex: cur.frameIndex, timestampSec: cur.timestampSec };
   }
   const validIdx = filtered.map((p, idx) => (p ? idx : -1)).filter((idx) => idx >= 0);
-  if (validIdx.length < 2) return null;
+  if (validIdx.length < 2) {
+    return {
+      raw,
+      filtered,
+      smoothed: [],
+      downswing: [],
+      debug: {
+        fps,
+        rawCount: raw.filter(Boolean).length,
+        filteredCount: filtered.filter(Boolean).length,
+        interpolatedCount: 0,
+        roiRejected,
+        speedRejected,
+        accelRejected,
+        shoulderWidthMedian: shoulderWidthMedian ?? null,
+      },
+    };
+  }
   const smoothed: Array<{ x: number; y: number; phase: "backswing" | "top" | "downswing" | "impact"; frameIndex: number; timestampSec?: number }> = new Array(params.frameCount);
   const validSeq = validIdx.map((idx) => ({ idx, point: filtered[idx]! }));
   validSeq.forEach((item, seqIdx) => {
@@ -507,7 +652,29 @@ function reconstructHandTrajectoryFromPoseFrames(params: {
   const compact = smoothed.filter(
     (p): p is { x: number; y: number; phase: "backswing" | "top" | "downswing" | "impact"; frameIndex: number; timestampSec?: number } => !!p
   );
-  const finalSmooth = compact.length >= 4 ? smoothTrace(compact) : compact;
+  const globalized = compact.map((p) => {
+    const localIdx = localIdxByFrameIndex.get(p.frameIndex);
+    const t = localIdx != null ? transforms[localIdx] : null;
+    if (!t) return { ...p };
+    const g = toGlobal(p, t);
+    return { ...p, x: clamp(g.x, 0, 1), y: clamp(g.y, 0, 1) };
+  });
+  const emaTrace = globalized.length >= 2 ? smoothTraceEma(globalized, 0.25) : globalized;
+  let topTime: number | null = null;
+  let impactTime: number | null = null;
+  params.metaByIdxPose.forEach((meta) => {
+    if (meta.phase === "top" && topTime == null) {
+      topTime = typeof meta.timestampSec === "number" ? meta.timestampSec : meta.frameIndex / fps;
+    }
+    if (meta.phase === "impact" && impactTime == null) {
+      impactTime = typeof meta.timestampSec === "number" ? meta.timestampSec : meta.frameIndex / fps;
+    }
+  });
+  const windows: Array<{ start: number; end: number }> = [];
+  if (topTime != null) windows.push({ start: topTime - 0.15, end: topTime + 0.15 });
+  if (impactTime != null) windows.push({ start: impactTime - 0.15, end: impactTime + 0.15 });
+  const densified = densifyTraceByWindows(emaTrace, windows, 3);
+  const finalSmooth = densified.points;
   const downswing = finalSmooth.filter((p) => p.phase === "downswing" || p.phase === "impact");
   return {
     raw,
@@ -518,7 +685,7 @@ function reconstructHandTrajectoryFromPoseFrames(params: {
       fps,
       rawCount: raw.filter(Boolean).length,
       filteredCount: filtered.filter(Boolean).length,
-      interpolatedCount,
+      interpolatedCount: interpolatedCount + densified.inserted,
       roiRejected,
       speedRejected,
       accelRejected,
@@ -916,7 +1083,7 @@ function computeOnPlaneZoneEval(params: {
   const primary = (() => {
     if (maxSide == null || maxAbs <= 1e-6) return "none" as const;
     const s = maxSide;
-    const outsideSign = handed === "left" ? -1 : 1;
+    const outsideSign = handed === "left" ? 1 : -1;
     return s * outsideSign >= 0 ? ("outside" as const) : ("inside" as const);
   })();
 
@@ -1474,11 +1641,13 @@ Return JSON only:
 async function extractAddressPoseLandmarks(
   frame: PhaseFrame,
   handedness?: string | null,
+  allowLLM?: boolean,
 ): Promise<{ shoulder: { x: number; y: number } | null; hip: { x: number; y: number } | null } | null> {
   if (!frame?.base64Image || !frame?.mimeType) return null;
   try {
     const poseFrames = await extractPoseKeypointsFromImages({
       frames: [{ base64Image: frame.base64Image, mimeType: frame.mimeType }],
+      allowLLM,
     });
     const first = poseFrames[0];
     const pose = (first?.pose as Record<string, unknown> | null | undefined) ?? null;
@@ -1785,6 +1954,7 @@ async function detectAddressSidePoints(
 async function detectAddressZoneFromAddressFrame(
   frame: PhaseFrame,
   handedness?: string | null,
+  allowLLM = true,
 ): Promise<{
   clubhead: { x: number; y: number } | null;
   grip: { x: number; y: number } | null;
@@ -1822,6 +1992,7 @@ async function detectAddressZoneFromAddressFrame(
     hough_line?: { anchor: { x: number; y: number }; dir: { x: number; y: number }; score: number } | null;
   };
 } | null> {
+  if (!allowLLM) return null;
   const prompt = `
 あなたはゴルフスイング解析の補助AIです。
 目的：アドレス（構え）画像から「クラブヘッド中心」と「グリップ中心（手元）」を特定し、参照プレーン（アドレスのシャフト方向）の始点と方向を作る。
@@ -1867,7 +2038,7 @@ async function detectAddressZoneFromAddressFrame(
     const sidePoints = await detectAddressSidePoints(frame, effectiveHandedness);
     sideShoulder = sidePoints?.sideShoulder ?? null;
     sideHip = sidePoints?.sideHip ?? null;
-    const poseSide = await extractAddressPoseLandmarks(frame, effectiveHandedness);
+    const poseSide = await extractAddressPoseLandmarks(frame, effectiveHandedness, allowLLM);
     if (poseSide?.shoulder) sideShoulder = poseSide.shoulder;
     if (poseSide?.hip) sideHip = poseSide.hip;
   }
@@ -2940,6 +3111,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
   const impactIndices = normalizeIndices(body?.impact);
   const finishIndices = normalizeIndices(body?.finish);
   const onPlaneOnly = body?.onPlaneOnly === true;
+  const allowLLM = !onPlaneOnly;
 
   if (!addressIndices.length && !backswingIndices.length && !topIndices.length && !downswingIndices.length && !impactIndices.length && !finishIndices.length) {
     return json({ error: "no overrides" }, { status: 400 });
@@ -3022,6 +3194,50 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
       out.push({ base64Image: parsed.base64, mimeType: parsed.mimeType, timestampSec: entry.timestampSec, frameIndex: idx1 });
     }
     return out;
+  };
+
+  const estimateFpsFromSequenceFrames = (sequenceFrames: Array<{ timestampSec?: number }>) => {
+    const times: number[] = [];
+    sequenceFrames.forEach((frame) => {
+      if (typeof frame.timestampSec === "number" && Number.isFinite(frame.timestampSec)) {
+        times.push(frame.timestampSec);
+      }
+    });
+    if (times.length < 2) return 30;
+    times.sort((a, b) => a - b);
+    const diffs: number[] = [];
+    for (let i = 1; i < times.length; i += 1) {
+      const dt = times[i]! - times[i - 1]!;
+      if (dt > 0.001 && dt < 0.5) diffs.push(dt);
+    }
+    if (!diffs.length) return 30;
+    diffs.sort((a, b) => a - b);
+    const mid = diffs[Math.floor(diffs.length / 2)]!;
+    return mid > 0 ? clamp(1 / mid, 5, 120) : 30;
+  };
+
+  const resolveSourceVideoUrl = () => {
+    const candidates = [
+      (body as Record<string, unknown> | null)?.sourceVideoUrl,
+      (body as Record<string, unknown> | null)?.videoUrl,
+      (stored.meta as Record<string, unknown> | null)?.sourceVideoUrl,
+      (stored.meta as Record<string, unknown> | null)?.videoUrl,
+      (stored.result as Record<string, unknown> | null)?.sourceVideoUrl,
+      (stored.result as Record<string, unknown> | null)?.videoUrl,
+      (stored.result as Record<string, unknown> | null)?.sequence &&
+        (stored.result as Record<string, unknown>).sequence &&
+        typeof (stored.result as Record<string, unknown>).sequence === "object"
+        ? (stored.result as Record<string, unknown>).sequence
+        : null,
+    ];
+    for (const candidate of candidates) {
+      if (typeof candidate === "string" && candidate.trim().length > 0) return candidate.trim();
+      if (candidate && typeof candidate === "object") {
+        const maybe = (candidate as Record<string, unknown>).sourceVideoUrl ?? (candidate as Record<string, unknown>).videoUrl;
+        if (typeof maybe === "string" && maybe.trim().length > 0) return maybe.trim();
+      }
+    }
+    return null;
   };
 
   const phaseUpdates: Partial<
@@ -3142,11 +3358,12 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
 		    const onPlaneDownswingIndices = resolvePhaseIndices(downswingIndices, storedPhaseOverrides?.downswing);
 		    const onPlaneImpactIndices = resolvePhaseIndices(impactIndices, storedPhaseOverrides?.impact);
 		    const onPlaneFinishIndices = resolvePhaseIndices(finishIndices, storedPhaseOverrides?.finish);
-		    const clampIndex = (n: number | null) => (n && Number.isFinite(n) ? Math.max(1, Math.min(frames.length, n)) : null);
-		    const rangeIndices = (start: number | null, end: number | null) => {
+		    const clampIndex = (n: number | null, maxFrameIndex = frames.length) =>
+		      n && Number.isFinite(n) ? Math.max(1, Math.min(maxFrameIndex, n)) : null;
+		    const rangeIndices = (start: number | null, end: number | null, maxFrameIndex = frames.length) => {
 		      if (!start || !end) return [];
-		      const s = clampIndex(start);
-		      const e = clampIndex(end);
+		      const s = clampIndex(start, maxFrameIndex);
+		      const e = clampIndex(end, maxFrameIndex);
 		      if (!s || !e) return [];
 		      const [from, to] = s <= e ? [s, e] : [e, s];
 		      const out: number[] = [];
@@ -3162,32 +3379,155 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
 		      }
 		      return out;
 		    };
-		    if (onPlaneTopIndices.length && onPlaneDownswingIndices.length && onPlaneImpactIndices.length) {
-		      const addressFrames = onPlaneAddressIndices.length ? pickFramesWithIndex(onPlaneAddressIndices.slice(0, 1)) : [];
-		      const backswingFrames = onPlaneBackswingIndices.length ? pickFramesWithIndex(onPlaneBackswingIndices.slice(0, 2)) : [];
-		      const topFrames = pickFramesWithIndex(onPlaneTopIndices.slice(0, 6));
-		      const dsFrames = pickFramesWithIndex(onPlaneDownswingIndices.slice(0, 8));
-		      const impFrames = pickFramesWithIndex(onPlaneImpactIndices.slice(0, 6));
-		      const addressIdx = clampIndex(onPlaneAddressIndices[0] ?? null) ?? clampIndex(onPlaneTopIndices[0] ?? null);
-		      const topIdx = clampIndex(onPlaneTopIndices[0] ?? null);
-		      const finishIdx =
+		    const pickFramesWithIndexFromList = (
+		      indices: number[],
+		      entries: Array<PhaseFrame & { frameIndex: number }>
+		    ): Array<PhaseFrame & { frameIndex: number }> => {
+		      const out: Array<PhaseFrame & { frameIndex: number }> = [];
+		      for (const idx1 of indices) {
+		        const entry = entries[idx1 - 1];
+		        if (!entry) continue;
+		        out.push({ ...entry, frameIndex: idx1 });
+		      }
+		      return out;
+		    };
+		    if (onPlaneTopIndices.length && onPlaneDownswingIndices.length) {
+		      const videoWindowFps = 15;
+		      const videoWindowPreSec = 0.4;
+		      const videoWindowPostSec = 0.2;
+		      const videoWindowMaxFrames = 20;
+		      const videoWindowTimeoutMs = 10000;
+		      const useVideoWindow = onPlaneOnly;
+		      const sourceVideoUrl = useVideoWindow ? resolveSourceVideoUrl() : null;
+		      if (useVideoWindow && !sourceVideoUrl) {
+		        return json({ error: "source video not available for on-plane analysis" }, { status: 400 });
+		      }
+		      const sequenceFps = estimateFpsFromSequenceFrames(frames);
+		      const frameTimestamp = (idx: number) => {
+		        const entry = frames[idx - 1];
+		        if (entry && typeof entry.timestampSec === "number" && Number.isFinite(entry.timestampSec)) {
+		          return entry.timestampSec;
+		        }
+		        return (idx - 1) / sequenceFps;
+		      };
+
+		      const addressIdxRaw = clampIndex(onPlaneAddressIndices[0] ?? null);
+		      const topIdxRaw = clampIndex(onPlaneTopIndices[0] ?? null);
+		      const impactIdxRaw =
+		        clampIndex(onPlaneImpactIndices[0] ?? null) ??
+		        clampIndex(onPlaneDownswingIndices[onPlaneDownswingIndices.length - 1] ?? null);
+		      const finishIdxRaw =
 		        clampIndex(onPlaneFinishIndices[0] ?? null) ??
 		        clampIndex(onPlaneImpactIndices[onPlaneImpactIndices.length - 1] ?? null) ??
 		        clampIndex(onPlaneDownswingIndices[onPlaneDownswingIndices.length - 1] ?? null);
-		      const preTop = rangeIndices(addressIdx, topIdx);
-		      const postTop = rangeIndices(topIdx, finishIdx);
+		      const addressTime = addressIdxRaw ? frameTimestamp(addressIdxRaw) : null;
+		      const topTime = topIdxRaw ? frameTimestamp(topIdxRaw) : null;
+		      const impactTime = impactIdxRaw ? frameTimestamp(impactIdxRaw) : null;
+
+		      let onPlaneFramesWithIndex: Array<PhaseFrame & { frameIndex: number }> | null = null;
+		      let onPlaneMaxIndex = frames.length;
+		      let onPlaneAddressIndicesLocal = onPlaneAddressIndices;
+		      let onPlaneBackswingIndicesLocal = onPlaneBackswingIndices;
+		      let onPlaneTopIndicesLocal = onPlaneTopIndices;
+		      let onPlaneDownswingIndicesLocal = onPlaneDownswingIndices;
+		      let onPlaneImpactIndicesLocal = onPlaneImpactIndices;
+		      let onPlaneFinishIndicesLocal = onPlaneFinishIndices;
+		      let videoWindowDebug: Record<string, unknown> | null = null;
+
+		      if (useVideoWindow && sourceVideoUrl) {
+		        if (!topTime || !impactTime) {
+		          return json({ error: "top/impact timestamps missing for video on-plane analysis" }, { status: 400 });
+		        }
+		        const startSec = Math.max(0, topTime - videoWindowPreSec);
+		        const endSec = Math.max(startSec + 0.1, impactTime + videoWindowPostSec);
+		        const extracted = await extractVideoWindowFrames({
+		          url: sourceVideoUrl,
+		          startSec,
+		          endSec,
+		          fps: videoWindowFps,
+		          maxFrames: videoWindowMaxFrames,
+		          timeoutMs: videoWindowTimeoutMs,
+		        });
+		        onPlaneFramesWithIndex = extracted.frames.map((frame, idx) => ({
+		          ...frame,
+		          frameIndex: idx + 1,
+		        }));
+		        onPlaneMaxIndex = onPlaneFramesWithIndex.length;
+		        if (!onPlaneMaxIndex) {
+		          return json({ error: "no frames extracted from video window" }, { status: 500 });
+		        }
+		        videoWindowDebug = {
+		          source: "video",
+		          startSec: extracted.startSec,
+		          endSec: extracted.endSec,
+		          fps: extracted.fps,
+		          frameCount: onPlaneMaxIndex,
+		        };
+
+		        const closestIndexByTime = (targetSec: number) => {
+		          let bestIdx = 1;
+		          let bestDiff = Number.POSITIVE_INFINITY;
+		          onPlaneFramesWithIndex.forEach((frame, idx) => {
+		            const ts = frame.timestampSec ?? extracted.startSec + idx / extracted.fps;
+		            const diff = Math.abs(ts - targetSec);
+		            if (diff < bestDiff) {
+		              bestDiff = diff;
+		              bestIdx = idx + 1;
+		            }
+		          });
+		          return clampIndex(bestIdx, onPlaneMaxIndex) ?? 1;
+		        };
+
+		        const videoTopIdx = closestIndexByTime(topTime);
+		        const videoImpactIdx = impactTime ? closestIndexByTime(impactTime) : onPlaneMaxIndex;
+		        const videoAddressIdx = addressTime != null ? closestIndexByTime(addressTime) : 1;
+		        const videoFinishIdx = videoImpactIdx;
+
+		        onPlaneAddressIndicesLocal = videoAddressIdx ? [videoAddressIdx] : [];
+		        onPlaneBackswingIndicesLocal = rangeIndices(videoAddressIdx, videoTopIdx, onPlaneMaxIndex);
+		        onPlaneTopIndicesLocal = videoTopIdx ? [videoTopIdx] : [];
+		        const downswingStart = clampIndex(videoTopIdx + 1, onPlaneMaxIndex) ?? videoTopIdx;
+		        onPlaneDownswingIndicesLocal = rangeIndices(downswingStart, videoImpactIdx, onPlaneMaxIndex);
+		        onPlaneImpactIndicesLocal = videoImpactIdx ? [videoImpactIdx] : [];
+		        onPlaneFinishIndicesLocal = videoFinishIdx ? [videoFinishIdx] : [];
+		      }
+		      if (!onPlaneImpactIndicesLocal.length && impactIdxRaw) {
+		        onPlaneImpactIndicesLocal = [impactIdxRaw];
+		      }
+
+		      const pickFramesForOnPlane = useVideoWindow && onPlaneFramesWithIndex
+		        ? (indices: number[]) => pickFramesWithIndexFromList(indices, onPlaneFramesWithIndex!)
+		        : pickFramesWithIndex;
+		      const maxFrameIndex = useVideoWindow && onPlaneFramesWithIndex ? onPlaneMaxIndex : frames.length;
+		      const addressFrames = onPlaneAddressIndicesLocal.length ? pickFramesForOnPlane(onPlaneAddressIndicesLocal.slice(0, 1)) : [];
+		      const backswingFrames = onPlaneBackswingIndicesLocal.length ? pickFramesForOnPlane(onPlaneBackswingIndicesLocal.slice(0, 2)) : [];
+		      const topFrames = pickFramesForOnPlane(onPlaneTopIndicesLocal.slice(0, 6));
+		      const dsFrames = pickFramesForOnPlane(onPlaneDownswingIndicesLocal.slice(0, 8));
+		      const impFrames = pickFramesForOnPlane(onPlaneImpactIndicesLocal.slice(0, 6));
+		      const addressIdx =
+		        clampIndex(onPlaneAddressIndicesLocal[0] ?? null, maxFrameIndex) ??
+		        clampIndex(onPlaneTopIndicesLocal[0] ?? null, maxFrameIndex);
+		      const topIdx = clampIndex(onPlaneTopIndicesLocal[0] ?? null, maxFrameIndex);
+		      const finishIdx =
+		        clampIndex(onPlaneFinishIndicesLocal[0] ?? null, maxFrameIndex) ??
+		        clampIndex(onPlaneImpactIndicesLocal[onPlaneImpactIndicesLocal.length - 1] ?? null, maxFrameIndex) ??
+		        clampIndex(onPlaneDownswingIndicesLocal[onPlaneDownswingIndicesLocal.length - 1] ?? null, maxFrameIndex);
+		      const preTop = rangeIndices(addressIdx, topIdx, maxFrameIndex);
+		      const postTop = rangeIndices(topIdx, finishIdx, maxFrameIndex);
 		      const gripRangeIndices = Array.from(new Set([...preTop, ...postTop])).sort((a, b) => a - b);
-		      const gripFramesRange = gripRangeIndices.length ? pickFramesWithIndex(gripRangeIndices) : [];
+		      const gripFramesRange = gripRangeIndices.length ? pickFramesForOnPlane(gripRangeIndices) : [];
 		      const framesForOnPlane = [...topFrames, ...dsFrames, ...impFrames].slice(0, 7);
 		      if (framesForOnPlane.length >= 3) {
 		        const prompt = buildOnPlanePrompt({ handedness: meta?.handedness, clubType: meta?.clubType, level: meta?.level });
 		        let parsed: ReturnType<typeof parseOnPlane> | null = null;
-		        try {
-		          const raw = await askVisionAPI({ frames: framesForOnPlane, prompt });
-		          parsed = parseOnPlane(raw);
-		        } catch (err) {
-		          console.error("[reanalyze-phases] on_plane vision failed", err);
-		          parsed = null;
+		        if (allowLLM) {
+		          try {
+		            const raw = await askVisionAPI({ frames: framesForOnPlane, prompt });
+		            parsed = parseOnPlane(raw);
+		          } catch (err) {
+		            console.error("[reanalyze-phases] on_plane vision failed", err);
+		            parsed = null;
+		          }
 		        }
 	        const existingOnPlane = (stored.result as unknown as Record<string, unknown>)?.on_plane;
 	        const parsedOnPlane =
@@ -3205,6 +3545,57 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
 		              ? ({ ...(existingOnPlane as Record<string, unknown>) } as Record<string, unknown>)
 		              : {};
 		        }
+		        if (!allowLLM) {
+		          (onPlaneUpdate as Record<string, unknown>).pose_debug = {
+		            ...((onPlaneUpdate as Record<string, unknown>).pose_debug as Record<string, unknown> | undefined),
+		            on_plane_llm_skipped: true,
+		          };
+		        }
+		        if (useVideoWindow && videoWindowDebug) {
+		          (onPlaneUpdate as Record<string, unknown>).source = "video";
+		          (onPlaneUpdate as Record<string, unknown>).pose_debug = {
+		            ...((onPlaneUpdate as Record<string, unknown>).pose_debug as Record<string, unknown> | undefined),
+		            video_window: videoWindowDebug,
+		          };
+		        }
+		        if (useVideoWindow && onPlaneFramesWithIndex?.length) {
+		          const toSequenceUrl = (idx1: number | null, label: string) => {
+		            if (!idx1 || !Number.isFinite(idx1)) return null;
+		            const entry = frames[idx1 - 1];
+		            if (!entry || typeof entry.url !== "string") return null;
+		            if (!entry.url.startsWith("data:image/")) return null;
+		            return { label, url: entry.url };
+		          };
+		          const toDataUrl = (idx1: number | null, label: string) => {
+		            if (!idx1 || !Number.isFinite(idx1)) return null;
+		            const frame = onPlaneFramesWithIndex![idx1 - 1];
+		            if (!frame?.base64Image) return null;
+		            const mimeType = frame.mimeType || "image/jpeg";
+		            return { label, url: `data:${mimeType};base64,${frame.base64Image}` };
+		          };
+		          const debugFrames: Array<{ label: string; url: string }> = [];
+		          const dsIndices = onPlaneDownswingIndicesLocal.length ? onPlaneDownswingIndicesLocal : [];
+		          const impactFallback = onPlaneImpactIndicesLocal[0] ?? dsIndices[dsIndices.length - 1] ?? null;
+		          const addressFrame =
+		            toSequenceUrl(addressIdxRaw ?? null, "Address") ??
+		            toDataUrl(onPlaneAddressIndicesLocal[0] ?? null, "Address");
+		          const backswingFrame =
+		            toSequenceUrl(onPlaneBackswingIndices[0] ?? null, "Backswing") ??
+		            toDataUrl(onPlaneBackswingIndicesLocal[0] ?? null, "Backswing");
+		          const topFrame = toDataUrl(onPlaneTopIndicesLocal[0] ?? null, "Top");
+		          const downswing1Frame = toDataUrl(dsIndices[0] ?? null, "Downswing 1");
+		          const downswing2Frame = toDataUrl(dsIndices[1] ?? null, "Downswing 2");
+		          const impactFrame = toDataUrl(impactFallback, "Impact");
+		          if (addressFrame) debugFrames.push(addressFrame);
+		          if (backswingFrame) debugFrames.push(backswingFrame);
+		          if (topFrame) debugFrames.push(topFrame);
+		          if (downswing1Frame) debugFrames.push(downswing1Frame);
+		          if (downswing2Frame) debugFrames.push(downswing2Frame);
+		          if (impactFrame) debugFrames.push(impactFrame);
+		          if (debugFrames.length) {
+		            (onPlaneUpdate as Record<string, unknown>).debug_frames = debugFrames;
+		          }
+		        }
 
 		        const poseInputs = [...backswingFrames, ...topFrames, ...dsFrames, ...impFrames].slice(0, 16);
 		        const gripFramesForTrace = gripFramesRange.length ? gripFramesRange : poseInputs;
@@ -3218,9 +3609,12 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
 		        const dsCount = Math.min(dsFrames.length, 8);
 		        const metaByIdxGrip = new Map<number, { frameIndex: number; timestampSec: number | undefined; phase: "backswing" | "top" | "downswing" | "impact" }>();
 		        const metaByIdxPose = new Map<number, { frameIndex: number; timestampSec: number | undefined; phase: "backswing" | "top" | "downswing" | "impact" }>();
-		        const backswingIdx = clampIndex(onPlaneBackswingIndices[onPlaneBackswingIndices.length - 1] ?? null) ?? topIdx;
-		        const downswingIdx = clampIndex(onPlaneDownswingIndices[0] ?? null) ?? topIdx;
-		        const impactIdx = clampIndex(onPlaneImpactIndices[0] ?? null) ?? finishIdx;
+		        const backswingIdx =
+		          clampIndex(onPlaneBackswingIndicesLocal[onPlaneBackswingIndicesLocal.length - 1] ?? null, maxFrameIndex) ?? topIdx;
+		        const downswingIdx =
+		          clampIndex(onPlaneDownswingIndicesLocal[0] ?? null, maxFrameIndex) ?? topIdx;
+		        const impactIdx =
+		          clampIndex(onPlaneImpactIndicesLocal[0] ?? null, maxFrameIndex) ?? finishIdx;
 		        const gripIdxByFrameIndex = new Map<number, number>();
 		        gripFramesForTrace.forEach((src, idx) => {
 		          const frameNo = src.frameIndex;
@@ -3269,7 +3663,8 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
 		          source: "lead" | "avg" | "reconstruct";
 		        } | null = null;
 		        // Always try grip-based trace first so we can show hand path even when pose extraction is unavailable.
-		        try {
+		        if (allowLLM) {
+		          try {
 		          const gripFrames = gripFramesForTrace.map((f) => ({ base64Image: f.base64Image, mimeType: f.mimeType, timestampSec: f.timestampSec }));
 		          const grips = await extractGripCentersFromFrames({ frames: gripFrames });
 		          const refined = await refineGripCentersWithRoi({ frames: gripFrames, initial: grips, anchor: addrGripAnchor });
@@ -3368,10 +3763,16 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
 		            grip_direct_sample: gripTrace.slice(0, 6).map((p) => ({ x: p.x, y: p.y, phase: p.phase })),
 		            grip_direct_anchor_used: !!addrGripAnchor,
 		          };
-		        } catch (e) {
+		          } catch (e) {
+		            (onPlaneUpdate as Record<string, unknown>).pose_debug = {
+		              ...((onPlaneUpdate as Record<string, unknown>).pose_debug as Record<string, unknown> | undefined),
+		              grip_direct_error: e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200),
+		            };
+		          }
+		        } else {
 		          (onPlaneUpdate as Record<string, unknown>).pose_debug = {
 		            ...((onPlaneUpdate as Record<string, unknown>).pose_debug as Record<string, unknown> | undefined),
-		            grip_direct_error: e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200),
+		            grip_direct_skipped: true,
 		          };
 		        }
 
@@ -3389,6 +3790,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
 			                  mimeType: f.mimeType,
 			                  timestampSec: f.timestampSec,
 			                })),
+			                allowLLM,
 			              });
 			            } catch (e) {
 			              poseError = e instanceof Error ? e.message : String(e);
@@ -3491,6 +3893,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
 		                (avgUnique === leadUnique && avgSpread > leadSpread));
 		            let handTrace = useAvgTrace ? handTraceAvg : handTraceLead;
 		            let poseTraceSource: "lead" | "avg" | "reconstruct" = useAvgTrace ? "avg" : "lead";
+		            let poseTraceSourceReason = useAvgTrace ? "avg_spread_over_lead" : "lead_default";
 		            let bsHand = medianOf(bsHandsLead);
 		            let topHand = medianOf(topHandsLead);
 		            let dsHand = medianOf(dsHandsLead);
@@ -3511,6 +3914,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
 		            if (reconstructed && reconstructed.smoothed.length >= 2 && reconstructSpread >= 0.08 && reconstructUnique >= 4) {
 		              handTrace = reconstructed.smoothed;
 		              poseTraceSource = "reconstruct";
+		              poseTraceSourceReason = "reconstruct_spread_unique";
 		              bsHand = medianOf(reconstructed.smoothed.filter((p) => p.phase === "backswing").map((p) => ({ x: p.x, y: p.y })));
 		              topHand = medianOf(reconstructed.smoothed.filter((p) => p.phase === "top").map((p) => ({ x: p.x, y: p.y })));
 		              dsHand = medianOf(reconstructed.smoothed.filter((p) => p.phase === "downswing").map((p) => ({ x: p.x, y: p.y })));
@@ -3518,6 +3922,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
 		            } else if (leadSpread >= avgSpread && leadSpread >= 0.08) {
 		              handTrace = handTraceLead;
 		              poseTraceSource = "lead";
+		              poseTraceSourceReason = "lead_spread_threshold";
 		              bsHand = medianOf(bsHandsLead);
 		              topHand = medianOf(topHandsLead);
 		              dsHand = medianOf(dsHandsLead);
@@ -3525,6 +3930,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
 		            } else if (avgSpread >= 0.08) {
 		              handTrace = handTraceAvg;
 		              poseTraceSource = "avg";
+		              poseTraceSourceReason = "avg_spread_threshold";
 		              bsHand = medianOf(bsHandsAvg);
 		              topHand = medianOf(topHandsAvg);
 		              dsHand = medianOf(dsHandsAvg);
@@ -3606,15 +4012,95 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
 		                avg: { x: number; y: number } | null;
 		                lw: { x: number; y: number } | null;
 		                rw: { x: number; y: number } | null;
+		                confidence: number;
+		                roi: {
+		                  centerLocal: { x: number; y: number };
+		                  centerGlobal: { x: number; y: number };
+		                  radiusLocal: number;
+		                  yMinLocal: number;
+		                  yMaxLocal: number;
+		                  scale: number;
+		                  source: "hip" | "shoulder" | "carry";
+		                } | null;
 		              }> = [];
+		              let roiCenterLocal: { x: number; y: number } | null = null;
+		              let roiScale = 1;
+		              let roiMissingStreak = 0;
 		              for (let i = 0; i < poseFramesForTrace.length; i += 1) {
 		                const pose = poseByIdx.get(i) ?? null;
 		                const metaInfo = metaByIdxPose.get(i);
 		                if (!metaInfo) continue;
 		                const lw = readPosePoint(pose, ["leftWrist", "left_wrist", "leftHand", "left_hand"]);
 		                const rw = readPosePoint(pose, ["rightWrist", "right_wrist", "rightHand", "right_hand"]);
+		                const ls = readPosePoint(pose, ["leftShoulder", "left_shoulder"]);
+		                const rs = readPosePoint(pose, ["rightShoulder", "right_shoulder"]);
+		                const lh = readPosePoint(pose, ["leftHip", "left_hip"]);
+		                const rh = readPosePoint(pose, ["rightHip", "right_hip"]);
+		                const shoulderMid = ls && rs ? { x: (ls.x + rs.x) / 2, y: (ls.y + rs.y) / 2 } : null;
+		                const shoulderWidth = ls && rs ? Math.hypot(ls.x - rs.x, ls.y - rs.y) : null;
+		                const transform =
+		                  shoulderMid && shoulderWidth && Number.isFinite(shoulderWidth) && shoulderWidth > 1e-4
+		                    ? { origin: shoulderMid, scale: shoulderWidth }
+		                    : null;
+		                const hipMid = lh && rh ? { x: (lh.x + rh.x) / 2, y: (lh.y + rh.y) / 2 } : null;
+		                const hipLocal = hipMid && transform ? { x: (hipMid.x - transform.origin.x) / transform.scale, y: (hipMid.y - transform.origin.y) / transform.scale } : null;
+		                let roiSource: "hip" | "shoulder" | "carry" = "carry";
+		                if (hipLocal) {
+		                  const hipCenter = { x: hipLocal.x * 0.5, y: hipLocal.y * 0.5 };
+		                  const hipCenterOk = hipCenter.y > -0.3 && hipCenter.y < 0.9;
+		                  if (hipCenterOk) {
+		                    roiCenterLocal = hipCenter;
+		                    roiScale = 1;
+		                    roiMissingStreak = 0;
+		                    roiSource = "hip";
+		                  } else if (transform) {
+		                    roiCenterLocal = { x: 0, y: 0.35 };
+		                    roiScale = 1;
+		                    roiMissingStreak = 0;
+		                    roiSource = "shoulder";
+		                  }
+		                } else if (transform) {
+		                  roiCenterLocal = { x: 0, y: 0.35 };
+		                  roiScale = 1;
+		                  roiMissingStreak = 0;
+		                  roiSource = "shoulder";
+		                } else if (roiCenterLocal) {
+		                  roiMissingStreak += 1;
+		                  const targetScale = roiMissingStreak >= 3 ? 1.8 : roiMissingStreak >= 2 ? 1.4 : 1.1;
+		                  roiScale = clamp(roiScale * targetScale, 1, 1.8);
+		                  roiSource = "carry";
+		                }
 		                const lead = computeLeadHandPosition(pose, meta?.handedness ?? null);
 		                const avg = computeHandPositionAverage(pose);
+		                const confidence = lw && rw ? 1 : lead ? 0.85 : avg ? 0.75 : lw || rw ? 0.6 : 0;
+		                let roi: {
+		                  centerLocal: { x: number; y: number };
+		                  centerGlobal: { x: number; y: number };
+		                  radiusLocal: number;
+		                  yMinLocal: number;
+		                  yMaxLocal: number;
+		                  scale: number;
+		                  source: "hip" | "shoulder" | "carry";
+		                } | null = null;
+		                if (roiCenterLocal && transform) {
+		                  const confScale = confidence < 1 ? 0.9 : 1;
+		                  const radiusLocal = (2.2 * confScale + 0.2) * roiScale;
+		                  const yMinLocal = roiCenterLocal.y - (1.2 * confScale + 0.2) * roiScale;
+		                  const yMaxLocal = roiCenterLocal.y + (2.2 * confScale + 0.4) * roiScale;
+		                  const centerGlobal = {
+		                    x: transform.origin.x + roiCenterLocal.x * transform.scale,
+		                    y: transform.origin.y + roiCenterLocal.y * transform.scale,
+		                  };
+		                  roi = {
+		                    centerLocal: roiCenterLocal,
+		                    centerGlobal,
+		                    radiusLocal,
+		                    yMinLocal,
+		                    yMaxLocal,
+		                    scale: roiScale,
+		                    source: roiSource,
+		                  };
+		                }
 		                allFrames.push({
 		                  frameIndex: metaInfo.frameIndex,
 		                  timestampSec: metaInfo.timestampSec,
@@ -3623,6 +4109,8 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
 		                  avg,
 		                  lw,
 		                  rw,
+		                  confidence,
+		                  roi,
 		                });
 		              }
 		              (onPlaneUpdate as Record<string, unknown>).pose_debug = {
@@ -3636,7 +4124,8 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
 		              pose_trace_unique: poseTraceInfo.unique,
 		              pose_trace_spread: poseTraceInfo.spread,
 		              pose_trace_source: poseTraceInfo.source,
-		              pose_trace_collapsed: poseTraceInfo.unique < 4 || poseTraceInfo.spread < 0.08,
+		              pose_trace_source_reason: poseTraceSourceReason,
+		              pose_trace_collapsed: poseTraceInfo.unique < 3 || poseTraceInfo.spread < 0.06,
 		              pose_lead_unique: leadUnique,
 		              pose_lead_spread: leadSpread,
 		              pose_avg_unique: avgUnique,
@@ -3646,6 +4135,19 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
 		              grip_trace_phase_counts: gripPhaseCounts,
 		              pose_reconstruct_debug: reconstructed?.debug ?? null,
 		            };
+		            const poseDetectionFailed =
+		              useVideoWindow &&
+		              reconstructed?.debug?.rawCount === 0 &&
+		              handTraceLead.length === 0 &&
+		              handTraceAvg.length === 0;
+		            if (poseDetectionFailed && onPlaneUpdate) {
+		              (onPlaneUpdate as Record<string, unknown>).pose_debug = {
+		                ...((onPlaneUpdate as Record<string, unknown>).pose_debug as Record<string, unknown> | undefined),
+		                pose_video_failed: true,
+		                pose_video_failed_reason: "no_pose_points",
+		              };
+		            }
+		            if (!poseDetectionFailed) {
 		            const poseTraceSpread = poseTraceInfo.spread;
 		            const gripTraceSpread = gripTraceInfo?.spread ?? 0;
 		            const poseUnique = poseTraceInfo.unique;
@@ -3656,10 +4158,10 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
 		            const gripHasBackTop = (gripPhaseCounts.backswing ?? 0) + (gripPhaseCounts.top ?? 0) > 0;
 		            const poseHasTop = (posePhaseCounts.top ?? 0) > 0;
 		            const gripCollapsed = gripUnique <= 2 || gripTraceSpread < 0.03;
-		            const poseCollapsed = poseUnique < 4 || poseTraceSpread < 0.08;
+		            const poseCollapsed = poseUnique < 3 || poseTraceSpread < 0.06;
 		            const poseUsable = handTrace.length >= 2 && poseUnique >= 2 && poseTraceSpread >= 0.01;
 		            const poseReconstructUsable =
-		              poseTraceInfo.source === "reconstruct" && !poseCollapsed && poseTraceSpread >= 0.08 && poseUnique >= 4;
+		              poseTraceInfo.source === "reconstruct" && !poseCollapsed && poseTraceSpread >= 0.06 && poseUnique >= 3;
 		            const posePreferredForDisplay = poseUsable && !poseCollapsed && poseHasTop;
 		            const usePoseTrace =
 		              poseUsable &&
@@ -3807,6 +4309,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
 		                  onPlaneUpdate.plane_confidence = "low";
 		                }
 		              }
+		            }
 		              // Clubhead/grip point (address) for zone anchor + reference plane.
               if (addressFrames.length) {
                 try {
@@ -3839,11 +4342,19 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
                       hough_line?: { anchor: { x: number; y: number }; dir: { x: number; y: number }; score: number } | null;
                     };
                   }> = [];
-                  for (const frame of addrFrames) {
-                    const zone = await detectAddressZoneFromAddressFrame(frame, meta?.handedness ?? null);
-                    if (zone) addrZones.push(zone);
+                  let addrZone: ReturnType<typeof mergeAddressZones> | null = null;
+                  if (allowLLM) {
+                    for (const frame of addrFrames) {
+                      const zone = await detectAddressZoneFromAddressFrame(frame, meta?.handedness ?? null, allowLLM);
+                      if (zone) addrZones.push(zone);
+                    }
+                    addrZone = mergeAddressZones(addrZones);
+                  } else if (onPlaneUpdate) {
+                    (onPlaneUpdate as Record<string, unknown>).pose_debug = {
+                      ...((onPlaneUpdate as Record<string, unknown>).pose_debug as Record<string, unknown> | undefined),
+                      address_llm_skipped: true,
+                    };
                   }
-                  const addrZone = mergeAddressZones(addrZones);
                   const rawClubhead = addrZone?.clubhead ?? null;
                   const gripPoint = addrZone?.grip ?? null;
                   const ballPoint = addrZone?.ball ?? null;
@@ -3873,7 +4384,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
                   if (addrZone?.shoulder) (onPlaneUpdate as Record<string, unknown>).address_shoulder_point = addrZone.shoulder;
                   {
                     const poseLandmarks = await Promise.all(
-                      addrFrames.map((f) => extractAddressPoseLandmarks(f, meta?.handedness ?? null)),
+                      addrFrames.map((f) => extractAddressPoseLandmarks(f, meta?.handedness ?? null, allowLLM)),
                     );
                     const firstPose = poseLandmarks.find((p) => p?.shoulder || p?.hip) ?? null;
                     const shoulder = firstPose?.shoulder ?? null;
@@ -4171,6 +4682,12 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
 		                (!topHand && !dsHand && !impHand);
 
 		            if (needsGripFallback) {
+		              if (!allowLLM) {
+		                (onPlaneUpdate as Record<string, unknown>).pose_debug = {
+		                  ...((onPlaneUpdate as Record<string, unknown>).pose_debug as Record<string, unknown> | undefined),
+		                  grip_fallback_skipped: true,
+		                };
+		              } else {
 		                try {
 		                  const gripFrames = gripFramesForTrace.map((f) => ({ base64Image: f.base64Image, mimeType: f.mimeType, timestampSec: f.timestampSec }));
 		                  const grips = await extractGripCentersFromFrames({ frames: gripFrames });
@@ -4215,6 +4732,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
 		                    grip_fallback_error: e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200),
 		                  };
 		                }
+		              }
 		              }
 
 		              // Zone-based on-plane evaluation (downswing only).
@@ -4299,7 +4817,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
 		          const poseHasBackTop = (posePhaseCounts.backswing ?? 0) + (posePhaseCounts.top ?? 0) > 0;
 		          const gripHasBackTop = (gripPhaseCounts.backswing ?? 0) + (gripPhaseCounts.top ?? 0) > 0;
 		          const poseCollapsed =
-		            !poseTraceInfo || poseTraceInfo.unique < 4 || poseTraceInfo.spread < 0.08;
+		            !poseTraceInfo || poseTraceInfo.unique < 3 || poseTraceInfo.spread < 0.06;
 		          if (poseCollapsed && gripTrace.length >= 2) {
 		            const filtered = filterTraceOutliers(gripTrace);
 		            const smoothed =

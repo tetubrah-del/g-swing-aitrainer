@@ -78,6 +78,8 @@ export interface GolfAnalyzeMeta {
   handedness: "right" | "left";
   clubType: "driver" | "iron" | "wedge";
   level: "beginner" | "beginner_plus" | "intermediate" | "upper_intermediate" | "advanced";
+  sourceVideoUrl?: string | null;
+  videoUrl?: string | null;
   previousAnalysisId?: AnalysisId | null;
   impactIndex?: number;
   scoringVersion?: string;
