@@ -305,6 +305,43 @@ function densifyTrace(
   return densified;
 }
 
+function densifyTraceWithAddress(
+  points: Array<{ x: number; y: number; phase?: string; frameIndex?: number; timestampSec?: number }>,
+  addressPoint?: { x: number; y: number } | null,
+  addressIndex?: number | null,
+  addressTime?: number | null,
+  targetCount: number = 48
+): Array<{ x: number; y: number; phase?: string; frameIndex?: number; timestampSec?: number }> {
+  if (!points.length) return points;
+  const addr =
+    addressPoint && Number.isFinite(addressPoint.x) && Number.isFinite(addressPoint.y)
+      ? { x: clamp(addressPoint.x, 0, 1), y: clamp(addressPoint.y, 0, 1) }
+      : null;
+  const base = [...points];
+  if (addr) {
+    const first = base[0];
+    const dist = first ? Math.hypot(first.x - addr.x, first.y - addr.y) : null;
+    const shouldInsert = dist == null || dist > 0.01;
+    if (shouldInsert) {
+      const fallbackTime =
+        Number.isFinite(addressTime as number)
+          ? Number(addressTime)
+          : Number.isFinite(addressIndex as number)
+            ? Number(addressIndex)
+            : (first?.timestampSec ?? first?.frameIndex ?? 0) - 0.001;
+      base.unshift({
+        x: addr.x,
+        y: addr.y,
+        phase: "address",
+        frameIndex: Number.isFinite(addressIndex as number) ? Number(addressIndex) : first?.frameIndex,
+        timestampSec: Number.isFinite(fallbackTime) ? fallbackTime : first?.timestampSec,
+      });
+    }
+  }
+  const sorted = base.sort((a, b) => (a.timestampSec ?? a.frameIndex ?? 0) - (b.timestampSec ?? b.frameIndex ?? 0));
+  return densifyTrace(sorted, targetCount);
+}
+
 function densifyTraceByWindows(
   points: Array<{ x: number; y: number; phase?: string; frameIndex?: number; timestampSec?: number }>,
   windows: Array<{ start: number; end: number }>,
@@ -3178,9 +3215,9 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
   const onPlaneOnly = body?.onPlaneOnly === true;
   const skipOnPlane = body?.skipOnPlane === true;
   const shouldRunOnPlane = onPlaneOnly || !skipOnPlane;
-  const allowOnPlaneEval = !onPlaneOnly || ON_PLANE_ALLOW_EVAL_LLM;
-  const allowZoneLLM = !onPlaneOnly || ON_PLANE_ALLOW_ZONE_LLM;
-  const allowGripLLM = !onPlaneOnly || ON_PLANE_ALLOW_GRIP_LLM;
+  const allowOnPlaneEval = !onPlaneOnly && ON_PLANE_ALLOW_EVAL_LLM;
+  const allowZoneLLM = !onPlaneOnly && ON_PLANE_ALLOW_ZONE_LLM;
+  const allowGripLLM = !onPlaneOnly && ON_PLANE_ALLOW_GRIP_LLM;
   const allowLLM = allowOnPlaneEval || allowZoneLLM || allowGripLLM;
 
   if (!addressIndices.length && !backswingIndices.length && !topIndices.length && !downswingIndices.length && !impactIndices.length && !finishIndices.length) {
@@ -3314,6 +3351,9 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
     Record<"address" | "backswing" | "top" | "downswing" | "impact" | "finish", { score: number; good: string[]; issues: string[]; advice: string[] }>
   > = {};
   let onPlaneUpdate: Record<string, unknown> | null = null;
+  let addrHandForTrace: { x: number; y: number } | null = null;
+  let addressIdxForTrace: number | null = null;
+  let addressTimeForTrace: number | null = null;
 
   try {
     if (!onPlaneOnly) {
@@ -4756,6 +4796,9 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
 		            const anchorForRef = clubheadPoint ?? ballPoint;
 		            const zoneAnchor = anchorForRef ?? gripPoint ?? null;
 		            const addrHand = gripPoint ?? null;
+		            addrHandForTrace = addrHand ?? null;
+		            addressIdxForTrace = typeof addressIdx === "number" ? addressIdx : null;
+		            addressTimeForTrace = typeof addressTime === "number" ? addressTime : null;
 		            const addrHands: Array<{ x: number; y: number }> = [];
 		            const addrShaftVec = anchorForRef && gripPoint ? { x: gripPoint.x - anchorForRef.x, y: gripPoint.y - anchorForRef.y } : null;
 		            const fallbackRefVec = bsVec ?? downVec ?? dsVec ?? impVec;

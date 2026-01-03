@@ -688,7 +688,31 @@ const GolfResultPage = () => {
     const hasLocalFrames =
       !!local?.result?.phaseFrames ||
       (Array.isArray(local?.result?.sequence?.frames) && local!.result!.sequence!.frames.length > 0);
-    if (local?.result && hasLocalFrames) {
+    const localOnPlane =
+      (local?.result as unknown as Record<string, unknown> | null)?.on_plane ??
+      (local?.result as unknown as Record<string, unknown> | null)?.onPlane ??
+      (local?.result as unknown as Record<string, unknown> | null)?.onPlaneData ??
+      null;
+    const hasLocalPoseMetrics = !!local?.result?.poseMetrics;
+    const hasLocalHandTraceDisplay = (() => {
+      if (!localOnPlane || typeof localOnPlane !== "object") return false;
+      const op = localOnPlane as Record<string, unknown>;
+      const visual = (op.visual && typeof op.visual === "object") ? (op.visual as Record<string, unknown>) : null;
+      const raw =
+        op.hand_trace_display ??
+        op.handTraceDisplay ??
+        visual?.hand_trace_display ??
+        visual?.handTraceDisplay ??
+        op.hand_trace ??
+        op.handTrace ??
+        visual?.hand_trace ??
+        visual?.handTrace;
+      if (Array.isArray(raw)) return raw.length >= 2;
+      if (typeof raw === "string") return raw.trim().length > 5;
+      return false;
+    })();
+    const hasLocalSignals = hasLocalPoseMetrics || hasLocalHandTraceDisplay;
+    if (local?.result && hasLocalFrames && hasLocalSignals) {
       setData(local);
       setSwingTypes(deriveSwingTypes(local.result));
       setSwingTypeResult(deriveSwingTypeResult(local.result));
@@ -2236,6 +2260,7 @@ const GolfResultPage = () => {
           onPlaneData={onPlaneData}
           isPro={userState.hasProAccess}
           overlayFrames={userState.hasProAccess ? onPlaneOverlayFrames : null}
+          poseMetrics={result.poseMetrics}
         />
 
         <ProUpsellModal

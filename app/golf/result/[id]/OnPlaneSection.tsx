@@ -5,6 +5,7 @@ type OnPlaneSectionProps = {
   onPlaneData: unknown;
   isPro: boolean;
   overlayFrames?: Array<{ url: string; label: string }> | null;
+  poseMetrics?: import("@/app/lib/swing/poseMetrics").PoseMetrics | null;
 };
 
 type ScoreTone = 'green' | 'yellow' | 'red';
@@ -184,15 +185,39 @@ const sign = (v: number) => (v > 0 ? '+' : '');
 
 const directionLabel = (v: number) => (v >= 0 ? '外側' : '内側');
 
+const formatNumber = (value: number | null | undefined, digits = 2) => {
+  if (value == null || !Number.isFinite(value)) return '--';
+  const factor = Math.pow(10, digits);
+  return `${Math.round(value * factor) / factor}`;
+};
+
+const formatDeg = (value: number | null | undefined) => {
+  const n = formatNumber(value, 1);
+  return n === '--' ? n : `${n}°`;
+};
+
+const formatNorm = (value: number | null | undefined) => {
+  const n = formatNumber(value, 2);
+  return n === '--' ? n : `${n}x`;
+};
+
+const labelLowerBodyLead = (lead?: import("@/app/lib/swing/poseMetrics").PoseMetrics["metrics"]["lowerBodyLead"] | null) => {
+  const status = lead?.lead ?? 'unclear';
+  if (status === 'lower_body') return '下半身先行';
+  if (status === 'chest') return '胸先行';
+  return '判定中';
+};
+
+const labelHandVsChest = (handVs?: import("@/app/lib/swing/poseMetrics").PoseMetrics["metrics"]["handVsChest"] | null) => {
+  const status = handVs?.classification ?? 'unclear';
+  if (status === 'hand_first') return '手打ち寄り';
+  if (status === 'torso_first') return '振り遅れ寄り';
+  if (status === 'mixed') return '混合';
+  return '判定中';
+};
+
 function OnPlaneFrameOverlay(props: {
   frames: Array<{ url: string; label: string }>;
-  referencePlane?: PlaneLine01 | null;
-  referencePlaneEvidence?: PlaneLine01 | null;
-  zoneThetaDeg?: number | null;
-  zoneAnchor?: { x: number; y: number } | null;
-  zoneUpperPoint?: { x: number; y: number } | null;
-  zoneLowerPoint?: { x: number; y: number } | null;
-  zoneUnstable?: boolean;
   addressLandmarks?: {
     clubhead?: { x: number; y: number } | null;
     grip?: { x: number; y: number } | null;
@@ -202,7 +227,6 @@ function OnPlaneFrameOverlay(props: {
   } | null;
   handPoints?: { top?: { x: number; y: number } | null; downswing?: { x: number; y: number } | null; impact?: { x: number; y: number } | null } | null;
   handTrace?: Array<{ x: number; y: number; phase?: string }>;
-  deviations?: { top: number; late: number; impact: number } | null;
   tone: ScoreTone;
 }) {
   const frames = props.frames.filter((f) => typeof f?.url === 'string' && f.url.startsWith('data:image/'));
@@ -322,275 +346,7 @@ function OnPlaneFrameOverlay(props: {
             preserveAspectRatio="none"
             className="absolute inset-0 h-full w-full pointer-events-none"
           >
-            {/* On-plane zone (shoulder/hip wedge or band around reference line) */}
-            {props.zoneUpperPoint && props.zoneLowerPoint && props.zoneAnchor ? (
-              (() => {
-                const isUnstable = !!props.zoneUnstable;
-                const anchor01 = props.zoneAnchor;
-                const upper01 = props.zoneUpperPoint;
-                const lower01 = props.zoneLowerPoint;
-                if (!anchor01 || !upper01 || !lower01) return null;
-                const anchorUse = {
-                  x: clamp(anchor01.x, 0, 1) * 100,
-                  y: clamp(anchor01.y, 0, 1) * viewBoxHeight,
-                };
-                const upperUse = {
-                  x: clamp(upper01.x, 0, 1) * 100,
-                  y: clamp(upper01.y, 0, 1) * viewBoxHeight,
-                };
-                const lowerUse = {
-                  x: clamp(lower01.x, 0, 1) * 100,
-                  y: clamp(lower01.y, 0, 1) * viewBoxHeight,
-                };
-                const norm = (dx: number, dy: number) => {
-                  const len = Math.hypot(dx, dy);
-                  if (!Number.isFinite(len) || len < 1e-6) return null;
-                  return { x: dx / len, y: dy / len };
-                };
-                const dirUpper = norm(upperUse.x - anchorUse.x, upperUse.y - anchorUse.y);
-                const dirLower = norm(lowerUse.x - anchorUse.x, lowerUse.y - anchorUse.y);
-                if (!dirUpper || !dirLower) return null;
-
-                const rayToBox = (x0: number, y0: number, vx: number, vy: number): { x: number; y: number } | null => {
-                  const eps = 1e-6;
-                  const candidates: Array<{ t: number; x: number; y: number }> = [];
-
-                  if (Math.abs(vx) > eps) {
-                    const tLeft = (0 - x0) / vx;
-                    const yLeft = y0 + tLeft * vy;
-                    if (tLeft >= 0 && yLeft >= 0 && yLeft <= viewBoxHeight) candidates.push({ t: tLeft, x: 0, y: yLeft });
-                    const tRight = (100 - x0) / vx;
-                    const yRight = y0 + tRight * vy;
-                    if (tRight >= 0 && yRight >= 0 && yRight <= viewBoxHeight) candidates.push({ t: tRight, x: 100, y: yRight });
-                  }
-                  if (Math.abs(vy) > eps) {
-                    const tTop = (0 - y0) / vy;
-                    const xTop = x0 + tTop * vx;
-                    if (tTop >= 0 && xTop >= 0 && xTop <= 100) candidates.push({ t: tTop, x: xTop, y: 0 });
-                    const tBottom = (viewBoxHeight - y0) / vy;
-                    const xBottom = x0 + tBottom * vx;
-                    if (tBottom >= 0 && xBottom >= 0 && xBottom <= 100) candidates.push({ t: tBottom, x: xBottom, y: viewBoxHeight });
-                  }
-                  if (!candidates.length) return null;
-                  candidates.sort((a, b) => a.t - b.t);
-                  return { x: candidates[0]!.x, y: candidates[0]!.y };
-                };
-
-                const endUpper = rayToBox(anchorUse.x, anchorUse.y, dirUpper.x, dirUpper.y);
-                const endLower = rayToBox(anchorUse.x, anchorUse.y, dirLower.x, dirLower.y);
-                if (!endUpper || !endLower) return null;
-
-                const centerDir = norm((dirUpper.x + dirLower.x) / 2, (dirUpper.y + dirLower.y) / 2);
-                const endCenter = centerDir ? rayToBox(anchorUse.x, anchorUse.y, centerDir.x, centerDir.y) : null;
-                const poly = `${anchorUse.x},${anchorUse.y} ${endUpper.x},${endUpper.y} ${endLower.x},${endLower.y}`;
-
-                const zoneFill = isUnstable ? 'rgba(253,230,138,0.12)' : 'rgba(253,230,138,0.18)';
-                const centerStroke = isUnstable ? 'rgba(226,232,240,0.18)' : 'rgba(226,232,240,0.26)';
-                const blueEdge = isUnstable ? 'rgba(59,130,246,0.35)' : 'rgba(59,130,246,0.55)';
-                const redEdge = isUnstable ? 'rgba(244,63,94,0.32)' : 'rgba(244,63,94,0.52)';
-
-                return (
-                  <>
-                    <polygon points={poly} fill={zoneFill} />
-                    {endCenter ? (
-                      <line
-                        x1={anchorUse.x}
-                        y1={anchorUse.y}
-                        x2={endCenter.x}
-                        y2={endCenter.y}
-                        stroke={centerStroke}
-                        strokeWidth="1.2"
-                        strokeDasharray="4 3"
-                        strokeLinecap="round"
-                      />
-                    ) : null}
-                    <line
-                      x1={anchorUse.x}
-                      y1={anchorUse.y}
-                      x2={endUpper.x}
-                      y2={endUpper.y}
-                      stroke={blueEdge}
-                      strokeWidth="1.6"
-                      strokeLinecap="round"
-                    />
-                    <line
-                      x1={anchorUse.x}
-                      y1={anchorUse.y}
-                      x2={endLower.x}
-                      y2={endLower.y}
-                      stroke={redEdge}
-                      strokeWidth="1.6"
-                      strokeLinecap="round"
-                    />
-                  </>
-                );
-              })()
-            ) : props.referencePlane ? (
-              <>
-                {(() => {
-                  const thetaDeg = Number.isFinite(props.zoneThetaDeg as number) ? clamp(Number(props.zoneThetaDeg), 4, 20) : 10;
-                  const isUnstable = !!props.zoneUnstable;
-
-                  const p = props.referencePlane!;
-                  const x1 = p.x1 * 100;
-                  const y1 = p.y1 * viewBoxHeight;
-                  const x2 = p.x2 * 100;
-                  const y2 = p.y2 * viewBoxHeight;
-                  const dx = x2 - x1;
-                  const dy = y2 - y1;
-                  const l = Math.hypot(dx, dy);
-                  if (!Number.isFinite(l) || l < 1e-6) return null;
-
-                  // Orient the zone "upwards" from the anchor (towards smaller y) to match typical address-plane visualization.
-                  let ux = dx / l;
-                  let uy = dy / l;
-                  if (uy > 0) {
-                    ux *= -1;
-                    uy *= -1;
-                  }
-                  const ang = (thetaDeg * Math.PI) / 180;
-                  const rot = (vx: number, vy: number, a: number) => ({
-                    x: vx * Math.cos(a) - vy * Math.sin(a),
-                    y: vx * Math.sin(a) + vy * Math.cos(a),
-                  });
-
-                  const anchor = props.referencePlaneEvidence
-                    ? {
-                        x: ((props.referencePlaneEvidence.x1 + props.referencePlaneEvidence.x2) / 2) * 100,
-                        y: ((props.referencePlaneEvidence.y1 + props.referencePlaneEvidence.y2) / 2) * viewBoxHeight,
-                      }
-                    : { x: (x1 + x2) / 2, y: (y1 + y2) / 2 };
-
-                  const anchor01 = props.zoneAnchor ?? null;
-                  const anchorUse = anchor01
-                    ? { x: clamp(anchor01.x, 0, 1) * 100, y: clamp(anchor01.y, 0, 1) * viewBoxHeight }
-                    : anchor;
-                  const upper01 = props.zoneUpperPoint ?? null;
-                  const upperUse = upper01
-                    ? { x: clamp(upper01.x, 0, 1) * 100, y: clamp(upper01.y, 0, 1) * viewBoxHeight }
-                    : null;
-
-                  // Ray-box intersection from anchor (t >= 0), returning the nearest boundary hit.
-                  const rayToBox = (x0: number, y0: number, vx: number, vy: number): { x: number; y: number } | null => {
-                    const eps = 1e-6;
-                    const candidates: Array<{ t: number; x: number; y: number }> = [];
-
-                    if (Math.abs(vx) > eps) {
-                      const tLeft = (0 - x0) / vx;
-                      const yLeft = y0 + tLeft * vy;
-                      if (tLeft >= 0 && yLeft >= 0 && yLeft <= viewBoxHeight) candidates.push({ t: tLeft, x: 0, y: yLeft });
-                      const tRight = (100 - x0) / vx;
-                      const yRight = y0 + tRight * vy;
-                      if (tRight >= 0 && yRight >= 0 && yRight <= viewBoxHeight) candidates.push({ t: tRight, x: 100, y: yRight });
-                    }
-                    if (Math.abs(vy) > eps) {
-                      const tTop = (0 - y0) / vy;
-                      const xTop = x0 + tTop * vx;
-                      if (tTop >= 0 && xTop >= 0 && xTop <= 100) candidates.push({ t: tTop, x: xTop, y: 0 });
-                      const tBottom = (viewBoxHeight - y0) / vy;
-                      const xBottom = x0 + tBottom * vx;
-                      if (tBottom >= 0 && xBottom >= 0 && xBottom <= 100) candidates.push({ t: tBottom, x: xBottom, y: viewBoxHeight });
-                    }
-                    if (!candidates.length) return null;
-                    candidates.sort((a, b) => a.t - b.t);
-                    return { x: candidates[0]!.x, y: candidates[0]!.y };
-                  };
-
-                  const dirMinus = rot(ux, uy, -ang);
-                  const dirPlus = rot(ux, uy, ang);
-
-                  const signedDelta = (() => {
-                    if (!upperUse) return null;
-                    const baseAng = Math.atan2(uy, ux);
-                    const vAng = Math.atan2(upperUse.y - anchorUse.y, upperUse.x - anchorUse.x);
-                    return Math.atan2(Math.sin(vAng - baseAng), Math.cos(vAng - baseAng));
-                  })();
-                  // Ensure upper boundary (towards address shoulder) is blue.
-                  const blueDir = signedDelta != null && signedDelta > 0 ? dirPlus : dirMinus;
-                  const redDir = signedDelta != null && signedDelta > 0 ? dirMinus : dirPlus;
-
-                  const endBlue = rayToBox(anchorUse.x, anchorUse.y, blueDir.x, blueDir.y);
-                  const endRed = rayToBox(anchorUse.x, anchorUse.y, redDir.x, redDir.y);
-                  const endCenter = rayToBox(anchorUse.x, anchorUse.y, ux, uy);
-                  if (!endBlue || !endRed) return null;
-                  const poly = `${anchorUse.x},${anchorUse.y} ${endBlue.x},${endBlue.y} ${endRed.x},${endRed.y}`;
-
-                  // Match the classic visualization: yellow zone between blue/red boundary rays.
-                  const zoneFill = isUnstable ? 'rgba(253,230,138,0.12)' : 'rgba(253,230,138,0.18)';
-                  const centerStroke = isUnstable ? 'rgba(226,232,240,0.18)' : 'rgba(226,232,240,0.26)';
-                  const blueEdge = isUnstable ? 'rgba(59,130,246,0.35)' : 'rgba(59,130,246,0.55)';
-                  const redEdge = isUnstable ? 'rgba(244,63,94,0.32)' : 'rgba(244,63,94,0.52)';
-
-                  return (
-                    <>
-                      <polygon points={poly} fill={zoneFill} />
-                      {endCenter ? (
-                        <line
-                          x1={anchorUse.x}
-                          y1={anchorUse.y}
-                          x2={endCenter.x}
-                          y2={endCenter.y}
-                          stroke={centerStroke}
-                          strokeWidth="1.2"
-                          strokeDasharray="4 3"
-                          strokeLinecap="round"
-                        />
-                      ) : null}
-                      <line
-                        x1={anchorUse.x}
-                        y1={anchorUse.y}
-                        x2={endBlue.x}
-                        y2={endBlue.y}
-                        stroke={blueEdge}
-                        strokeWidth="1.6"
-                        strokeLinecap="round"
-                      />
-                      <line
-                        x1={anchorUse.x}
-                        y1={anchorUse.y}
-                        x2={endRed.x}
-                        y2={endRed.y}
-                        stroke={redEdge}
-                        strokeWidth="1.6"
-                        strokeLinecap="round"
-                      />
-                    </>
-                  );
-                })()}
-              </>
-            ) : props.deviations ? (
-              (() => {
-                const scale = (cm: number) => clamp(cm * 2.2, -18, 18);
-                const p0 = { x: 18, y: viewBoxHeight * 0.21 };
-                const p1 = { x: 52, y: viewBoxHeight * 0.53 };
-                const p2 = { x: 88, y: viewBoxHeight * 0.92 };
-                const base = `M ${p0.x} ${p0.y} Q ${p1.x} ${p1.y} ${p2.x} ${p2.y}`;
-                const path = `M ${p0.x + scale(props.deviations.top)} ${p0.y} Q ${p1.x + scale(props.deviations.late)} ${p1.y} ${p2.x + scale(props.deviations.impact)} ${p2.y}`;
-                const trajStroke =
-                  'rgba(253, 230, 138, 0.92)';
-                return (
-                  <>
-                    <path d={base} stroke="rgba(148,163,184,0.55)" strokeWidth="1.3" fill="none" strokeLinecap="round" />
-                    <path d={path} stroke={trajStroke} strokeWidth="1.6" fill="none" strokeLinecap="round" />
-
-                    {/* Legend */}
-                    <g>
-                      <rect x="70" y={Math.max(4.5, viewBoxHeight - 7.6)} width="28" height="5.6" rx="1.8" fill="rgba(2,6,23,0.55)" />
-                      <g transform={`translate(71.5, ${Math.max(5.8, viewBoxHeight - 6.3)})`}>
-                        <circle cx="1.2" cy="1.6" r="0.9" fill="rgba(148,163,184,0.75)" />
-                        <text x="3.1" y="2.45" fontSize="1.9" fill="rgba(226,232,240,0.92)">
-                          ゾーン
-                        </text>
-                        <circle cx="14.2" cy="1.6" r="0.9" fill={trajStroke} />
-                        <text x="16.1" y="2.45" fontSize="1.9" fill="rgba(226,232,240,0.92)">
-                          手元
-                        </text>
-                      </g>
-                    </g>
-                  </>
-                );
-              })()
-            ) : null}
+            {null}
 
             {/* Address landmarks (debug): points only */}
             {(() => {
@@ -606,15 +362,7 @@ function OnPlaneFrameOverlay(props: {
               const dot = (p: { x: number; y: number }, fill: string, stroke: string) => (
                 <circle cx={p.x * 100} cy={p.y * viewBoxHeight} r="1.35" fill={fill} stroke={stroke} strokeWidth="0.55" />
               );
-              return (
-                <g>
-                  {ball ? dot(ball, 'rgba(241,245,249,0.95)', 'rgba(2,6,23,0.65)') : null}
-                  {club ? dot(club, 'rgba(253,230,138,0.95)', 'rgba(2,6,23,0.65)') : null}
-                  {grip ? dot(grip, 'rgba(52,211,153,0.95)', 'rgba(2,6,23,0.65)') : null}
-                  {shoulder ? dot(shoulder, 'rgba(125,211,252,0.95)', 'rgba(2,6,23,0.65)') : null}
-                  {hip ? dot(hip, 'rgba(248,113,113,0.92)', 'rgba(2,6,23,0.65)') : null}
-                </g>
-              );
+              return null;
             })()}
 
             {/* Hand trace (Top → Downswing → Impact). Yellow = hands (grip center). */}
@@ -642,129 +390,46 @@ function OnPlaneFrameOverlay(props: {
               const fallbackBackPts = top && down ? [top, down] : null;
               const fallbackDownPts = down && impact ? [down, impact] : null;
 
-              // Zone membership (downswing only). Uses the same definition as backend: angle band around reference line.
-              const zoneMeta = (() => {
-                const line = props.referencePlane ?? null;
-                if (!line) return null;
-                const dx = line.x2 - line.x1;
-                const dy = line.y2 - line.y1;
-                const len = Math.hypot(dx, dy);
-                if (!Number.isFinite(len) || len < 1e-6) return null;
-                const ux = dx / len;
-                const uy = dy / len;
-                const baseAng = Math.atan2(uy, ux);
-                const thetaDeg = Number.isFinite(props.zoneThetaDeg as number) ? clamp(Number(props.zoneThetaDeg), 4, 20) : 10;
-                const thetaRad = (thetaDeg * Math.PI) / 180;
-                const anchor =
-                  props.zoneAnchor ??
-                  (hp?.downswing ?? null) ??
-                  (hp?.impact ?? null) ??
-                  (hp?.top ?? null) ??
-                  ({ x: (line.x1 + line.x2) / 2, y: (line.y1 + line.y2) / 2 } as { x: number; y: number });
-                return { baseAng, thetaRad, ux, uy, anchor };
-              })();
-
-              const wrapAngleRad = (a: number) => Math.atan2(Math.sin(a), Math.cos(a));
-              const isInZone = (p: { x: number; y: number }) => {
-                if (!zoneMeta) return null;
-                const vx = p.x - zoneMeta.anchor.x;
-                const vy = p.y - zoneMeta.anchor.y;
-                const vl = Math.hypot(vx, vy);
-                if (!Number.isFinite(vl) || vl < 1e-6) return true;
-                const ang = Math.atan2(vy, vx);
-                const d = Math.abs(wrapAngleRad(ang - zoneMeta.baseAng));
-                return d <= zoneMeta.thetaRad;
-              };
-
               const toPath = (points: Array<{ x: number; y: number }>) =>
                 points.map((p) => `${p.x * 100} ${p.y * viewBoxHeight}`).join(' L ');
 
-              const buildClassifiedPaths = (points: Array<{ x: number; y: number }>) => {
-                if (points.length < 2) return { inside: [] as string[], outside: [] as string[] };
-                const inside: string[] = [];
-                const outside: string[] = [];
-                let current: Array<{ x: number; y: number }> = [];
-                let currentInside: boolean | null = null;
-                let prev = points[0]!;
-                const firstInside = isInZone(prev) ?? true;
-                currentInside = firstInside;
-                current = [prev];
-                for (let i = 1; i < points.length; i += 1) {
-                  const next = points[i]!;
-                  const nextInside = isInZone(next) ?? currentInside ?? true;
-                  if (nextInside === currentInside) {
-                    current.push(next);
-                  } else {
-                    const path = toPath(current);
-                    if (currentInside) inside.push(path);
-                    else outside.push(path);
-                    currentInside = nextInside;
-                    current = [prev, next];
-                  }
-                  prev = next;
-                }
-                const lastPath = toPath(current);
-                if (currentInside) inside.push(lastPath);
-                else outside.push(lastPath);
-                return { inside, outside };
-              };
-
-              const fullPath = tracePts.length >= 2 ? toPath(tracePts) : null;
+              const tracePath = tracePts.length >= 2 ? toPath(tracePts) : null;
+              const fullPath = tracePath;
               const backPath =
                 backswingPts.length >= 2 ? toPath(backswingPts) : fallbackBackPts ? toPath(fallbackBackPts) : null;
-              const downPaths =
-                downswingPts.length >= 2
-                  ? buildClassifiedPaths(downswingPts.map((p) => ({ x: p.x, y: p.y })))
-                  : null;
-              const fallbackDownPath = !downPaths && fallbackDownPts ? toPath(fallbackDownPts) : null;
+              const fallbackDownPath = fallbackDownPts ? toPath(fallbackDownPts) : null;
 
               return (
                 <>
                   {fullPath ? (
-                    <path d={`M ${fullPath}`} stroke="rgba(226,232,240,0.12)" strokeWidth="1.0" fill="none" strokeLinecap="round" />
+                    <path d={`M ${fullPath}`} stroke="rgba(226,232,240,0.12)" strokeWidth="0.75" fill="none" strokeLinecap="round" />
                   ) : null}
                   {backPath ? (
-                    <path d={`M ${backPath}`} stroke="rgba(125, 211, 252, 0.75)" strokeWidth="2.1" fill="none" strokeLinecap="round" />
+                    <path d={`M ${backPath}`} stroke="rgba(125, 211, 252, 0.9)" strokeWidth="1.7" fill="none" strokeLinecap="round" strokeLinejoin="round" />
                   ) : null}
-                  {downPaths ? (
-                    <>
-                      {downPaths.outside.map((p, idx) => (
-                        <path key={`ds-out-${idx}`} d={`M ${p}`} stroke="rgba(253, 230, 138, 0.28)" strokeWidth="2.4" fill="none" strokeLinecap="round" />
-                      ))}
-                      {downPaths.inside.map((p, idx) => (
-                        <path key={`ds-in-${idx}`} d={`M ${p}`} stroke="rgba(253, 230, 138, 0.96)" strokeWidth="2.4" fill="none" strokeLinecap="round" />
-                      ))}
-                    </>
-                  ) : downswingPts.length >= 2 ? (
-                    <path d={`M ${toPath(downswingPts)}`} stroke="rgba(253, 230, 138, 0.96)" strokeWidth="2.4" fill="none" strokeLinecap="round" />
+                  {downswingPts.length >= 2 ? (
+                    <path d={`M ${toPath(downswingPts)}`} stroke="rgba(253, 230, 138, 0.98)" strokeWidth="2.0" fill="none" strokeLinecap="round" strokeLinejoin="round" />
                   ) : fallbackDownPath ? (
-                    <path d={`M ${fallbackDownPath}`} stroke="rgba(253, 230, 138, 0.96)" strokeWidth="2.4" fill="none" strokeLinecap="round" />
+                    <path d={`M ${fallbackDownPath}`} stroke="rgba(253, 230, 138, 0.98)" strokeWidth="2.0" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+                  ) : tracePath ? (
+                    <path d={`M ${tracePath}`} stroke="rgba(253, 230, 138, 0.98)" strokeWidth="2.0" fill="none" strokeLinecap="round" strokeLinejoin="round" />
                   ) : null}
-                  {top ? <circle cx={top.x * 100} cy={top.y * viewBoxHeight} r="1.3" fill="rgba(125, 211, 252, 0.95)" /> : null}
-                  {down ? <circle cx={down.x * 100} cy={down.y * viewBoxHeight} r="1.3" fill="rgba(253, 230, 138, 0.95)" /> : null}
-                  {impact ? <circle cx={impact.x * 100} cy={impact.y * viewBoxHeight} r="1.3" fill="rgba(251, 113, 133, 0.95)" /> : null}
                 </>
               );
             })()}
 
             {/* Legend (place away from top phase tabs) */}
             <g>
-              <rect x="40" y={Math.max(4.5, viewBoxHeight - 7.6)} width="58" height="5.6" rx="1.8" fill="rgba(2,6,23,0.55)" />
-                <g transform={`translate(57.5, ${Math.max(5.8, viewBoxHeight - 6.3)})`}>
-                  <g transform="translate(-16.5, 0)">
-                  <rect x="0.2" y="0.6" width="7" height="2.0" rx="0.7" fill="rgba(56,189,248,0.18)" stroke="rgba(56,189,248,0.45)" strokeWidth="0.2" />
-                  <text x="8.6" y="2.45" fontSize="1.75" fill="rgba(226,232,240,0.92)">
-                    ゾーン
-                  </text>
-                  <line x1="20" y1="1.6" x2="26" y2="1.6" stroke="rgba(125, 211, 252, 0.75)" strokeWidth="1.3" strokeLinecap="round" />
-                  <text x="27.8" y="2.45" fontSize="1.75" fill="rgba(226,232,240,0.92)">
-                    Back
-                  </text>
-                  <line x1="39.8" y1="1.6" x2="45.8" y2="1.6" stroke="rgba(253, 230, 138, 0.92)" strokeWidth="1.8" strokeLinecap="round" />
-                  <text x="47.6" y="2.45" fontSize="1.75" fill="rgba(226,232,240,0.92)">
-                    Down
-                  </text>
-                </g>
+              <rect x="52" y={Math.max(4.5, viewBoxHeight - 7.6)} width="40" height="5.6" rx="1.8" fill="rgba(2,6,23,0.55)" />
+              <g transform={`translate(56, ${Math.max(5.8, viewBoxHeight - 6.3)})`}>
+                <line x1="0" y1="1.6" x2="6" y2="1.6" stroke="rgba(125, 211, 252, 0.9)" strokeWidth="1.6" strokeLinecap="round" />
+                <text x="7.6" y="2.45" fontSize="1.75" fill="rgba(226,232,240,0.92)">
+                  Back
+                </text>
+                <line x1="20.8" y1="1.6" x2="26.8" y2="1.6" stroke="rgba(253, 230, 138, 0.96)" strokeWidth="1.8" strokeLinecap="round" />
+                <text x="28.6" y="2.45" fontSize="1.75" fill="rgba(226,232,240,0.92)">
+                  Down
+                </text>
               </g>
             </g>
           </svg>
@@ -843,73 +508,6 @@ const resolvePlaneLine = (onPlaneData: unknown, which: 'backswing' | 'downswing'
   return null;
 };
 
-const resolvePlaneEvidenceLine = (onPlaneData: unknown, which: 'backswing' | 'downswing'): PlaneLine01 | null => {
-  const obj = getObj(onPlaneData);
-  if (!obj) return null;
-  const candidates =
-    which === 'backswing'
-      ? [
-          obj.backswing_plane_evidence,
-          obj.backswingPlaneEvidence,
-          obj.back_plane_evidence,
-          obj.backPlaneEvidence,
-          getObj(obj.visual)?.backswing_plane_evidence,
-          getObj(obj.visual)?.backswingPlaneEvidence,
-        ]
-      : [
-          obj.reference_plane_evidence,
-          obj.referencePlaneEvidence,
-          obj.downswing_plane_evidence,
-          obj.downswingPlaneEvidence,
-          obj.down_plane_evidence,
-          obj.downPlaneEvidence,
-          getObj(obj.visual)?.downswing_plane_evidence,
-          getObj(obj.visual)?.downswingPlaneEvidence,
-        ];
-  for (const c of candidates) {
-    const line = normalizePlaneLine01(c);
-    if (line) return line;
-  }
-  return null;
-};
-
-const resolvePlaneConfidence = (onPlaneData: unknown): 'high' | 'medium' | 'low' | null => {
-  const obj = getObj(onPlaneData);
-  if (!obj) return null;
-  const c = obj.plane_confidence ?? obj.planeConfidence;
-  if (c === 'high' || c === 'medium' || c === 'low') return c;
-  return null;
-};
-
-const resolveZoneThetaDeg = (onPlaneData: unknown): number | null => {
-  const obj = getObj(onPlaneData);
-  if (!obj) return null;
-  const n = readNumber(obj.zone_theta_deg ?? obj.zoneThetaDeg ?? getObj(obj.visual)?.zone_theta_deg ?? getObj(obj.visual)?.zoneThetaDeg);
-  if (n == null) return null;
-  return clamp(n, 4, 20);
-};
-
-type OnPlaneZoneEval = {
-  on_plane_rating: 'A' | 'B' | 'C' | 'D';
-  zone_stay_ratio: string;
-  primary_deviation: 'outside' | 'inside' | 'none';
-  key_observation: string;
-  coaching_comment: string;
-};
-
-const resolveZoneEval = (onPlaneData: unknown): OnPlaneZoneEval | null => {
-  const obj = getObj(onPlaneData);
-  if (!obj) return null;
-  const rating = readString(obj.on_plane_rating ?? obj.onPlaneRating);
-  const zoneStay = readString(obj.zone_stay_ratio ?? obj.zoneStayRatio);
-  const primary = readString(obj.primary_deviation ?? obj.primaryDeviation);
-  const keyObs = readString(obj.key_observation ?? obj.keyObservation);
-  const coach = readString(obj.coaching_comment ?? obj.coachingComment);
-  if (!(rating === 'A' || rating === 'B' || rating === 'C' || rating === 'D')) return null;
-  if (!zoneStay || !(primary === 'outside' || primary === 'inside' || primary === 'none')) return null;
-  if (!keyObs || !coach) return null;
-  return { on_plane_rating: rating, zone_stay_ratio: zoneStay, primary_deviation: primary, key_observation: keyObs, coaching_comment: coach };
-};
 
 const resolveHandPoints = (
   onPlaneData: unknown,
@@ -931,10 +529,29 @@ const resolveHandPoints = (
 
 const resolveHandTrace = (onPlaneData: unknown): Array<{ x: number; y: number; phase?: string }> | null => {
   const obj = getObj(onPlaneData);
-  const raw = obj?.hand_trace ?? obj?.handTrace;
-  if (!Array.isArray(raw)) return null;
+  const visual = getObj(obj?.visual);
+  const raw =
+    obj?.hand_trace_display ??
+    obj?.handTraceDisplay ??
+    visual?.hand_trace_display ??
+    visual?.handTraceDisplay ??
+    obj?.hand_trace ??
+    obj?.handTrace ??
+    visual?.hand_trace ??
+    visual?.handTrace;
+  const parsedRaw =
+    typeof raw === 'string'
+      ? (() => {
+          try {
+            return JSON.parse(raw);
+          } catch {
+            return null;
+          }
+        })()
+      : raw;
+  if (!Array.isArray(parsedRaw)) return null;
   const out: Array<{ x: number; y: number; phase?: string }> = [];
-  for (const entry of raw) {
+  for (const entry of parsedRaw) {
     const e = getObj(entry);
     if (!e) continue;
     const x = readNumber(e.x);
@@ -944,6 +561,22 @@ const resolveHandTrace = (onPlaneData: unknown): Array<{ x: number; y: number; p
     out.push({ x: clamp(to01(x), 0, 1), y: clamp(to01(y), 0, 1), phase: readString(e.phase) ?? undefined });
   }
   return out.length ? out : null;
+};
+
+const traceSpread = (points: Array<{ x: number; y: number }>) => {
+  if (points.length < 2) return 0;
+  let minX = 1;
+  let maxX = 0;
+  let minY = 1;
+  let maxY = 0;
+  for (const p of points) {
+    if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) continue;
+    if (p.x < minX) minX = p.x;
+    if (p.x > maxX) maxX = p.x;
+    if (p.y < minY) minY = p.y;
+    if (p.y > maxY) maxY = p.y;
+  }
+  return Math.max(0, (maxX - minX) + (maxY - minY));
 };
 
 const resolveZoneAnchorPoint = (onPlaneData: unknown): { x: number; y: number } | null => {
@@ -1040,22 +673,16 @@ const resolveAddressLandmarks = (onPlaneData: unknown) => {
 };
 
 export default function OnPlaneSection(props: OnPlaneSectionProps) {
-  const { onPlaneData, isPro, overlayFrames } = props;
+  const { onPlaneData, isPro, overlayFrames, poseMetrics } = props;
   const score = resolveScore100(onPlaneData);
   const tone = resolveTone(score ?? 0);
   const toneClass = toneClasses(tone);
 
   const summary = resolveSummary(onPlaneData);
   const downswingPlaneRaw = resolvePlaneLine(onPlaneData, 'downswing');
-  const downswingPlaneEvidenceRaw = resolvePlaneEvidenceLine(onPlaneData, 'downswing');
   const handPointsRaw = resolveHandPoints(onPlaneData);
   const handTraceRaw = resolveHandTrace(onPlaneData);
-  const zoneAnchorRaw = resolveZoneAnchorPoint(onPlaneData);
-  const shoulderRaw = resolveAddressShoulderPoint(onPlaneData);
-  const hipRaw = resolveAddressHipPoint(onPlaneData);
   const addressLandmarksRaw = resolveAddressLandmarks(onPlaneData);
-  const zoneEval = resolveZoneEval(onPlaneData);
-  const zoneThetaDeg = resolveZoneThetaDeg(onPlaneData) ?? null;
   const onPlaneSource = readString(getObj(onPlaneData)?.source);
   const reanalyzeTs = resolveReanalyzeTs(onPlaneData);
   const reanalyzeLabel = reanalyzeTs ? new Date(reanalyzeTs).toLocaleString('ja-JP', { hour12: false }) : null;
@@ -1085,40 +712,48 @@ export default function OnPlaneSection(props: OnPlaneSectionProps) {
     return dy >= 0 ? dx < 0 : dx > 0;
   })();
 
-  const downswingPlane = downswingPlaneRaw ? (shouldFlipX ? flipXLine(downswingPlaneRaw) : downswingPlaneRaw) : null;
-  const downswingPlaneEvidence = downswingPlaneEvidenceRaw
-    ? shouldFlipX
-      ? flipXLine(downswingPlaneEvidenceRaw)
-      : downswingPlaneEvidenceRaw
-    : null;
-  const handPoints = (() => {
-    if (!handPointsRaw) return null;
-    if (!shouldFlipX) return handPointsRaw;
+  const poseTraceFallback = (() => {
+    if (!poseMetrics?.handTrace?.length) return null;
+    return poseMetrics.handTrace.map((p) => ({ x: p.x, y: p.y, phase: p.phase }));
+  })();
+
+  const traceForDisplayRaw = (() => {
+    if (!poseTraceFallback) return handTraceRaw;
+    if (!handTraceRaw) return poseTraceFallback;
+    const poseSpread = traceSpread(poseTraceFallback);
+    const onPlaneSpread = traceSpread(handTraceRaw);
+    const usePose =
+      onPlaneSpread < 0.06 ||
+      (poseSpread > 0.08 && poseSpread > onPlaneSpread * 1.5);
+    return usePose ? poseTraceFallback : handTraceRaw;
+  })();
+
+  const handPointsFallback = (() => {
+    const keypoints = poseMetrics?.handKeypoints;
+    if (!keypoints) return null;
+    const downswingPoint = poseMetrics?.handTrace?.find((p) => p.phase === "downswing") ?? null;
     return {
-      top: handPointsRaw.top ? flipXPoint01(handPointsRaw.top) : null,
-      downswing: handPointsRaw.downswing ? flipXPoint01(handPointsRaw.downswing) : null,
-      impact: handPointsRaw.impact ? flipXPoint01(handPointsRaw.impact) : null,
+      top: keypoints.top ?? null,
+      downswing: downswingPoint ? { x: downswingPoint.x, y: downswingPoint.y } : null,
+      impact: keypoints.impact ?? null,
+    };
+  })();
+
+  const handPoints = (() => {
+    const base = handPointsRaw ?? handPointsFallback;
+    if (!base) return null;
+    if (!shouldFlipX) return base;
+    return {
+      top: base.top ? flipXPoint01(base.top) : null,
+      downswing: base.downswing ? flipXPoint01(base.downswing) : null,
+      impact: base.impact ? flipXPoint01(base.impact) : null,
     };
   })();
   const handTrace = (() => {
-    if (!handTraceRaw) return null;
-    if (!shouldFlipX) return handTraceRaw;
-    return handTraceRaw.map((p) => ({ ...p, x: 1 - p.x }));
-  })();
-  const zoneAnchorPoint = (() => {
-    if (!zoneAnchorRaw) return null;
-    if (!shouldFlipX) return zoneAnchorRaw;
-    return { x: 1 - zoneAnchorRaw.x, y: zoneAnchorRaw.y };
-  })();
-  const zoneUpperPoint = (() => {
-    if (!shoulderRaw) return null;
-    if (!shouldFlipX) return shoulderRaw;
-    return { x: 1 - shoulderRaw.x, y: shoulderRaw.y };
-  })();
-  const zoneLowerPoint = (() => {
-    if (!hipRaw) return null;
-    if (!shouldFlipX) return hipRaw;
-    return { x: 1 - hipRaw.x, y: hipRaw.y };
+    const base = traceForDisplayRaw ?? handTraceRaw ?? poseTraceFallback;
+    if (!base) return null;
+    if (!shouldFlipX) return base;
+    return base.map((p) => ({ ...p, x: 1 - p.x }));
   })();
   const addressLandmarks = (() => {
     if (!addressLandmarksRaw) return null;
@@ -1132,10 +767,6 @@ export default function OnPlaneSection(props: OnPlaneSectionProps) {
       hip: flip(addressLandmarksRaw.hip),
     };
   })();
-  const planeConfidence = resolvePlaneConfidence(onPlaneData);
-  const hasPlaneEvidence = !!downswingPlaneEvidence;
-  const zoneUnstable = !!downswingPlane && !((planeConfidence === 'high' || planeConfidence === 'medium') || hasPlaneEvidence);
-
   const top = resolveDeviationCm(onPlaneData, 'top_to_downswing');
   const late = resolveDeviationCm(onPlaneData, 'late_downswing');
   const impact = resolveDeviationCm(onPlaneData, 'impact');
@@ -1194,6 +825,50 @@ export default function OnPlaneSection(props: OnPlaneSectionProps) {
     return '変化なし';
   })();
 
+  const poseMetricsBlock = poseMetrics ? (
+    <div className="rounded-xl border border-slate-800 bg-slate-950/40 p-3">
+      <p className="text-xs text-slate-400">MediaPipe 定量指標</p>
+      <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+        <div className="rounded-lg border border-slate-800 bg-slate-950/30 p-3 space-y-1">
+          <p className="text-slate-300">下半身始動</p>
+          <p className="text-sm text-slate-100">{labelLowerBodyLead(poseMetrics.metrics.lowerBodyLead)}</p>
+          <p className="text-[11px] text-slate-400">
+            差分: {formatNumber(poseMetrics.metrics.lowerBodyLead?.deltaFrames, 0)} frames
+          </p>
+        </div>
+        <div className="rounded-lg border border-slate-800 bg-slate-950/30 p-3 space-y-1">
+          <p className="text-slate-300">手打ち / 振り遅れ</p>
+          <p className="text-sm text-slate-100">{labelHandVsChest(poseMetrics.metrics.handVsChest)}</p>
+          <p className="text-[11px] text-slate-400">
+            進行比: {formatNumber(poseMetrics.metrics.handVsChest?.ratio, 2)}
+          </p>
+        </div>
+        <div className="rounded-lg border border-slate-800 bg-slate-950/30 p-3 space-y-1">
+          <p className="text-slate-300">胸回転量（Top→Impact）</p>
+          <p className="text-sm text-slate-100">{formatDeg(poseMetrics.metrics.chestRotationDeg)}</p>
+        </div>
+        <div className="rounded-lg border border-slate-800 bg-slate-950/30 p-3 space-y-1">
+          <p className="text-slate-300">前傾維持（肩-腰角度差）</p>
+          <p className="text-sm text-slate-100">{formatDeg(poseMetrics.metrics.spineTiltDeltaDeg)}</p>
+        </div>
+        <div className="rounded-lg border border-slate-800 bg-slate-950/30 p-3 space-y-1">
+          <p className="text-slate-300">頭のブレ（肩中心）</p>
+          <p className="text-sm text-slate-100">{formatNorm(poseMetrics.metrics.headSway?.distNorm)}</p>
+          <p className="text-[11px] text-slate-400">
+            Δx {formatNumber(poseMetrics.metrics.headSway?.dx, 3)} / Δy {formatNumber(poseMetrics.metrics.headSway?.dy, 3)}
+          </p>
+        </div>
+        <div className="rounded-lg border border-slate-800 bg-slate-950/30 p-3 space-y-1">
+          <p className="text-slate-300">膝のブレ</p>
+          <p className="text-sm text-slate-100">{formatNorm(poseMetrics.metrics.kneeSway?.distNorm)}</p>
+          <p className="text-[11px] text-slate-400">
+            Δx {formatNumber(poseMetrics.metrics.kneeSway?.dx, 3)} / Δy {formatNumber(poseMetrics.metrics.kneeSway?.dy, 3)}
+          </p>
+        </div>
+      </div>
+    </div>
+  ) : null;
+
   return (
     <section className="rounded-xl bg-slate-900/70 border border-slate-700 p-4 space-y-3">
       <div className="flex items-start justify-between gap-3">
@@ -1220,6 +895,7 @@ export default function OnPlaneSection(props: OnPlaneSectionProps) {
             </div>
           </div>
           <p className="text-sm text-slate-200">{freeOneLiner}</p>
+          {poseMetricsBlock}
           <div className="pt-1">
             <Link
               href="/pricing"
@@ -1264,68 +940,19 @@ export default function OnPlaneSection(props: OnPlaneSectionProps) {
             )}
           </div>
 
-          {zoneEval ? (
-            <div className="rounded-xl border border-slate-800 bg-slate-950/40 p-3">
-              <p className="text-xs text-slate-400">ゾーン評価（ダウンスイング）</p>
-              <div className="mt-2 flex flex-wrap items-center gap-2">
-                <span className="rounded-full border border-slate-700 bg-slate-950/30 px-2 py-1 text-xs font-semibold text-slate-100">
-                  {zoneEval.on_plane_rating}
-                </span>
-                <span className="text-xs text-slate-300">
-                  {zoneEval.on_plane_rating === 'A'
-                    ? 'オンプレーン'
-                    : zoneEval.on_plane_rating === 'B'
-                      ? 'ややアウトサイド傾向'
-                      : zoneEval.on_plane_rating === 'C'
-                        ? 'アウトサイドイン傾向'
-                        : 'インサイド過多'}
-                </span>
-                <span className="text-xs text-slate-400">・</span>
-                <span className="text-xs text-slate-300">ゾーン内滞在率 {zoneEval.zone_stay_ratio}</span>
-                <span className="text-xs text-slate-400">・</span>
-                <span className="text-xs text-slate-300">
-                  最大逸脱{' '}
-                  {zoneEval.primary_deviation === 'none'
-                    ? 'なし'
-                    : zoneEval.primary_deviation === 'outside'
-                      ? '外側'
-                      : '内側'}
-                </span>
-              </div>
-              <p className="text-sm text-slate-200 mt-2">{zoneEval.key_observation}</p>
-              <p className="text-sm text-slate-200 mt-1">{zoneEval.coaching_comment}</p>
-            </div>
-          ) : null}
+          {poseMetricsBlock}
 
           {overlayFrames?.length ? (
             <div className="w-full">
               <OnPlaneFrameOverlay
                 frames={overlayFrames}
                 tone={tone}
-                referencePlane={downswingPlane}
-                referencePlaneEvidence={downswingPlaneEvidence}
-                zoneThetaDeg={zoneThetaDeg}
-                zoneAnchor={zoneAnchorPoint ?? handPoints?.downswing ?? handPoints?.impact ?? handPoints?.top ?? null}
-                zoneUpperPoint={zoneUpperPoint}
-                zoneLowerPoint={zoneLowerPoint}
-                zoneUnstable={zoneUnstable}
                 addressLandmarks={addressLandmarks}
                 handPoints={handPoints}
                 handTrace={handTrace ?? undefined}
-                deviations={
-                  typeof top === 'number' && typeof late === 'number' && typeof impact === 'number'
-                    ? { top, late, impact }
-                    : null
-                }
               />
             </div>
           ) : null}
-
-          {zoneUnstable && (
-            <p className="text-[11px] text-slate-400 -mt-1">
-              ※ 参照ゾーンは推定が不安定なため、ガイドとして表示しています（評価はゾーン内滞在で行います）。
-            </p>
-          )}
 
           <div className="rounded-xl border border-slate-800 bg-slate-950/40 p-3">
             <p className="text-xs text-slate-400">フェーズ別ズレ内訳</p>

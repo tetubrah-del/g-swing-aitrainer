@@ -77,6 +77,7 @@ export interface SwingAnalysis {
   swingStyle?: import("@/app/lib/swing/style").SwingStyleAssessment;
   swingStyleChange?: import("@/app/lib/swing/style").SwingStyleChange;
   swingStyleComment?: string;
+  poseMetrics?: import("@/app/lib/swing/poseMetrics").PoseMetrics;
 }
 
 // POST /api/golf/analyze に渡ってくるメタ情報

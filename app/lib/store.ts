@@ -1,10 +1,12 @@
 import fs from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 import { GolfAnalysisRecord } from "@/app/golf/types";
 
 const analyses = new Map<string, GolfAnalysisRecord>();
-const STORE_PATH = path.join(os.tmpdir(), "golf-analyses.json");
+const STORE_PATH =
+  process.env.GOLF_STORE_PATH && process.env.GOLF_STORE_PATH.trim().length > 0
+    ? process.env.GOLF_STORE_PATH.trim()
+    : path.join(process.cwd(), ".data", "golf-analyses.json");
 
 async function loadFromDisk() {
   try {
@@ -35,6 +37,7 @@ export async function resetAnalysisStore() {
 }
 
 async function persistToDisk() {
+  await fs.mkdir(path.dirname(STORE_PATH), { recursive: true });
   const obj = Object.fromEntries(analyses.entries());
   try {
     await fs.writeFile(STORE_PATH, JSON.stringify(obj), "utf8");

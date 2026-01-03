@@ -23,6 +23,7 @@ import { detectPhases } from "@/app/lib/vision/detectPhases";
 import { genPrompt } from "@/app/lib/vision/genPrompt";
 import { parseMultiPhaseResponse } from "@/app/lib/vision/parseMultiPhaseResponse";
 import { extractPoseKeypointsFromImages } from "@/app/lib/vision/extractPoseKeypoints";
+import { extractPoseKeypointsFromImagesMediaPipe } from "@/app/lib/pose/mediapipePose";
 import { auth } from "@/auth";
 import { readAnonymousFromRequest, setAnonymousTokenOnResponse } from "@/app/lib/anonymousToken";
 import { readEmailSessionFromRequest } from "@/app/lib/emailSession";
@@ -42,6 +43,7 @@ import {
 import { canPerform } from "@/app/lib/permissions";
 import { User, UserPlan } from "@/app/types/user";
 import { buildSwingStyleComment, detectSwingStyle, detectSwingStyleChange, SwingStyleType } from "@/app/lib/swing/style";
+import { computePoseMetrics } from "@/app/lib/swing/poseMetrics";
 import { extractSequenceFramesAroundImpact } from "@/app/lib/vision/extractSequenceFramesAroundImpact";
 import { rescoreSwingAnalysis } from "@/app/golf/scoring/phaseGuardrails";
 import { retrieveCoachKnowledge } from "@/app/coach/rag/retrieve";
@@ -1336,6 +1338,36 @@ export async function POST(req: NextRequest) {
       (f): f is { loaded: PhaseFrame; meta: SequenceFrameInput } => !!f
     );
 
+    const useMediaPipePose =
+      process.env.POSE_PROVIDER === "mediapipe" || process.env.USE_MEDIAPIPE_POSE === "1";
+    let poseMetrics: import("@/app/lib/swing/poseMetrics").PoseMetrics | null = null;
+    if (useMediaPipePose) {
+      const poseInputs = resolvedSequence.length
+        ? resolvedSequence.map(({ loaded, meta }) => ({
+            base64Image: loaded.base64Image?.replace(/\s+/g, "") ?? "",
+            mimeType: normalizeMime(loaded.mimeType),
+            timestampSec: meta.timestampSec,
+          }))
+        : PHASE_ORDER.map((phase) => ({
+            base64Image: frames[phase]?.base64Image?.replace(/\s+/g, "") ?? "",
+            mimeType: normalizeMime(frames[phase]?.mimeType),
+            timestampSec: frames[phase]?.timestampSec,
+          }));
+      const poseFramesInput = poseInputs.filter((f) => f.base64Image && f.mimeType);
+      if (poseFramesInput.length >= 3) {
+        try {
+          const poseFrames = await extractPoseKeypointsFromImagesMediaPipe({ frames: poseFramesInput });
+          poseMetrics = computePoseMetrics({
+            poseFrames,
+            handedness: meta.handedness,
+            timestampsSec: poseFramesInput.map((f) => f.timestampSec),
+          });
+        } catch (error) {
+          console.warn("[golf/analyze] mediapipe pose metrics failed", error);
+        }
+      }
+    }
+
     const visionFrames: PhaseFrame[] =
       resolvedSequence.length > 0
         ? resolvedSequence.map(({ loaded }) => loaded)
@@ -1878,6 +1910,7 @@ export async function POST(req: NextRequest) {
       recommendedDrills: parsed.recommendedDrills ?? [],
       comparison: parsed.comparison,
       phaseFrames: phaseFramesForUi,
+      poseMetrics: poseMetrics ?? undefined,
       on_plane:
         parsed.onPlane && typeof parsed.onPlane === "object"
           ? {
