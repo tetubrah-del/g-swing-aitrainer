@@ -29,7 +29,7 @@ import ProUpsellModal from '@/app/components/ProUpsellModal';
 import PhaseFrameSelector from './PhaseFrameSelector';
 import { clearDiagnostics, loadDiagnostics, saveDiagnostics } from '@/app/golf/utils/diagnosticsStorage';
 import { selectShareFrames } from '@/app/golf/utils/shareFrameSelection';
-import { buildLevelDiagnosis, computeRoundFallbackFromScore } from '@/app/golf/utils/scoreCalibration';
+import { buildLevelDiagnosis, calibrateSwingScore, computeRoundFallbackFromScore } from '@/app/golf/utils/scoreCalibration';
 import OnPlaneSection from './OnPlaneSection';
 
 type SwingTypeBadge = {
@@ -541,7 +541,7 @@ const GolfResultPage = () => {
             : typeof totalScoreRaw === 'string'
               ? Number(totalScoreRaw)
               : null;
-        const normalizedScore = Number.isFinite(totalScore as number) ? (totalScore as number) : null;
+        const normalizedScore = Number.isFinite(totalScore as number) ? calibrateSwingScore(totalScore as number) : null;
 
         const createdAtRaw = data?.createdAt as unknown;
         const createdAt =
@@ -906,6 +906,10 @@ const GolfResultPage = () => {
 
   const fallbackRoundEstimates = useMemo<RoundEstimateMetrics>(() => {
     return computeFallbackRoundEstimates(data?.result?.totalScore ?? 0);
+  }, [data?.result?.totalScore]);
+
+  const calibratedTotalScore = useMemo(() => {
+    return calibrateSwingScore(data?.result?.totalScore ?? 0);
   }, [data?.result?.totalScore]);
 
   const [roundEstimates, setRoundEstimates] = useState<RoundEstimateMetrics>(fallbackRoundEstimates);
@@ -1539,7 +1543,13 @@ const GolfResultPage = () => {
     );
   }
   const comparison = result.comparison;
-  const previousScoreDelta = previousHistory ? result.totalScore - previousHistory.swingScore : null;
+  const previousCalibratedScore = useMemo(() => {
+    return previousHistory ? calibrateSwingScore(previousHistory.swingScore) : null;
+  }, [previousHistory]);
+  const previousScoreDelta =
+    previousHistory && previousCalibratedScore != null
+      ? calibratedTotalScore - previousCalibratedScore
+      : null;
   const previousAnalyzedAt =
     previousHistory?.createdAt ? new Date(previousHistory.createdAt).toLocaleString('ja-JP') : null;
   const usageBanner = !userState.hasProAccess ? userState.monthlyAnalysis : null;
@@ -1851,7 +1861,7 @@ const GolfResultPage = () => {
         <section className="grid grid-cols-1 sm:grid-cols-3 gap-4">
           <div className="rounded-xl bg-slate-900/70 border border-slate-700 p-4 sm:col-span-1">
             <p className="text-xs text-slate-400">総合スイングスコア</p>
-            <p className="text-3xl font-bold mt-1">{result.totalScore}</p>
+            <p className="text-3xl font-bold mt-1">{calibratedTotalScore}</p>
             <p className="text-xs text-slate-400 mt-1">（100点満点）</p>
             <p className="text-[11px] text-slate-500 mt-1">
               ※同じ動画でも、AIの推定誤差やフレーム抽出の差で数点ブレる場合があります
@@ -1859,7 +1869,7 @@ const GolfResultPage = () => {
             {userState.hasProAccess && previousHistory && (
               <div className="mt-3 space-y-1 text-xs text-slate-300">
                 <p>
-                  前回{previousAnalyzedAt ? `（${previousAnalyzedAt}）` : ''}：{previousHistory.swingScore} 点
+                  前回{previousAnalyzedAt ? `（${previousAnalyzedAt}）` : ''}：{previousCalibratedScore} 点
                 </p>
                 {typeof previousScoreDelta === 'number' && (
                   <p className={previousScoreDelta >= 0 ? 'text-emerald-300' : 'text-rose-300'}>

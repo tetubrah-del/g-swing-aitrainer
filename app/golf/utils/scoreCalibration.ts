@@ -9,6 +9,17 @@ export type RoundEstimateMetrics = {
 
 const clamp = (v: number, min: number, max: number) => Math.min(max, Math.max(min, v));
 
+export function calibrateSwingScore(scoreRaw: number): number {
+  const score = clamp(Number.isFinite(scoreRaw) ? scoreRaw : 0, 0, 100);
+  const lerp = (x0: number, y0: number, x1: number, y1: number, x: number) =>
+    y0 + ((y1 - y0) * (x - x0)) / (x1 - x0);
+  const calibrated =
+    score <= 57
+      ? lerp(0, 20, 57, 65, score)
+      : lerp(57, 65, 100, 100, score);
+  return clamp(Math.round(calibrated), 0, 100);
+}
+
 type PhaseKey = "address" | "backswing" | "top" | "downswing" | "impact" | "finish";
 type PhaseLike = { score: number; good?: string[]; issues?: string[]; advice?: string[] };
 
@@ -105,7 +116,7 @@ export function buildLevelDiagnosis(params: {
   totalScore: number;
   phases?: Partial<Record<PhaseKey, PhaseLike>> | null;
 }): LevelEstimate {
-  const base = estimateLevelFromScore(params.totalScore);
+  const base = estimateLevelFromScore(calibrateSwingScore(params.totalScore));
   const phases = params.phases ?? null;
   if (!phases) return base;
 
@@ -172,27 +183,27 @@ export function buildLevelDiagnosis(params: {
 }
 
 export function computeRoundFallbackFromScore(scoreRaw: number): RoundEstimateMetrics {
-  const score = clamp(Number.isFinite(scoreRaw) ? scoreRaw : 0, 0, 100);
+  const score = calibrateSwingScore(scoreRaw);
 
-  // Calibrated for typical amateurs, with a non-linear "elite tail":
-  // - swing score ~50 -> ~110台前半
-  // - swing score ~70 -> ~90前後
-  // - swing score ~83 -> ~80台前半
-  // - swing score ~93 -> ~70台後半
+  // Calibrated for typical amateurs, anchored to analyzer score expectations:
+  // - swing score ~50 -> ~110前後
+  // - swing score ~65 -> ~90〜95
+  // - swing score ~80 -> ~85前後
+  // - swing score ~95 -> ~75前後
   // - swing score ~100 -> ~72前後
   const mid = (() => {
     const s = score;
-    // Piecewise linear interpolation to avoid over-penalizing high swing scores.
-    // Anchors: (0,140), (50,115), (70,100), (85,85), (95,76), (100,72)
+    // Piecewise linear interpolation to align mid-score expectations.
+    // Anchors: (0,135), (50,110), (65,93), (80,85), (95,75), (100,72)
     const lerp = (x0: number, y0: number, x1: number, y1: number, x: number) =>
       y0 + ((y1 - y0) * (x - x0)) / (x1 - x0);
-    if (s <= 50) return lerp(0, 140, 50, 115, s);
-    if (s <= 70) return lerp(50, 115, 70, 100, s);
-    if (s <= 85) return lerp(70, 100, 85, 85, s);
-    if (s <= 95) return lerp(85, 85, 95, 76, s);
-    return lerp(95, 76, 100, 72, s);
+    if (s <= 50) return lerp(0, 135, 50, 110, s);
+    if (s <= 65) return lerp(50, 110, 65, 93, s);
+    if (s <= 80) return lerp(65, 93, 80, 85, s);
+    if (s <= 95) return lerp(80, 85, 95, 75, s);
+    return lerp(95, 75, 100, 72, s);
   })();
-  const spread = 5;
+  const spread = 3;
   const low = clamp(mid - spread, 60, 140);
   const high = clamp(mid + spread, 60, 140);
   const lowInt = Math.round(low);

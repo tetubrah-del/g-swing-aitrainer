@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import type { CausalImpactExplanation, SwingAnalysis, SwingTypeLLMResult } from "@/app/golf/types";
 import { buildRuleBasedCausalImpact } from "@/app/golf/utils/causalImpact";
-import { buildLevelDiagnosis, computeRoundFallbackFromScore } from "@/app/golf/utils/scoreCalibration";
+import { buildLevelDiagnosis, calibrateSwingScore, computeRoundFallbackFromScore } from "@/app/golf/utils/scoreCalibration";
 
 type ShareResult = { analysisId: string; totalScore: number | null; createdAt: number | null };
 
@@ -140,26 +140,27 @@ export default function SharePageClient(props: {
     };
   }, [data?.createdAt, data?.totalScore, props.analysisId]);
 
-  const score = useMemo(() => (typeof data?.totalScore === "number" ? data.totalScore : 0), [data?.totalScore]);
-  const levelEstimate = useMemo(() => buildLevelDiagnosis({ totalScore: score, phases: detail?.phases ?? null }), [detail?.phases, score]);
-  const round = useMemo(() => computeRoundFallbackFromScore(score), [score]);
+  const rawScore = useMemo(() => (typeof data?.totalScore === "number" ? data.totalScore : 0), [data?.totalScore]);
+  const displayScore = useMemo(() => calibrateSwingScore(rawScore), [rawScore]);
+  const levelEstimate = useMemo(() => buildLevelDiagnosis({ totalScore: rawScore, phases: detail?.phases ?? null }), [detail?.phases, rawScore]);
+  const round = useMemo(() => computeRoundFallbackFromScore(rawScore), [rawScore]);
 
   const causalImpact = useMemo<CausalImpactExplanation>(() => {
-    if (!detail?.phases) return buildRuleBasedCausalImpact({ totalScore: score });
+    if (!detail?.phases) return buildRuleBasedCausalImpact({ totalScore: rawScore });
     return buildRuleBasedCausalImpact({
-      totalScore: score,
+      totalScore: rawScore,
       phases: detail.phases,
       summary: detail.summary ?? undefined,
       roundEstimates: { strokeRange: round.strokeRange, ob: round.ob },
     });
-  }, [detail?.phases, detail?.summary, round.ob, round.strokeRange, score]);
+  }, [detail?.phases, detail?.summary, rawScore, round.ob, round.strokeRange]);
 
   useEffect(() => {
     if (!detail?.phases) return;
     const analysis: SwingAnalysis = {
       analysisId: props.analysisId,
       createdAt: new Date(detail.createdAt ?? Date.now()).toISOString(),
-      totalScore: score,
+      totalScore: rawScore,
       phases: detail.phases as SwingAnalysis["phases"],
       summary: detail.summary ?? "",
       recommendedDrills: detail.recommendedDrills ?? [],
@@ -184,12 +185,12 @@ export default function SharePageClient(props: {
     return () => {
       cancelled = true;
     };
-  }, [causalImpact, detail?.createdAt, detail?.phases, detail?.recommendedDrills, detail?.selectedFrames, detail?.summary, props.analysisId, score]);
+  }, [causalImpact, detail?.createdAt, detail?.phases, detail?.recommendedDrills, detail?.selectedFrames, detail?.summary, props.analysisId, rawScore]);
 
   const scoreLabel = useMemo(() => {
     if (data?.totalScore == null) return "-";
-    return String(data.totalScore);
-  }, [data?.totalScore]);
+    return String(displayScore);
+  }, [data?.totalScore, displayScore]);
 
   const phaseList = useMemo(() => {
     const phases = detail?.phases;

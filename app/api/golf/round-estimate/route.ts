@@ -1,7 +1,7 @@
 // app/api/golf/round-estimate/route.ts
 import { NextResponse } from "next/server";
 import OpenAI from "openai";
-import { computeRoundFallbackFromScore } from "@/app/golf/utils/scoreCalibration";
+import { calibrateSwingScore, computeRoundFallbackFromScore } from "@/app/golf/utils/scoreCalibration";
 
 export const runtime = "nodejs";
 
@@ -48,7 +48,7 @@ Input:
 
 Guidelines:
 - Output should be realistic, but slightly optimistic (assume average short game and reasonable course management).
-- Rough anchors: swing score ~58 => around 105-115, ~70 => around 90s, ~83 => low/mid-80s, ~93 => high-70s, ~100 => around 72.
+- Rough anchors: swing score ~65 => around 90-96, ~75 => mid/upper-80s, ~85 => low/mid-80s, ~95 => mid/upper-70s, ~100 => around 72.
 - Return conservative but realistic metrics for FW keep %, GIR %, and OB count (18H equivalent).
 - Keep numbers human-readable integers; OB can be one decimal.
 - Output ONLY JSON with keys: strokeRange (string like "84〜88"), fwKeep (string "%"), gir (string "%"), ob (string "x.x 回"), source ("ai").
@@ -96,6 +96,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "totalScore is required" }, { status: 400 });
     }
 
+    const calibratedScore = calibrateSwingScore(totalScore);
     const fallback = computeFallback(totalScore);
 
     if (!client.apiKey) {
@@ -103,7 +104,7 @@ export async function POST(req: Request) {
     }
 
     const prompt = buildPrompt({
-      totalScore,
+      totalScore: calibratedScore,
       phases: body?.phases,
       meta: body?.meta,
       fallback,
