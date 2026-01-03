@@ -3,13 +3,15 @@
 import { NextRequest, NextResponse } from "next/server";
 import fs from "node:fs/promises";
 import path from "node:path";
+import OpenAI from "openai";
 import { AnalysisId, GolfAnalysisResponse, MOCK_GOLF_ANALYSIS_RESULT } from "@/app/golf/types";
-import { getAnalysis } from "@/app/lib/store";
+import { getAnalysis, saveAnalysis } from "@/app/lib/store";
 import { findUserByEmail, getUserById } from "@/app/lib/userStore";
 import { readAnonymousFromRequest } from "@/app/lib/anonymousToken";
 import { auth } from "@/auth";
 import { readEmailSessionFromRequest } from "@/app/lib/emailSession";
 import { readActiveAuthFromRequest, setActiveAuthOnResponse } from "@/app/lib/activeAuth";
+import { buildAnalyzerPromptBlock, buildSwingAnalyzerProfile } from "@/app/lib/swing/analyzerProfile";
 
 export const runtime = "nodejs";
 
@@ -23,6 +25,63 @@ function isValidAnalysisId(id: string | null | undefined): id is AnalysisId {
   if (!id) return false;
   // Allow simple uuid-ish / slug ids, reject obviously invalid input
   return /^[A-Za-z0-9_-]{6,200}$/.test(id);
+}
+
+async function backfillAnalyzerComment(stored: { id: AnalysisId; result: GolfAnalysisResponse["result"] }) {
+  if (stored.result?.analyzerComment) return null;
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) return null;
+
+  const analyzerProfile = buildSwingAnalyzerProfile({
+    poseMetrics: stored.result.poseMetrics ?? null,
+    onPlane: stored.result.on_plane ?? null,
+  });
+  const analyzerBlock = buildAnalyzerPromptBlock(analyzerProfile);
+  if (!analyzerBlock || analyzerBlock === "なし") return null;
+
+  const client = new OpenAI({
+    apiKey,
+    baseURL: process.env.OPENAI_API_BASE ?? undefined,
+  });
+
+  const prompt = [
+    "あなたはプロのゴルフスイングコーチです。",
+    "以下のスイングアナライザー定量のみを根拠に、AIコーチの解説を4〜5文で生成してください。",
+    "構成は「結論→情緒（納得感）→改善1つ」。落ち着いた指導系の語り口。",
+    "2〜3回に1回の頻度で比喩を入れる（過剰に煽らない）。",
+    "定量と矛盾しないこと。定量が不足する場合は一般論に逃げず、控えめに伝える。",
+    "",
+    "【スイングアナライザー定量】",
+    analyzerBlock,
+    "",
+    "JSONのみで返してください：",
+    '{ "analyzer_comment": "..." }',
+  ].join("\n");
+
+  try {
+    const completion = await client.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [{ role: "user", content: prompt }],
+      response_format: { type: "json_object" },
+      max_tokens: 500,
+      temperature: 0.4,
+    });
+
+    const parsed =
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (completion as any).choices?.[0]?.message?.parsed ?? completion.choices?.[0]?.message?.content;
+    const json = typeof parsed === "string" ? JSON.parse(parsed) : parsed;
+    const comment =
+      json && typeof json === "object" && typeof json.analyzer_comment === "string"
+        ? json.analyzer_comment.trim()
+        : "";
+    if (!comment) return null;
+
+    return comment;
+  } catch (err) {
+    console.warn("[golf/result] analyzerComment backfill failed", err);
+    return null;
+  }
 }
 
 async function buildStoreDebug(id: string, enabled: boolean) {
@@ -111,6 +170,21 @@ export async function GET(
       );
     }
     return json({ error: "not found" }, { status: 404 });
+  }
+
+  if (stored?.result && !stored.result.analyzerComment) {
+    const comment = await backfillAnalyzerComment({ id: analysisId, result: stored.result });
+    if (comment) {
+      const updated = {
+        ...stored,
+        result: {
+          ...stored.result,
+          analyzerComment: comment,
+        },
+      };
+      await saveAnalysis(updated);
+      stored.result = updated.result;
+    }
   }
 
   if (effectiveUserId) {
