@@ -65,7 +65,9 @@ function normalizeDownswingPhrases(result: GolfAnalysisResponse["result"]): bool
 }
 
 async function backfillAnalyzerComment(stored: { id: AnalysisId; result: GolfAnalysisResponse["result"] }) {
-  if (stored.result?.analyzerComment) return null;
+  const existing = stored.result?.analyzerComment ?? null;
+  const hasNumbers = typeof existing === "string" && /\d/.test(existing);
+  if (existing && hasNumbers) return null;
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) return null;
 
@@ -87,7 +89,8 @@ async function backfillAnalyzerComment(stored: { id: AnalysisId; result: GolfAna
     "科学的・分析的な語り口で、比喩は使わないでください。",
     "構成は「結論（主要課題）→根拠（定量）→影響→改善1つ」。",
     "定量と矛盾しないこと。定量が不足する場合は一般論に逃げず、控えめに伝える。",
-    "具体的な数値は2〜3項目まで触れてよい（例: 回転量/ブレ/外側率）。",
+    "必ず2つ以上の指標名と数値を明記する（例: 胸回転量6° / 頭のブレ0.6x / 外側率60%）。",
+    "数値の良否は暫定評価として「小さい/標準/大きい」の範囲で示す。",
     "判定不能やデータ不足の項目は断定せず、触れるなら控えめに言う。",
     "",
     "【スイングアナライザー定量】",
