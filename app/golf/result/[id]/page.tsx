@@ -1166,7 +1166,7 @@ const GolfResultPage = () => {
         method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ analysisId: data.analysisId, address, backswing, top, downswing, impact, finish }),
+        body: JSON.stringify({ analysisId: data.analysisId, address, backswing, top, downswing, impact, finish, skipOnPlane: true }),
       });
       const json = (await res.json().catch(() => null)) as GolfAnalysisResponse | { error?: string } | null;
       if (!res.ok) {
@@ -1312,6 +1312,15 @@ const GolfResultPage = () => {
     if (!top.length || !downswing.length || !impact.length) return;
 
     try {
+      const readString = (value: unknown) => (typeof value === "string" && value.trim().length ? value.trim() : null);
+      const meta = (data?.meta ?? null) as Record<string, unknown> | null;
+      const result = (data?.result ?? null) as Record<string, unknown> | null;
+      const sourceVideoUrl =
+        readString(meta?.sourceVideoUrl) ??
+        readString(result?.sourceVideoUrl);
+      const videoUrl =
+        readString(meta?.videoUrl) ??
+        readString(result?.videoUrl);
       setIsOnPlaneReevalLoading(true);
       setOnPlaneReevalError(null);
       const res = await fetch("/api/golf/reanalyze-phases", {
@@ -1327,6 +1336,8 @@ const GolfResultPage = () => {
           impact,
           finish,
           onPlaneOnly: true,
+          ...(sourceVideoUrl ? { sourceVideoUrl } : null),
+          ...(videoUrl ? { videoUrl } : null),
         }),
       });
       const json = (await res.json().catch(() => null)) as GolfAnalysisResponse | { error?: string } | null;

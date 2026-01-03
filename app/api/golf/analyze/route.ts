@@ -1069,6 +1069,18 @@ async function extractFramesAtTimestampsFromBuffer(params: {
   }
 }
 
+function inferMimeTypeFromName(name: string | null | undefined): string | null {
+  const lower = name?.toLowerCase() ?? "";
+  if (lower.endsWith(".mp4") || lower.endsWith(".m4v")) return "video/mp4";
+  if (lower.endsWith(".mov")) return "video/quicktime";
+  if (lower.endsWith(".webm")) return "video/webm";
+  if (lower.endsWith(".ogv") || lower.endsWith(".ogg")) return "video/ogg";
+  if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
+  if (lower.endsWith(".png")) return "image/png";
+  if (lower.endsWith(".heic")) return "image/heic";
+  return null;
+}
+
 export async function POST(req: NextRequest) {
   try {
     const formData = await req.formData();
@@ -1215,7 +1227,13 @@ export async function POST(req: NextRequest) {
     }
 
     const buffer = Buffer.from(await file.arrayBuffer());
-    const mimeType = file.type || "application/octet-stream";
+    let mimeType = file.type || "application/octet-stream";
+    const inferred = inferMimeTypeFromName(file.name);
+    if (!mimeType.startsWith("video/") && inferred?.startsWith("video/")) {
+      mimeType = inferred;
+    } else if (!mimeType.startsWith("image/") && inferred?.startsWith("image/")) {
+      mimeType = inferred;
+    }
 
     const extractedFrames = await extractPhaseFrames({ buffer, mimeType });
     const frames = mergePhaseFrames(providedFrames, extractedFrames);
@@ -1705,6 +1723,26 @@ export async function POST(req: NextRequest) {
     const analysisId: AnalysisId =
       typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `golf-${Date.now()}`;
 
+    const sourceVideoPath = await (async () => {
+      if (!mimeType.startsWith("video/")) return null;
+      const ext = (() => {
+        const raw = mimeType.split("/")[1] ?? "mp4";
+        if (raw.includes("quicktime")) return "mov";
+        if (raw.includes("mp4")) return "mp4";
+        if (raw.includes("webm")) return "webm";
+        if (raw.includes("ogg")) return "ogv";
+        return raw.replace(/[^a-z0-9]+/gi, "") || "mp4";
+      })();
+      const dir = path.join(os.tmpdir(), "golf-source-videos");
+      await fs.mkdir(dir, { recursive: true });
+      const filePath = path.join(dir, `${analysisId}.${ext}`);
+      await fs.writeFile(filePath, buffer);
+      return filePath;
+    })().catch((error) => {
+      console.warn("[golf/analyze] failed to persist source video", error);
+      return null;
+    });
+
     const timestamp = Date.now();
     const normalizedSequenceFrames: Array<(PhaseFrame & { timestampSec?: number }) | null> = resolvedSequence.length
       ? await Promise.all(
@@ -1858,6 +1896,11 @@ export async function POST(req: NextRequest) {
           ? { frames: [], stages: stagesWithMotion ?? parsed.sequenceStages }
           : undefined,
     };
+
+    if (sourceVideoPath) {
+      (result as Record<string, unknown>).sourceVideoUrl = sourceVideoPath;
+      meta.sourceVideoUrl = sourceVideoPath;
+    }
 
     // Final, authoritative guardrails pass (analysis-time only).
     // This keeps stored results consistent even when upstream prompts drift.

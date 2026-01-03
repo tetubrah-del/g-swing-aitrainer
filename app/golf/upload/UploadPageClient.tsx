@@ -483,6 +483,92 @@ function wristXMotion(frames: PoseFrame[], i: number): number {
   return Math.abs(a - b);
 }
 
+const getWristY = (frame: PoseFrame): number | null => {
+  const wrists = [
+    frame.keypoints.left_wrist,
+    frame.keypoints.right_wrist,
+    frame.keypoints.left_hand,
+    frame.keypoints.right_hand,
+  ].filter(Boolean) as PoseKeypoint[];
+  if (wrists.length) return wrists.reduce((sum, p) => sum + p.y, 0) / wrists.length;
+  const shoulders = [frame.keypoints.left_shoulder, frame.keypoints.right_shoulder].filter(Boolean) as PoseKeypoint[];
+  if (shoulders.length) return shoulders.reduce((sum, p) => sum + p.y, 0) / shoulders.length;
+  return null;
+};
+
+const movingAverage = (values: Array<number | null>, window: number): Array<number | null> => {
+  const out: Array<number | null> = [];
+  for (let i = 0; i < values.length; i += 1) {
+    let sum = 0;
+    let count = 0;
+    for (let j = -window; j <= window; j += 1) {
+      const v = values[i + j];
+      if (typeof v === 'number' && Number.isFinite(v)) {
+        sum += v;
+        count += 1;
+      }
+    }
+    out.push(count ? sum / count : values[i]);
+  }
+  return out;
+};
+
+const median = (values: number[]): number => {
+  if (!values.length) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  if (sorted.length % 2 === 1) return sorted[mid]!;
+  return (sorted[mid - 1]! + sorted[mid]!) / 2;
+};
+
+function detectDownswingIndex(
+  frames: PoseFrame[],
+  topIndex: number,
+  motionEnergy: number[],
+  impactIndex: number,
+): number {
+  const ys = frames.map((f) => getWristY(f));
+  const smoothYs = movingAverage(ys, 1);
+  const numericYs = smoothYs.filter((v): v is number => typeof v === 'number' && Number.isFinite(v));
+  const yRange = numericYs.length ? Math.max(...numericYs) - Math.min(...numericYs) : 0;
+  const topY = smoothYs[topIndex];
+  if (typeof topY !== 'number') return Math.min(frames.length - 1, topIndex + 1);
+
+  const motionMedian = median(motionEnergy.filter((v) => Number.isFinite(v)));
+  const dyEps = Math.max(2, yRange * 0.02);
+  const deltaEps = Math.max(4, yRange * 0.04);
+  const motionEps = Math.max(0.5, motionMedian * 0.6);
+  const topWindow = Math.min(5, Math.floor(frames.length * 0.15));
+  const searchEnd = impactIndex > topIndex ? impactIndex : frames.length - 1;
+
+  for (let i = topIndex + 1; i <= searchEnd; i += 1) {
+    const yPrev = smoothYs[i - 1];
+    const yCurr = smoothYs[i];
+    if (typeof yPrev !== 'number' || typeof yCurr !== 'number') continue;
+    const dy = yCurr - yPrev;
+    const deltaFromTop = yCurr - topY;
+    const hasMotion = motionEnergy[i] >= motionEps;
+    const sustained =
+      dy > dyEps &&
+      (i + 1 > searchEnd ||
+        (() => {
+          const yNext = smoothYs[i + 1];
+          return typeof yNext === 'number' ? yNext - yCurr > -dyEps * 0.5 : true;
+        })());
+
+    const isInTopWindow = i <= topIndex + topWindow;
+    if (isInTopWindow && deltaFromTop > 0) {
+      if (sustained || (deltaFromTop >= deltaEps * 0.3 && hasMotion)) return i;
+    } else if (deltaFromTop >= deltaEps && sustained && hasMotion) {
+      return i;
+    } else if (deltaFromTop > 0 && (sustained || deltaFromTop >= deltaEps * 0.5)) {
+      return i;
+    }
+  }
+
+  return Math.min(frames.length - 1, topIndex + 1);
+}
+
 function pickFrame(frames: PoseFrame[], index: number | undefined, fallbackIndex: number): PoseFrame | undefined {
   if (typeof index === 'number' && frames[index]) return frames[index];
   return frames[fallbackIndex];
@@ -605,7 +691,10 @@ function determineSwingPhases(poseFrames: PoseFrame[]): PhaseFrame[] {
     }
   }
 
-  const downswingIndex = Math.floor((topIndex + impactIndex) / 2);
+  let downswingIndex = detectDownswingIndex(poseFrames, topIndex, motionEnergy, impactIndex);
+  if (impactIndex > topIndex && downswingIndex >= impactIndex) {
+    downswingIndex = Math.max(topIndex + 1, impactIndex - 1);
+  }
 
   const finishStart = Math.floor(poseFrames.length * 0.85);
   let finishIndex = poseFrames.length - 1;

@@ -21,9 +21,18 @@ import sharp from "sharp";
 export const runtime = "nodejs";
 
 const POSE_FORCE_IMAGE = (process.env.MEDIAPIPE_POSE_FORCE_IMAGE ?? "false").toLowerCase() === "true";
-const POSE_FORCE_LLM_ON_PLANE =
-  (process.env.ON_PLANE_ALLOW_LLM ?? "false").toLowerCase() === "true" ||
-  (process.env.POSE_PROVIDER ?? "").toLowerCase() === "vision";
+const readBoolEnv = (value: string | undefined) => (value ?? "").toLowerCase() === "true";
+const resolveEnvBool = (key: string, fallback: boolean) => {
+  if (process.env[key] == null) return fallback;
+  return readBoolEnv(process.env[key]);
+};
+const baseOnPlaneAllowLLM =
+  process.env.ON_PLANE_ALLOW_LLM != null
+    ? readBoolEnv(process.env.ON_PLANE_ALLOW_LLM)
+    : (process.env.POSE_PROVIDER ?? "").toLowerCase() === "vision";
+const ON_PLANE_ALLOW_EVAL_LLM = resolveEnvBool("ON_PLANE_ALLOW_EVAL_LLM", baseOnPlaneAllowLLM);
+const ON_PLANE_ALLOW_ZONE_LLM = resolveEnvBool("ON_PLANE_ALLOW_ZONE_LLM", baseOnPlaneAllowLLM);
+const ON_PLANE_ALLOW_GRIP_LLM = resolveEnvBool("ON_PLANE_ALLOW_GRIP_LLM", baseOnPlaneAllowLLM);
 const ON_PLANE_POSE_FRAME_MAX = Number(process.env.ON_PLANE_POSE_FRAME_MAX ?? "20");
 const POSE_PREPROCESS = {
   enabled: (process.env.MEDIAPIPE_POSE_PREPROCESS_ENABLED ?? "false").toLowerCase() === "true",
@@ -375,6 +384,20 @@ function densifyTraceByWindows(
   }
   densified.push(sorted[sorted.length - 1]!);
   return { points: densified, inserted };
+}
+
+function buildPhaseWindows(
+  points: Array<{ phase?: string; frameIndex?: number; timestampSec?: number }>,
+  phases: string[]
+): Array<{ start: number; end: number }> {
+  const byPhase = points.filter((p) => p.phase && phases.includes(p.phase));
+  if (!byPhase.length) return [];
+  const values = byPhase
+    .map((p) => p.timestampSec ?? p.frameIndex ?? null)
+    .filter((v): v is number => typeof v === "number" && Number.isFinite(v))
+    .sort((a, b) => a - b);
+  if (!values.length) return [];
+  return [{ start: values[0]!, end: values[values.length - 1]! }];
 }
 
 function estimateFpsFromMeta(
@@ -1674,6 +1697,17 @@ Return JSON only:
     max_tokens: 2048,
     response_format: { type: "json_object" },
   });
+
+  if ((process.env.ON_PLANE_USAGE_LOG ?? "").toLowerCase() === "true") {
+    const usage = (result as unknown as { usage?: unknown }).usage ?? null;
+    const model = (result as unknown as { model?: unknown }).model ?? null;
+    console.log("[onplane-usage]", {
+      tag: params.strict ? "onplane:grip:strict" : "onplane:grip",
+      model,
+      frames: params.frames.length,
+      usage,
+    });
+  }
 
   // Prefer parsed when available (response_format can populate it).
   const structured = (result as unknown as { choices?: Array<{ message?: { parsed?: unknown; content?: unknown } }> })
@@ -3158,6 +3192,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
         impact?: unknown;
         finish?: unknown;
         onPlaneOnly?: unknown;
+        skipOnPlane?: unknown;
       }
     | null;
   const analysisIdRaw = body?.analysisId ?? null;
@@ -3174,7 +3209,12 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
   const impactIndices = normalizeIndices(body?.impact);
   const finishIndices = normalizeIndices(body?.finish);
   const onPlaneOnly = body?.onPlaneOnly === true;
-  const allowLLM = !onPlaneOnly || POSE_FORCE_LLM_ON_PLANE;
+  const skipOnPlane = body?.skipOnPlane === true;
+  const shouldRunOnPlane = onPlaneOnly || !skipOnPlane;
+  const allowOnPlaneEval = !onPlaneOnly || ON_PLANE_ALLOW_EVAL_LLM;
+  const allowZoneLLM = !onPlaneOnly || ON_PLANE_ALLOW_ZONE_LLM;
+  const allowGripLLM = !onPlaneOnly || ON_PLANE_ALLOW_GRIP_LLM;
+  const allowLLM = allowOnPlaneEval || allowZoneLLM || allowGripLLM;
 
   if (!addressIndices.length && !backswingIndices.length && !topIndices.length && !downswingIndices.length && !impactIndices.length && !finishIndices.length) {
     return json({ error: "no overrides" }, { status: 400 });
@@ -3413,8 +3453,9 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
       }
     }
 
-            // On-plane: use the same user-selected phase frames (Top/Downswing/Impact) as evidence.
-    // This allows older analyses (without on_plane in the original result JSON) to be backfilled on reevaluation.
+    if (shouldRunOnPlane) {
+      // On-plane: use the same user-selected phase frames (Top/Downswing/Impact) as evidence.
+      // This allows older analyses (without on_plane in the original result JSON) to be backfilled on reevaluation.
 		    const onPlaneAddressIndices = resolvePhaseIndices(effectiveAddressIndices, storedPhaseOverrides?.address);
 		    const onPlaneBackswingIndices = resolvePhaseIndices(backswingIndices, storedPhaseOverrides?.backswing);
 		    const onPlaneTopIndices = resolvePhaseIndices(topIndices, storedPhaseOverrides?.top);
@@ -3462,10 +3503,16 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
 		      const videoWindowMaxFramesRaw = Number(process.env.ON_PLANE_VIDEO_WINDOW_MAX_FRAMES ?? "32");
 		      const videoWindowMaxFrames = Number.isFinite(videoWindowMaxFramesRaw) ? clamp(videoWindowMaxFramesRaw, 12, 80) : 32;
 		      const videoWindowTimeoutMs = Number(process.env.ON_PLANE_VIDEO_WINDOW_TIMEOUT_MS ?? "10000");
-		      const useVideoWindow = onPlaneOnly;
+		      let useVideoWindow = onPlaneOnly;
 		      const sourceVideoUrl = useVideoWindow ? resolveSourceVideoUrl() : null;
 		      if (useVideoWindow && !sourceVideoUrl) {
-		        return json({ error: "source video not available for on-plane analysis" }, { status: 400 });
+		        useVideoWindow = false;
+		        onPlaneUpdate = onPlaneUpdate ?? {};
+		        (onPlaneUpdate as Record<string, unknown>).pose_debug = {
+		          ...((onPlaneUpdate as Record<string, unknown>).pose_debug as Record<string, unknown> | undefined),
+		          pose_video_window_skipped: true,
+		          pose_video_window_skip_reason: "source_video_missing",
+		        };
 		      }
 		      const sequenceFps = estimateFpsFromSequenceFrames(frames);
 		      const frameTimestamp = (idx: number) => {
@@ -3588,11 +3635,11 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
 		      if (framesForOnPlane.length >= 3) {
 		        const prompt = buildOnPlanePrompt({ handedness: meta?.handedness, clubType: meta?.clubType, level: meta?.level });
 		        let parsed: ReturnType<typeof parseOnPlane> | null = null;
-		        if (allowLLM) {
-		          try {
-		            const raw = await askVisionAPI({ frames: framesForOnPlane, prompt });
-		            parsed = parseOnPlane(raw);
-		          } catch (err) {
+        if (allowOnPlaneEval) {
+          try {
+            const raw = await askVisionAPI({ frames: framesForOnPlane, prompt, usageTag: "onplane:eval" });
+            parsed = parseOnPlane(raw);
+          } catch (err) {
 		            console.error("[reanalyze-phases] on_plane vision failed", err);
 		            parsed = null;
 		          }
@@ -3617,12 +3664,12 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
 		          ...((onPlaneUpdate as Record<string, unknown>).pose_debug as Record<string, unknown> | undefined),
 		          reanalyze_ts: Date.now(),
 		        };
-		        if (!allowLLM) {
-		          (onPlaneUpdate as Record<string, unknown>).pose_debug = {
-		            ...((onPlaneUpdate as Record<string, unknown>).pose_debug as Record<string, unknown> | undefined),
-		            on_plane_llm_skipped: true,
-		          };
-		        }
+        if (!allowOnPlaneEval) {
+          (onPlaneUpdate as Record<string, unknown>).pose_debug = {
+            ...((onPlaneUpdate as Record<string, unknown>).pose_debug as Record<string, unknown> | undefined),
+            on_plane_llm_skipped: true,
+          };
+        }
 		        if (useVideoWindow && videoWindowDebug) {
 		          (onPlaneUpdate as Record<string, unknown>).source = "video";
 		          (onPlaneUpdate as Record<string, unknown>).pose_debug = {
@@ -3630,7 +3677,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
 		            video_window: videoWindowDebug,
 		          };
 		        }
-		        if (useVideoWindow && onPlaneFramesWithIndex?.length) {
+		        if (onPlaneUpdate) {
 		          const toSequenceUrl = (idx1: number | null, label: string) => {
 		            if (!idx1 || !Number.isFinite(idx1)) return null;
 		            const entry = frames[idx1 - 1];
@@ -3639,6 +3686,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
 		            return { label, url: entry.url };
 		          };
 		          const toDataUrl = (idx1: number | null, label: string) => {
+		            if (!useVideoWindow || !onPlaneFramesWithIndex?.length) return null;
 		            if (!idx1 || !Number.isFinite(idx1)) return null;
 		            const frame = onPlaneFramesWithIndex![idx1 - 1];
 		            if (!frame?.base64Image) return null;
@@ -3654,10 +3702,18 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
 		          const backswingFrame =
 		            toSequenceUrl(onPlaneBackswingIndices[0] ?? null, "Backswing") ??
 		            toDataUrl(onPlaneBackswingIndicesLocal[0] ?? null, "Backswing");
-		          const topFrame = toDataUrl(onPlaneTopIndicesLocal[0] ?? null, "Top");
-		          const downswing1Frame = toDataUrl(dsIndices[0] ?? null, "Downswing 1");
-		          const downswing2Frame = toDataUrl(dsIndices[1] ?? null, "Downswing 2");
-		          const impactFrame = toDataUrl(impactFallback, "Impact");
+		          const topFrame =
+		            toSequenceUrl(onPlaneTopIndicesLocal[0] ?? null, "Top") ??
+		            toDataUrl(onPlaneTopIndicesLocal[0] ?? null, "Top");
+		          const downswing1Frame =
+		            toSequenceUrl(dsIndices[0] ?? null, "Downswing 1") ??
+		            toDataUrl(dsIndices[0] ?? null, "Downswing 1");
+		          const downswing2Frame =
+		            toSequenceUrl(dsIndices[1] ?? null, "Downswing 2") ??
+		            toDataUrl(dsIndices[1] ?? null, "Downswing 2");
+		          const impactFrame =
+		            toSequenceUrl(impactFallback, "Impact") ??
+		            toDataUrl(impactFallback, "Impact");
 		          if (addressFrame) debugFrames.push(addressFrame);
 		          if (backswingFrame) debugFrames.push(backswingFrame);
 		          if (topFrame) debugFrames.push(topFrame);
@@ -3672,7 +3728,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
 		        const poseInputs = [...backswingFrames, ...topFrames, ...dsFrames, ...impFrames].slice(0, 32);
 		        const gripFramesForTrace = gripFramesRange.length ? gripFramesRange : poseInputs;
 		        const onPlanePoseIndices = (() => {
-		          if (!onPlaneOnly || !allowLLM) return [];
+          if (!onPlaneOnly) return [];
 		          const topIndex = clampIndex(onPlaneTopIndicesLocal[0] ?? null, maxFrameIndex);
 		          const impactIndex = clampIndex(onPlaneImpactIndicesLocal[0] ?? null, maxFrameIndex);
 		          if (!topIndex || !impactIndex) return [];
@@ -3683,24 +3739,32 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
 		          return range.slice(Math.max(0, range.length - maxCount));
 		        })();
 		        const onPlaneRangeForPose = onPlanePoseIndices.length ? pickFramesForOnPlane(onPlanePoseIndices) : [];
-        const MIN_ON_PLANE_POSE_FRAMES = 20;
+        const MIN_ON_PLANE_POSE_FRAMES = Number(process.env.MIN_ON_PLANE_POSE_FRAMES ?? "20");
         const shouldUseOnPlaneRange = onPlaneRangeForPose.length >= MIN_ON_PLANE_POSE_FRAMES;
-        const poseFramesForTraceSource =
-          shouldUseOnPlaneRange
-            ? "on_plane_range"
-            : gripFramesRange.length
-              ? "grip_range_pick_evenly"
-              : poseInputs.length
-                ? "pose_inputs"
-                : "grip_frames_fallback";
-        const poseFramesForTrace =
-          shouldUseOnPlaneRange
-            ? onPlaneRangeForPose
-            : gripFramesRange.length
-              ? pickEvenly(gripFramesRange, 48)
-              : poseInputs.length
-                ? poseInputs
-                : gripFramesForTrace;
+        const shouldBlendOnPlaneRange = !shouldUseOnPlaneRange && onPlaneRangeForPose.length > 0 && gripFramesRange.length > 0;
+        const mergeByFrameIndex = (frames: Array<PhaseFrame & { frameIndex: number }>) => {
+          const map = new Map<number, PhaseFrame & { frameIndex: number }>();
+          frames.forEach((f) => map.set(f.frameIndex, f));
+          return Array.from(map.values()).sort((a, b) => a.frameIndex - b.frameIndex);
+        };
+        let poseFramesForTraceSource = "grip_frames_fallback";
+        let poseFramesForTrace: Array<PhaseFrame & { frameIndex: number }> = [];
+        if (shouldUseOnPlaneRange) {
+          poseFramesForTraceSource = "on_plane_range";
+          poseFramesForTrace = onPlaneRangeForPose;
+        } else if (shouldBlendOnPlaneRange) {
+          const extra = pickEvenly(gripFramesRange, Math.max(0, 48 - onPlaneRangeForPose.length));
+          poseFramesForTraceSource = "on_plane_range_plus_grip";
+          poseFramesForTrace = mergeByFrameIndex([...onPlaneRangeForPose, ...extra]);
+        } else if (gripFramesRange.length) {
+          poseFramesForTraceSource = "grip_range_pick_evenly";
+          poseFramesForTrace = pickEvenly(gripFramesRange, 48);
+        } else if (poseInputs.length) {
+          poseFramesForTraceSource = "pose_inputs";
+          poseFramesForTrace = poseInputs;
+        } else {
+          poseFramesForTrace = gripFramesForTrace;
+        }
 		        const bsCount = Math.min(backswingFrames.length, 2);
 		        const topCount = Math.min(topFrames.length, 6);
 		        const dsCount = Math.min(dsFrames.length, 8);
@@ -3753,6 +3817,8 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
 		              : null;
 		          return fromExisting;
 		        })();
+		        let poseTraceLeadForDisplay: Array<{ x: number; y: number; frameIndex: number; timestampSec?: number; phase: "backswing" | "top" | "downswing" | "impact" }> = [];
+		        let poseTraceAvgForDisplay: Array<{ x: number; y: number; frameIndex: number; timestampSec?: number; phase: "backswing" | "top" | "downswing" | "impact" }> = [];
 		        let poseTraceInfo: {
 		          trace: Array<{ x: number; y: number; frameIndex: number; timestampSec?: number; phase: "backswing" | "top" | "downswing" | "impact" }>;
 		          unique: number;
@@ -3764,9 +3830,9 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
 		          accepted: boolean;
 		        } | null = null;
 		        // Always try grip-based trace first so we can show hand path even when pose extraction is unavailable.
-		        if (allowLLM) {
-		          try {
-		          const gripFrames = gripFramesForTrace.map((f) => ({ base64Image: f.base64Image, mimeType: f.mimeType, timestampSec: f.timestampSec }));
+        if (allowGripLLM) {
+          try {
+          const gripFrames = gripFramesForTrace.map((f) => ({ base64Image: f.base64Image, mimeType: f.mimeType, timestampSec: f.timestampSec }));
 		          console.log("[reanalyze-phases] grip extract start", analysisId, "frames", gripFrames.length);
 		          const grips = await withTimeout(
 		            extractGripCentersFromFrames({ frames: gripFrames }),
@@ -3880,12 +3946,12 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
 		              grip_direct_error: e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200),
 		            };
 		          }
-		        } else {
-		          (onPlaneUpdate as Record<string, unknown>).pose_debug = {
-		            ...((onPlaneUpdate as Record<string, unknown>).pose_debug as Record<string, unknown> | undefined),
-		            grip_direct_skipped: true,
-		          };
-		        }
+        } else {
+          (onPlaneUpdate as Record<string, unknown>).pose_debug = {
+            ...((onPlaneUpdate as Record<string, unknown>).pose_debug as Record<string, unknown> | undefined),
+            grip_direct_skipped: true,
+          };
+        }
 
 		        // Prefer deterministic plane lines from pose+shaftVector when available (2D estimate).
 		        try {
@@ -3928,7 +3994,12 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
             (onPlaneUpdate as Record<string, unknown>).pose_debug = {
               ...((onPlaneUpdate as Record<string, unknown>).pose_debug as Record<string, unknown> | undefined),
               pose_mode: POSE_FORCE_IMAGE ? "image" : "video",
-              pose_allow_llm: false,
+              pose_allow_llm: allowLLM,
+              pose_allow_llm_flags: {
+                onPlaneOnly,
+                poseProvider: process.env.POSE_PROVIDER ?? null,
+                onPlaneAllowLLM: process.env.ON_PLANE_ALLOW_LLM ?? null,
+              },
               pose_input_source: onPlaneRangeForPose.length >= 3 ? "on_plane_range" : "trace_window",
               pose_preprocess: POSE_PREPROCESS,
               pose_frames: poseFrames.length,
@@ -4009,6 +4080,8 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
 		            }
 		            handTraceLead.sort((a, b) => (a.timestampSec ?? a.frameIndex) - (b.timestampSec ?? b.frameIndex));
 		            handTraceAvg.sort((a, b) => (a.timestampSec ?? a.frameIndex) - (b.timestampSec ?? b.frameIndex));
+		            poseTraceLeadForDisplay = handTraceLead.slice();
+		            poseTraceAvgForDisplay = handTraceAvg.slice();
 		            const leadUnique = countTraceUnique(handTraceLead, 0.01);
 		            const avgUnique = countTraceUnique(handTraceAvg, 0.01);
 		            const leadSpread = computeTraceSpread(handTraceLead);
@@ -4040,8 +4113,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
 		            const poseRawCount = reconstructed?.debug?.rawCount ?? 0;
 		            const poseFilteredCount = reconstructed?.debug?.filteredCount ?? 0;
 		            const poseInterpolatedCount = reconstructed?.debug?.interpolatedCount ?? 0;
-		            const poseTraceAccepted = poseRawCount >= 4;
-		            if (reconstructed && poseTraceAccepted && reconstructed.smoothed.length >= 2) {
+		            if (reconstructed && reconstructed.smoothed.length >= 2) {
 		              handTrace = reconstructed.smoothed;
 		              poseTraceSource = "reconstruct";
 		              poseTraceSourceReason = "rawcount>=4";
@@ -4070,10 +4142,14 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
 		            const topVec = averageUnitDirections(topVecs);
 		            const dsVec = averageUnitDirections(dsVecs);
 		            const impVec = averageUnitDirections(impVecs);
+		            const poseTraceUnique = countTraceUnique(handTrace, 0.01);
+		            const poseTraceSpread = computeTraceSpread(handTrace);
+		            const poseTraceAccepted =
+		              poseRawCount >= 4 && poseTraceUnique >= 4 && poseTraceSpread >= 0.03;
 		            poseTraceInfo = {
 		              trace: handTrace,
-		              unique: countTraceUnique(handTrace, 0.01),
-		              spread: computeTraceSpread(handTrace),
+		              unique: poseTraceUnique,
+		              spread: poseTraceSpread,
 		              source: poseTraceSource,
 		              rawCount: poseRawCount,
 		              filteredCount: poseFilteredCount,
@@ -4290,6 +4366,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
 		            const gripTraceSpread = gripTraceInfo?.spread ?? 0;
 		            const poseRawCount = poseTraceInfo.rawCount;
 		            const poseUnique = poseTraceInfo.unique;
+		            const poseSpread = poseTraceInfo.spread;
 		            const gripUnique = countTraceUnique(gripTrace, 0.01);
 		            const gripHighQuality = gripUnique >= 8 && gripTraceSpread >= 0.16;
 		            const gripUsable = gripUnique >= 6 && gripTraceSpread >= 0.12;
@@ -4297,8 +4374,8 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
 		            const gripHasBackTop = (gripPhaseCounts.backswing ?? 0) + (gripPhaseCounts.top ?? 0) > 0;
 		            const poseHasTop = (posePhaseCounts.top ?? 0) > 0;
 		            const gripCollapsed = gripUnique <= 2 || gripTraceSpread < 0.03;
-		            const poseCollapsed = poseRawCount < 4;
-		            const poseUsable = poseRawCount >= 4 && handTrace.length >= 2;
+		            const poseCollapsed = poseRawCount < 4 || poseUnique < 4 || poseSpread < 0.03;
+		            const poseUsable = poseRawCount >= 4 && poseUnique >= 4 && poseSpread >= 0.03 && handTrace.length >= 2;
 		            const poseReconstructUsable = poseTraceInfo.source === "reconstruct" && poseUsable;
 		            const posePreferredForDisplay = poseUsable && poseHasTop;
 		            const usePoseTrace = poseUsable;
@@ -4483,9 +4560,9 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
                     };
                   }> = [];
                   let addrZone: ReturnType<typeof mergeAddressZones> | null = null;
-                  if (allowLLM) {
+                  if (allowZoneLLM) {
                     for (const frame of addrFrames) {
-                      const zone = await detectAddressZoneFromAddressFrame(frame, meta?.handedness ?? null, allowLLM);
+                      const zone = await detectAddressZoneFromAddressFrame(frame, meta?.handedness ?? null, allowZoneLLM);
                       if (zone) addrZones.push(zone);
                     }
                     addrZone = mergeAddressZones(addrZones);
@@ -4739,7 +4816,8 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
 		              ? buildLineThroughUnitBox({ anchor: referenceAnchor, dir: addrShaftVec ?? traceRefVec ?? { x: 1, y: -1 } })
 		              : null;
 		            let referencePlaneSource: "shaft_vector_2d" | "trace_ref" | null = referencePlane ? "shaft_vector_2d" : null;
-		            const poseCollapsedForRef = !poseTraceInfo || poseTraceInfo.rawCount < 4;
+		            const poseCollapsedForRef =
+		              !poseTraceInfo || poseTraceInfo.rawCount < 4 || poseTraceInfo.unique < 4 || poseTraceInfo.spread < 0.03;
 		            if (poseCollapsedForRef && gripTraceInfo?.trace?.length) {
 		              const gripDown = gripTraceInfo.trace
 		                .filter((p) => p.phase === "downswing" || p.phase === "impact")
@@ -4824,7 +4902,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
 		                (!topHand && !dsHand && !impHand);
 
 		            if (needsGripFallback) {
-		              if (!allowLLM) {
+		              if (!allowGripLLM) {
 		                (onPlaneUpdate as Record<string, unknown>).pose_debug = {
 		                  ...((onPlaneUpdate as Record<string, unknown>).pose_debug as Record<string, unknown> | undefined),
 		                  grip_fallback_skipped: true,
@@ -4949,15 +5027,45 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
 		              : [];
 		          let displaySource = "hand_trace";
 		          if (poseTraceForDisplay.length) {
-		            displayTrace = poseTraceForDisplay;
-		            displaySource = "pose_display";
+		            const poseDisplayUnique = countTraceUnique(poseTraceForDisplay, 0.01);
+		            const poseDisplaySpread = computeTraceSpread(poseTraceForDisplay);
+		            const poseDisplayCollapsed = poseDisplayUnique < 4 || poseDisplaySpread < 0.03;
+		            if (poseDisplayCollapsed) {
+		              const candidates: Array<{
+		                trace: Array<{ x: number; y: number; phase?: string; frameIndex?: number; timestampSec?: number }>;
+		                label: string;
+		              }> = [];
+		              if (poseTraceLeadForDisplay.length) candidates.push({ trace: poseTraceLeadForDisplay, label: "pose_lead_display" });
+		              if (poseTraceAvgForDisplay.length) candidates.push({ trace: poseTraceAvgForDisplay, label: "pose_avg_display" });
+		              if (gripTraceForDisplay.length) candidates.push({ trace: gripTraceForDisplay, label: "grip_display_fallback" });
+		              let best = { trace: poseTraceForDisplay, label: "pose_display" };
+		              let bestScore = poseDisplaySpread + poseDisplayUnique * 0.01;
+		              for (const candidate of candidates) {
+		                const spread = computeTraceSpread(candidate.trace);
+		                const unique = countTraceUnique(candidate.trace, 0.01);
+		                const score = spread + unique * 0.01;
+		                if (score > bestScore) {
+		                  bestScore = score;
+		                  best = candidate;
+		                }
+		              }
+		              displayTrace = best.trace;
+		              displaySource = best.label;
+		            } else {
+		              displayTrace = poseTraceForDisplay;
+		              displaySource = "pose_display";
+		            }
 		          }
 		          if (displayTrace.length) {
 		            const filtered = filterTraceOutliers(displayTrace);
 		            const smoothed =
 		              filtered.filtered.length >= 4 ? smoothTraceEma(filtered.filtered, 0.35) : filtered.filtered;
+		            const downswingWindows = buildPhaseWindows(smoothed, ["downswing", "impact"]);
+		            const boosted = downswingWindows.length
+		              ? densifyTraceByWindows(smoothed, downswingWindows, 4).points
+		              : smoothed;
 		            const densified = densifyTraceWithAddress(
-		              smoothed,
+		              boosted,
 		              addrHandForTrace,
 		              addressIdxForTrace,
 		              addressTimeForTrace,
@@ -4988,12 +5096,18 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
 		          const gripPhaseCounts = countTracePhases(gripTrace);
 		          const poseHasBackTop = (posePhaseCounts.backswing ?? 0) + (posePhaseCounts.top ?? 0) > 0;
 		          const gripHasBackTop = (gripPhaseCounts.backswing ?? 0) + (gripPhaseCounts.top ?? 0) > 0;
-		          const poseCollapsed = !poseTraceInfo || poseTraceInfo.rawCount < 4;
+		          const poseCollapsed = !poseTraceInfo || poseTraceInfo.rawCount < 4 || poseTraceInfo.unique < 4 || poseTraceInfo.spread < 0.03;
 		          if (poseCollapsed && gripTrace.length >= 2) {
 		            const filtered = filterTraceOutliers(gripTrace);
 		            const smoothed =
 		              filtered.filtered.length >= 4 ? smoothTraceEma(filtered.filtered, 0.35) : filtered.filtered;
-		            onPlaneUpdate.hand_trace = densifyTraceWithAddress(smoothed, addrHand, addressIdx, addressTime, 48);
+		            onPlaneUpdate.hand_trace = densifyTraceWithAddress(
+		              smoothed,
+		              addrHandForTrace,
+		              addressIdxForTrace,
+		              addressTimeForTrace,
+		              48
+		            );
 		            (onPlaneUpdate as Record<string, unknown>).pose_debug = {
 		              ...((onPlaneUpdate as Record<string, unknown>).pose_debug as Record<string, unknown> | undefined),
 		              hand_trace_source: "grip_low_confidence",
@@ -5054,7 +5168,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
 		          }
 		        }
 
-		        // Final safeguard: if a trace exists, derive a fit line even if pose block failed.
+        // Final safeguard: if a trace exists, derive a fit line even if pose block failed.
         if (onPlaneUpdate && Array.isArray(onPlaneUpdate.hand_trace)) {
           const planeSource = String((onPlaneUpdate as Record<string, unknown>).plane_source ?? "");
           const hasRefPlane = !!(onPlaneUpdate as Record<string, unknown>).reference_plane;
@@ -5063,16 +5177,17 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
             onPlaneUpdate.downswing_plane = traceFit.line;
             onPlaneUpdate.plane_source = "hand_trace_fit";
             onPlaneUpdate.plane_confidence = "low";
-		            if (process.env.NODE_ENV !== "production") {
-		              (onPlaneUpdate as Record<string, unknown>).pose_debug = {
-		                ...((onPlaneUpdate as Record<string, unknown>).pose_debug as Record<string, unknown> | undefined),
-		                trace_fit_unique: traceFit.unique,
-		                trace_fit_spread: traceFit.spread,
-		              };
-		            }
-		          }
-		        }
+            if (process.env.NODE_ENV !== "production") {
+              (onPlaneUpdate as Record<string, unknown>).pose_debug = {
+                ...((onPlaneUpdate as Record<string, unknown>).pose_debug as Record<string, unknown> | undefined),
+                trace_fit_unique: traceFit.unique,
+                trace_fit_spread: traceFit.spread,
+              };
+            }
+          }
+        }
       }
+    }
     }
   } catch (err) {
     console.error("[reanalyze-phases] vision failed", err);
