@@ -912,6 +912,10 @@ const GolfResultPage = () => {
     return calibrateSwingScore(data?.result?.totalScore ?? 0);
   }, [data?.result?.totalScore]);
 
+  const previousCalibratedScore = useMemo(() => {
+    return previousHistory ? calibrateSwingScore(previousHistory.swingScore) : null;
+  }, [previousHistory]);
+
   const [roundEstimates, setRoundEstimates] = useState<RoundEstimateMetrics>(fallbackRoundEstimates);
 
   useEffect(() => {
@@ -1543,9 +1547,6 @@ const GolfResultPage = () => {
     );
   }
   const comparison = result.comparison;
-  const previousCalibratedScore = useMemo(() => {
-    return previousHistory ? calibrateSwingScore(previousHistory.swingScore) : null;
-  }, [previousHistory]);
   const previousScoreDelta =
     previousHistory && previousCalibratedScore != null
       ? calibratedTotalScore - previousCalibratedScore
