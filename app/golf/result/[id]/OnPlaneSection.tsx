@@ -856,6 +856,7 @@ const resolveAddressLandmarks = (onPlaneData: unknown) => {
 
 export default function OnPlaneSection(props: OnPlaneSectionProps) {
   const { onPlaneData, isPro, overlayFrames, poseMetrics } = props;
+  const analyzerComment = props.analyzerComment ?? null;
   const score = resolveScore100(onPlaneData);
   const tone = resolveTone(score ?? 0);
   const toneClass = toneClasses(tone);
