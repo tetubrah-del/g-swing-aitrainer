@@ -35,7 +35,11 @@ function toJapaneseLevel(level: GolfAnalyzeMeta["level"]): string {
   }
 }
 
-export function genPrompt(meta?: GolfAnalyzeMeta, previousReport?: SwingAnalysis | null): string {
+export function genPrompt(
+  meta?: GolfAnalyzeMeta,
+  previousReport?: SwingAnalysis | null,
+  analyzerBlock?: string | null
+): string {
   const principlesQuery = [
     "診断思考フロー",
     "因果",
@@ -169,12 +173,11 @@ export function genPrompt(meta?: GolfAnalyzeMeta, previousReport?: SwingAnalysis
     "}",
     "",
     "summary:",
-    "- 日本語で 5〜8 文",
-    "- フェーズ全体を俯瞰した技術的考察",
-    "- 長所／改善点の総合整理",
-    "- 上達のための方向性",
-    "- 次回チェックすべきポイント",
-    "をわかりやすく、読みやすく記述すること",
+    "- 日本語で 4〜5 文",
+    "- 落ち着いた指導系の語り口で、読み物として成立させる",
+    "- 構成は「結論→情緒（納得感）→改善1つ」で固定",
+    "- 2〜3回に1回の頻度で比喩を入れる（過剰に煽らない）",
+    "- フェーズ全体を俯瞰した技術的考察と、改善の方向性を含める",
     "",
     "previousReport:",
     "- 前回の JSON（summary, scores, phases）を渡された場合は、",
@@ -187,6 +190,7 @@ export function genPrompt(meta?: GolfAnalyzeMeta, previousReport?: SwingAnalysis
     "}",
     "",
     "【重要ルール】",
+    "- スイングアナライザー定量は結論の根拠として扱い、矛盾する評価は書かない。",
     "- スコア（score）は今回のフレームの内容からの「絶対評価」にすること（previousReport に引っ張られて上下させない）。",
     "- score は 6フェーズの各 score（0〜20）の合計を 120点満点として 100点満点に換算した値にすること：round((sumPhaseScore/120)*100)。",
     "- major_ng / mid_high_ok は各フェーズのキー6つを必ず含め、値は必ず boolean で返すこと（省略禁止）。",
@@ -202,6 +206,7 @@ export function genPrompt(meta?: GolfAnalyzeMeta, previousReport?: SwingAnalysis
     "  address → address_to_backswing → backswing_to_top → top_to_downswing → downswing_to_impact → finish",
     "- keyFrameIndices が渡されたフレーム順序に基づくことを忘れない（不明なら空配列可）",
     "- on_plane は、Top→Downswing→Impact の画像から「プレーンに対して外側(+)/内側(-)」のズレを推定する。正確さより理解優先の粗い推定でOK。",
+    "- good/issues/advice は落ち着いた指導系で簡潔に。advice は改善1つに絞る。",
     "- すべて日本語で書くこと",
     "- 日本のゴルフレッスンで一般的な用語を使うこと",
     "- 難しすぎる表現は避ける",
@@ -217,10 +222,16 @@ export function genPrompt(meta?: GolfAnalyzeMeta, previousReport?: SwingAnalysis
       ]
     : ["【補足情報】なし"];
 
+  const analyzerLines = analyzerBlock
+    ? ["【スイングアナライザー定量】", analyzerBlock, ""]
+    : ["【スイングアナライザー定量】なし", ""];
+
   const userPrompt = [
     "以下はユーザーのスイング画像/動画と補足情報です。",
     "",
     ...metaLines,
+    "",
+    ...analyzerLines,
     "",
     "これらを参考に、先ほど示した JSON 構造に沿って日本語で分析してください。",
     "詳細な総評を必ず含めること。",

@@ -44,6 +44,12 @@ import { canPerform } from "@/app/lib/permissions";
 import { User, UserPlan } from "@/app/types/user";
 import { buildSwingStyleComment, detectSwingStyle, detectSwingStyleChange, SwingStyleType } from "@/app/lib/swing/style";
 import { computePoseMetrics } from "@/app/lib/swing/poseMetrics";
+import {
+  applyAnalyzerOutsideInAdjustments,
+  applyAnalyzerPhaseAdjustments,
+  buildAnalyzerPromptBlock,
+  buildSwingAnalyzerProfile,
+} from "@/app/lib/swing/analyzerProfile";
 import { extractSequenceFramesAroundImpact } from "@/app/lib/vision/extractSequenceFramesAroundImpact";
 import { rescoreSwingAnalysis } from "@/app/golf/scoring/phaseGuardrails";
 import { retrieveCoachKnowledge } from "@/app/coach/rag/retrieve";
@@ -1324,8 +1330,6 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    const prompt = genPrompt(meta, previousReport);
-
     // 🚨 修正：
     // Vision に渡すフレーム順は「必ずクライアントが決めた順序」を使う。
     // fallback で独自並び替えするとフェーズがズレる原因になる。
@@ -1367,6 +1371,10 @@ export async function POST(req: NextRequest) {
         }
       }
     }
+
+    const analyzerProfileForPrompt = buildSwingAnalyzerProfile({ poseMetrics, onPlane: null });
+    const analyzerPromptBlock = buildAnalyzerPromptBlock(analyzerProfileForPrompt);
+    const prompt = genPrompt(meta, previousReport, analyzerPromptBlock);
 
     const visionFrames: PhaseFrame[] =
       resolvedSequence.length > 0
@@ -1938,8 +1946,9 @@ export async function POST(req: NextRequest) {
     // Final, authoritative guardrails pass (analysis-time only).
     // This keeps stored results consistent even when upstream prompts drift.
     {
-      const finalized = rescoreSwingAnalysis({
-        result,
+      const analyzerProfile = buildSwingAnalyzerProfile({ poseMetrics, onPlane: result.on_plane ?? null });
+      const outsideAdjust = applyAnalyzerOutsideInAdjustments({
+        phases: result.phases as Record<string, { score?: number; issues?: string[]; advice?: string[] }>,
         majorNg:
           outsideInDetected?.value === true && outsideInDetected.confidence === "high"
             ? { ...(parsed.majorNg ?? {}), downswing: true }
@@ -1956,8 +1965,21 @@ export async function POST(req: NextRequest) {
             }
             return withDs;
           })(),
+        profile: analyzerProfile,
+      });
+      applyAnalyzerPhaseAdjustments({
+        phases: result.phases as Record<string, { score?: number; issues?: string[]; advice?: string[] }>,
+        profile: analyzerProfile,
+      });
+
+      const finalized = rescoreSwingAnalysis({
+        result,
+        majorNg: outsideAdjust.majorNg,
+        midHighOk: outsideAdjust.midHighOk,
         deriveFromText: true,
-        outsideInConfirmed: outsideInDetected?.value === true && outsideInDetected.confidence === "high",
+        outsideInConfirmed:
+          outsideInDetected?.value === true && outsideInDetected.confidence === "high" ||
+          analyzerProfile.outsideIn.status === "confirmed",
       });
       result.totalScore = finalized.totalScore;
       result.phases = finalized.phases;

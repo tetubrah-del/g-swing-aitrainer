@@ -15,6 +15,10 @@ import { rescoreSwingAnalysis } from "@/app/golf/scoring/phaseGuardrails";
 import { extractPoseKeypointsFromImages } from "@/app/lib/vision/extractPoseKeypoints";
 import { extractPoseKeypointsFromImagesMediaPipe } from "@/app/lib/pose/mediapipePose";
 import { computePoseMetrics } from "@/app/lib/swing/poseMetrics";
+import {
+  buildAnalyzerPromptBlock,
+  buildSwingAnalyzerProfile,
+} from "@/app/lib/swing/analyzerProfile";
 import { extractVideoWindowFrames } from "@/app/lib/vision/extractVideoWindowFrames";
 import OpenAI from "openai";
 import sharp from "sharp";
@@ -1415,7 +1419,13 @@ function postprocessSinglePhaseResult(args: { phaseLabel: string; result: { scor
   return result;
 }
 
-function buildPhasePrompt(args: { phaseLabel: string; handedness?: string; clubType?: string; level?: string }) {
+function buildPhasePrompt(args: {
+  phaseLabel: string;
+  handedness?: string;
+  clubType?: string;
+  level?: string;
+  analyzerBlock?: string | null;
+}) {
   const metaLines = [
     `利き手: ${args.handedness === "left" ? "左打ち" : "右打ち"}`,
     `クラブ: ${args.clubType ?? "unknown"}`,
@@ -1442,6 +1452,10 @@ function buildPhasePrompt(args: { phaseLabel: string; handedness?: string; clubT
     );
   }
 
+  const analyzerLines = args.analyzerBlock
+    ? ["スイングアナライザー定量:", args.analyzerBlock]
+    : ["スイングアナライザー定量: なし"];
+
   return [
     `あなたはゴルフスイングの分析専門AIです。`,
     `これから提示する画像フレームは「${args.phaseLabel}」に該当するフレームです。`,
@@ -1449,8 +1463,15 @@ function buildPhasePrompt(args: { phaseLabel: string; handedness?: string; clubT
     ``,
     `補足情報:`,
     metaLines,
+    ``,
+    ...analyzerLines,
     mustCheckLines.length ? `` : null,
     ...mustCheckLines,
+    ``,
+    `表現ルール:`,
+    `- 落ち着いた指導系の語り口にする。`,
+    `- スイングアナライザー定量は根拠として扱い、矛盾する評価は書かない。`,
+    `- advice は改善1つに絞る（1〜2文）。`,
     ``,
     `必ずJSONのみで返してください（前後の文章は禁止）。`,
     `出力形式:`,
@@ -3398,6 +3419,11 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
   let addrHandForTrace: { x: number; y: number } | null = null;
   let addressIdxForTrace: number | null = null;
   let addressTimeForTrace: number | null = null;
+  const analyzerProfileForPrompt = buildSwingAnalyzerProfile({
+    poseMetrics: (stored.result as SwingAnalysis | null)?.poseMetrics ?? null,
+    onPlane: (stored.result as SwingAnalysis | null)?.on_plane ?? null,
+  });
+  const analyzerPromptBlock = buildAnalyzerPromptBlock(analyzerProfileForPrompt);
 
   try {
     if (!onPlaneOnly) {
@@ -3409,6 +3435,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
           handedness: meta?.handedness,
           clubType: meta?.clubType,
           level: meta?.level,
+          analyzerBlock: analyzerPromptBlock,
         });
         if (res) phaseUpdates.address = res;
       }
@@ -3420,6 +3447,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
           handedness: meta?.handedness,
           clubType: meta?.clubType,
           level: meta?.level,
+          analyzerBlock: analyzerPromptBlock,
         });
         if (res) phaseUpdates.backswing = res;
       }
@@ -3431,6 +3459,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
           handedness: meta?.handedness,
           clubType: meta?.clubType,
           level: meta?.level,
+          analyzerBlock: analyzerPromptBlock,
         });
         if (res) phaseUpdates.top = res;
       }
@@ -3442,6 +3471,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
           handedness: meta?.handedness,
           clubType: meta?.clubType,
           level: meta?.level,
+          analyzerBlock: analyzerPromptBlock,
         });
         if (!downswingResult) {
           // Skip downswing updates if the vision call failed.
@@ -3488,6 +3518,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
           handedness: meta?.handedness,
           clubType: meta?.clubType,
           level: meta?.level,
+          analyzerBlock: analyzerPromptBlock,
         });
         if (res) phaseUpdates.impact = res;
       }
@@ -3499,6 +3530,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
           handedness: meta?.handedness,
           clubType: meta?.clubType,
           level: meta?.level,
+          analyzerBlock: analyzerPromptBlock,
         });
         if (res) phaseUpdates.finish = res;
       }
