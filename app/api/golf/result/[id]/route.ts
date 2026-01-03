@@ -27,6 +27,43 @@ function isValidAnalysisId(id: string | null | undefined): id is AnalysisId {
   return /^[A-Za-z0-9_-]{6,200}$/.test(id);
 }
 
+function normalizeOutsideInPhrase(text: string): string {
+  if (text.includes("アウトサイドイン傾向が強い") || text.includes("アウトサイドイン傾向が見られる")) {
+    return text;
+  }
+  if (text.includes("アウトサイドイン（確定）")) return "アウトサイドイン傾向が強い";
+  if (text.includes("外から入りやすい傾向")) return "アウトサイドイン傾向が見られる";
+  if (/アウトサイドイン(?!傾向)/.test(text)) return "アウトサイドイン傾向が見られる";
+  return text;
+}
+
+function normalizeDownswingPhrases(result: GolfAnalysisResponse["result"]): boolean {
+  const downswing = result?.phases?.downswing;
+  if (!downswing) return false;
+
+  const normalizeList = (items: unknown) => {
+    if (!Array.isArray(items)) return null;
+    const normalized = items
+      .map((item) => (typeof item === "string" ? normalizeOutsideInPhrase(item) : item))
+      .filter((item): item is string => typeof item === "string");
+    const unique = Array.from(new Set(normalized));
+    return unique;
+  };
+
+  const nextIssues = normalizeList(downswing.issues);
+  const nextAdvice = normalizeList(downswing.advice);
+  let changed = false;
+  if (nextIssues && JSON.stringify(nextIssues) !== JSON.stringify(downswing.issues ?? [])) {
+    downswing.issues = nextIssues;
+    changed = true;
+  }
+  if (nextAdvice && JSON.stringify(nextAdvice) !== JSON.stringify(downswing.advice ?? [])) {
+    downswing.advice = nextAdvice;
+    changed = true;
+  }
+  return changed;
+}
+
 async function backfillAnalyzerComment(stored: { id: AnalysisId; result: GolfAnalysisResponse["result"] }) {
   if (stored.result?.analyzerComment) return null;
   const apiKey = process.env.OPENAI_API_KEY;
@@ -185,6 +222,15 @@ export async function GET(
       await saveAnalysis(updated);
       stored.result = updated.result;
     }
+  }
+
+  if (stored?.result && normalizeDownswingPhrases(stored.result)) {
+    const updated = {
+      ...stored,
+      result: { ...stored.result },
+    };
+    await saveAnalysis(updated);
+    stored.result = updated.result;
   }
 
   if (effectiveUserId) {

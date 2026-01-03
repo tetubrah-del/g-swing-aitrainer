@@ -680,13 +680,13 @@ const resolveOutsideInIndicator = (onPlaneData: unknown, poseMetrics?: import("@
   const late = resolveDeviationCm(onPlaneData, "late_downswing");
   const value = typeof top === "number" ? top : typeof late === "number" ? late : null;
   const label = (() => {
-    if (primary === "outside") return "アウトサイドイン傾向が見られる";
-    if (primary === "inside") return "内側寄り";
     if (typeof value === "number") {
-      if (value >= 3) return "アウトサイドイン傾向が見られる";
-      if (value <= -3) return "内側寄り";
+      if (value >= 2.5) return "アウトサイドイン傾向が見られる";
+      if (value <= -2.5) return "内側寄り";
       return "中立";
     }
+    if (primary === "outside") return "アウトサイドイン傾向が見られる";
+    if (primary === "inside") return "内側寄り";
     return "判定不能";
   })();
   return { label, valueCm: value, source: "on_plane" };
