@@ -226,7 +226,15 @@ function OnPlaneFrameOverlay(props: {
     hip?: { x: number; y: number } | null;
   } | null;
   handPoints?: { top?: { x: number; y: number } | null; downswing?: { x: number; y: number } | null; impact?: { x: number; y: number } | null } | null;
-  handTrace?: Array<{ x: number; y: number; phase?: string }>;
+  handTrace?: Array<{ x: number; y: number; phase?: string; timestampSec?: number }>;
+  phaseTimestamps?: {
+    address?: number | null;
+    backswing?: number | null;
+    top?: number | null;
+    downswing?: number | null;
+    impact?: number | null;
+    finish?: number | null;
+  } | null;
   tone: ScoreTone;
 }) {
   const frames = props.frames.filter((f) => typeof f?.url === 'string' && f.url.startsWith('data:image/'));
@@ -362,7 +370,15 @@ function OnPlaneFrameOverlay(props: {
               const dot = (p: { x: number; y: number }, fill: string, stroke: string) => (
                 <circle cx={p.x * 100} cy={p.y * viewBoxHeight} r="1.35" fill={fill} stroke={stroke} strokeWidth="0.55" />
               );
-              return null;
+              return (
+                <>
+                  {club ? dot(club, "rgba(248,113,113,0.9)", "rgba(248,113,113,0.6)") : null}
+                  {grip ? dot(grip, "rgba(74,222,128,0.9)", "rgba(74,222,128,0.6)") : null}
+                  {ball ? dot(ball, "rgba(226,232,240,0.9)", "rgba(226,232,240,0.7)") : null}
+                  {shoulder ? dot(shoulder, "rgba(59,130,246,0.9)", "rgba(59,130,246,0.6)") : null}
+                  {hip ? dot(hip, "rgba(168,85,247,0.9)", "rgba(168,85,247,0.6)") : null}
+                </>
+              );
             })()}
 
             {/* Hand trace (Top → Downswing → Impact). Yellow = hands (grip center). */}
@@ -377,26 +393,77 @@ function OnPlaneFrameOverlay(props: {
                 (props.handTrace ?? [])
                   .map((p) =>
                     p && Number.isFinite(p.x) && Number.isFinite(p.y)
-                      ? { x: clamp(p.x, 0, 1), y: clamp(p.y, 0, 1), phase: (p.phase ?? '').toLowerCase() }
+                      ? {
+                          x: clamp(p.x, 0, 1),
+                          y: clamp(p.y, 0, 1),
+                          phase: (p.phase ?? '').toLowerCase(),
+                          timestampSec: p.timestampSec,
+                        }
                       : null,
                   )
-                  .filter((p): p is { x: number; y: number; phase: string } => !!p) ?? [];
+                  .filter((p): p is { x: number; y: number; phase: string; timestampSec?: number } => !!p) ?? [];
 
               const allPts = tracePts.length >= 2 ? tracePts : pts.map((p) => ({ ...p, phase: '' }));
               if (allPts.length < 2) return null;
 
-              const backswingPts = tracePts.filter((p) => p.phase.includes('top') || p.phase.includes('back'));
-              const downswingPts = tracePts.filter((p) => p.phase.includes('down'));
+              const backswingPts = tracePts.filter(
+                (p) => p.phase.includes('top') || p.phase.includes('back') || p.phase.includes('address') || p.phase.includes('addr'),
+              );
+              const tracePtsSorted = [...tracePts].sort((a, b) => {
+                const ta = typeof a.timestampSec === 'number' && Number.isFinite(a.timestampSec) ? a.timestampSec : Number.POSITIVE_INFINITY;
+                const tb = typeof b.timestampSec === 'number' && Number.isFinite(b.timestampSec) ? b.timestampSec : Number.POSITIVE_INFINITY;
+                if (ta === tb) return 0;
+                return ta < tb ? -1 : 1;
+              });
+              const impactTs = props.phaseTimestamps?.impact ?? null;
+              const downswingTs = props.phaseTimestamps?.top ?? props.phaseTimestamps?.downswing ?? null;
+              const withinImpactWindow = (p: { timestampSec?: number }) => {
+                if (impactTs == null) return true;
+                if (typeof p.timestampSec !== 'number' || !Number.isFinite(p.timestampSec)) return false;
+                return p.timestampSec <= impactTs;
+              };
+              const withinDownswingWindow = (p: { timestampSec?: number }) => {
+                if (downswingTs == null || impactTs == null) return true;
+                if (typeof p.timestampSec !== 'number' || !Number.isFinite(p.timestampSec)) return false;
+                return p.timestampSec >= downswingTs && p.timestampSec <= impactTs;
+              };
+              let cutoffIndex: number | null = null;
+              if (impactTs != null) {
+                for (let i = 0; i < tracePtsSorted.length; i += 1) {
+                  const ts = tracePtsSorted[i]?.timestampSec;
+                  if (typeof ts === 'number' && Number.isFinite(ts) && ts <= impactTs) {
+                    cutoffIndex = i;
+                  }
+                }
+              }
+              const clippedTrace =
+                cutoffIndex != null
+                  ? tracePtsSorted.slice(0, cutoffIndex + 1).filter(withinImpactWindow)
+                  : tracePtsSorted;
+              let downswingPts =
+                downswingTs != null && impactTs != null
+                  ? clippedTrace.filter(withinDownswingWindow)
+                  : clippedTrace.filter((p) => p.phase.includes('down'));
+              if (downswingPts.length < 2) {
+                downswingPts =
+                  impactTs != null
+                    ? clippedTrace.filter(withinImpactWindow)
+                    : clippedTrace.filter((p) => p.phase.includes('down'));
+              }
               const fallbackBackPts = top && down ? [top, down] : null;
               const fallbackDownPts = down && impact ? [down, impact] : null;
 
               const toPath = (points: Array<{ x: number; y: number }>) =>
                 points.map((p) => `${p.x * 100} ${p.y * viewBoxHeight}`).join(' L ');
 
-              const tracePath = tracePts.length >= 2 ? toPath(tracePts) : null;
+              const tracePath = clippedTrace.length >= 2 ? toPath(clippedTrace) : null;
               const fullPath = tracePath;
               const backPath =
-                backswingPts.length >= 2 ? toPath(backswingPts) : fallbackBackPts ? toPath(fallbackBackPts) : null;
+                backswingPts.length >= 2
+                  ? toPath(backswingPts)
+                  : fallbackBackPts
+                    ? toPath(fallbackBackPts)
+                    : null;
               const fallbackDownPath = fallbackDownPts ? toPath(fallbackDownPts) : null;
 
               return (
@@ -527,7 +594,7 @@ const resolveHandPoints = (
   return { top: readPt(hp.top), downswing: readPt(hp.downswing), impact: readPt(hp.impact) };
 };
 
-const resolveHandTrace = (onPlaneData: unknown): Array<{ x: number; y: number; phase?: string }> | null => {
+const resolveHandTrace = (onPlaneData: unknown): Array<{ x: number; y: number; phase?: string; timestampSec?: number }> | null => {
   const obj = getObj(onPlaneData);
   const visual = getObj(obj?.visual);
   const raw =
@@ -550,17 +617,42 @@ const resolveHandTrace = (onPlaneData: unknown): Array<{ x: number; y: number; p
         })()
       : raw;
   if (!Array.isArray(parsedRaw)) return null;
-  const out: Array<{ x: number; y: number; phase?: string }> = [];
+  const out: Array<{ x: number; y: number; phase?: string; timestampSec?: number }> = [];
   for (const entry of parsedRaw) {
     const e = getObj(entry);
     if (!e) continue;
     const x = readNumber(e.x);
     const y = readNumber(e.y);
     if (x == null || y == null) continue;
+    const timestampSec = readNumber(e.timestampSec ?? e.timestamp_sec ?? e.t ?? e.time);
     const to01 = (n: number) => (Math.abs(n) > 1.5 ? n / 100 : n);
-    out.push({ x: clamp(to01(x), 0, 1), y: clamp(to01(y), 0, 1), phase: readString(e.phase) ?? undefined });
+    out.push({
+      x: clamp(to01(x), 0, 1),
+      y: clamp(to01(y), 0, 1),
+      phase: readString(e.phase) ?? undefined,
+      timestampSec: timestampSec ?? undefined,
+    });
   }
   return out.length ? out : null;
+};
+
+const resolvePhaseTimestamps = (onPlaneData: unknown) => {
+  const obj = getObj(onPlaneData);
+  if (!obj) return null;
+  const raw = getObj(obj.phase_timestamps ?? obj.phaseTimestamps);
+  if (!raw) return null;
+  const readTs = (value: unknown) => {
+    const n = readNumber(value);
+    return n != null && Number.isFinite(n) ? n : null;
+  };
+  return {
+    address: readTs(raw.address),
+    backswing: readTs(raw.backswing),
+    top: readTs(raw.top),
+    downswing: readTs(raw.downswing),
+    impact: readTs(raw.impact),
+    finish: readTs(raw.finish),
+  };
 };
 
 const traceSpread = (points: Array<{ x: number; y: number }>) => {
@@ -578,6 +670,59 @@ const traceSpread = (points: Array<{ x: number; y: number }>) => {
   }
   return Math.max(0, (maxX - minX) + (maxY - minY));
 };
+
+const countTracePhases = (points: Array<{ phase?: string | null }>) => {
+  const counts: Record<string, number> = {};
+  for (const point of points) {
+    const phase = typeof point.phase === 'string' ? point.phase.trim().toLowerCase() : '';
+    if (!phase) continue;
+    counts[phase] = (counts[phase] ?? 0) + 1;
+  }
+  return counts;
+};
+
+const interpolatePointAtTime = (
+  points: Array<{ x: number; y: number; timestampSec?: number }>,
+  targetTs: number,
+) => {
+  const withTs = points
+    .filter((p) => typeof p.timestampSec === 'number' && Number.isFinite(p.timestampSec))
+    .map((p) => ({ ...p, timestampSec: p.timestampSec as number }))
+    .sort((a, b) => a.timestampSec - b.timestampSec);
+  if (withTs.length < 2) return null;
+  let before = withTs[0]!;
+  let after = withTs[withTs.length - 1]!;
+  for (let i = 0; i < withTs.length; i += 1) {
+    const p = withTs[i]!;
+    if (p.timestampSec <= targetTs) before = p;
+    if (p.timestampSec >= targetTs) {
+      after = p;
+      break;
+    }
+  }
+  const t1 = before.timestampSec;
+  const t2 = after.timestampSec;
+  if (!Number.isFinite(t1) || !Number.isFinite(t2) || t1 === t2) return { x: before.x, y: before.y, timestampSec: t1 };
+  const t = (targetTs - t1) / (t2 - t1);
+  return {
+    x: clamp(before.x + (after.x - before.x) * t, 0, 1),
+    y: clamp(before.y + (after.y - before.y) * t, 0, 1),
+    timestampSec: targetTs,
+  };
+};
+
+const rephaseTraceByMinY = (points: Array<{ x: number; y: number; phase?: string }>) => {
+  if (points.length < 3) return points;
+  let minIdx = 0;
+  for (let i = 1; i < points.length; i += 1) {
+    if (points[i]!.y < points[minIdx]!.y) minIdx = i;
+  }
+  return points.map((p, i) => ({
+    ...p,
+    phase: i <= minIdx ? 'backswing' : 'downswing',
+  }));
+};
+
 
 const resolveZoneAnchorPoint = (onPlaneData: unknown): { x: number; y: number } | null => {
   const obj = getObj(onPlaneData);
@@ -682,6 +827,7 @@ export default function OnPlaneSection(props: OnPlaneSectionProps) {
   const downswingPlaneRaw = resolvePlaneLine(onPlaneData, 'downswing');
   const handPointsRaw = resolveHandPoints(onPlaneData);
   const handTraceRaw = resolveHandTrace(onPlaneData);
+  const phaseTimestamps = resolvePhaseTimestamps(onPlaneData);
   const addressLandmarksRaw = resolveAddressLandmarks(onPlaneData);
   const onPlaneSource = readString(getObj(onPlaneData)?.source);
   const reanalyzeTs = resolveReanalyzeTs(onPlaneData);
@@ -691,41 +837,11 @@ export default function OnPlaneSection(props: OnPlaneSectionProps) {
   // If extracted shaft-vector lines consistently tilt "right-up -> left-down" (negative slope),
   // flip X for visualization so the plane aligns with the most common DTL expectation (left-up -> right-down).
   // This does NOT change stored data; it only affects rendering.
-  const shouldFlipX = (() => {
-    if (onPlaneSource === 'video') return false;
-    if (addressLandmarksRaw?.ball && addressLandmarksRaw?.grip) {
-      const ballX = addressLandmarksRaw.ball.x;
-      const gripX = addressLandmarksRaw.grip.x;
-      if (Number.isFinite(ballX) && Number.isFinite(gripX) && Math.abs(ballX - gripX) > 0.05) {
-        // In DTL, grip should be left of ball; if reversed, flip X.
-        return gripX > ballX;
-      }
-    }
-    const l = downswingPlaneRaw;
-    if (!l) return false;
-    const dx = lineDx(l);
-    const dy = lineDy(l);
-    if (!Number.isFinite(dx) || !Number.isFinite(dy)) return false;
-    // If mostly vertical, don't flip.
-    if (Math.abs(dx) < 0.02) return false;
-    // Treat dy positive as "downwards". If dx is negative with dy positive -> negative slope.
-    return dy >= 0 ? dx < 0 : dx > 0;
-  })();
+  const shouldFlipX = false;
 
   const poseTraceFallback = (() => {
     if (!poseMetrics?.handTrace?.length) return null;
     return poseMetrics.handTrace.map((p) => ({ x: p.x, y: p.y, phase: p.phase }));
-  })();
-
-  const traceForDisplayRaw = (() => {
-    if (!poseTraceFallback) return handTraceRaw;
-    if (!handTraceRaw) return poseTraceFallback;
-    const poseSpread = traceSpread(poseTraceFallback);
-    const onPlaneSpread = traceSpread(handTraceRaw);
-    const usePose =
-      onPlaneSpread < 0.06 ||
-      (poseSpread > 0.08 && poseSpread > onPlaneSpread * 1.5);
-    return usePose ? poseTraceFallback : handTraceRaw;
   })();
 
   const handPointsFallback = (() => {
@@ -739,26 +855,38 @@ export default function OnPlaneSection(props: OnPlaneSectionProps) {
     };
   })();
 
+  const handTrace = (() => {
+    const base = handTraceRaw ?? poseTraceFallback;
+    if (!base) return null;
+    if (!shouldFlipX) return base;
+    return base.map((p) => {
+      const flippedX = shouldFlipX ? { ...p, x: 1 - p.x } : p;
+      return flippedX;
+    });
+  })();
   const handPoints = (() => {
     const base = handPointsRaw ?? handPointsFallback;
     if (!base) return null;
     if (!shouldFlipX) return base;
-    return {
-      top: base.top ? flipXPoint01(base.top) : null,
-      downswing: base.downswing ? flipXPoint01(base.downswing) : null,
-      impact: base.impact ? flipXPoint01(base.impact) : null,
+    const apply = (p: { x: number; y: number } | null) => {
+      if (!p) return null;
+      const flippedX = shouldFlipX ? flipXPoint01(p) : p;
+      return flippedX;
     };
-  })();
-  const handTrace = (() => {
-    const base = traceForDisplayRaw ?? handTraceRaw ?? poseTraceFallback;
-    if (!base) return null;
-    if (!shouldFlipX) return base;
-    return base.map((p) => ({ ...p, x: 1 - p.x }));
+    return {
+      top: apply(base.top),
+      downswing: apply(base.downswing),
+      impact: apply(base.impact),
+    };
   })();
   const addressLandmarks = (() => {
     if (!addressLandmarksRaw) return null;
     if (!shouldFlipX) return addressLandmarksRaw;
-    const flip = (p: { x: number; y: number } | null | undefined) => (p ? { x: 1 - p.x, y: p.y } : null);
+    const flip = (p: { x: number; y: number } | null | undefined) => {
+      if (!p) return null;
+      const flippedX = shouldFlipX ? flipXPoint01(p) : p;
+      return flippedX;
+    };
     return {
       clubhead: flip(addressLandmarksRaw.clubhead),
       grip: flip(addressLandmarksRaw.grip),
@@ -766,6 +894,58 @@ export default function OnPlaneSection(props: OnPlaneSectionProps) {
       shoulder: flip(addressLandmarksRaw.shoulder),
       hip: flip(addressLandmarksRaw.hip),
     };
+  })();
+  const displayHandTrace = (() => {
+    if (!handTrace?.length) return handTrace;
+    const counts = countTracePhases(handTrace);
+    const backswingCount = counts.backswing ?? 0;
+    const downswingCount = counts.downswing ?? 0;
+    if (backswingCount >= 8 && downswingCount <= 3) {
+      return rephaseTraceByMinY(handTrace);
+    }
+    return handTrace;
+  })();
+  const displayHandPoints = (() => {
+    if (!displayHandTrace?.length) return handPoints;
+    const hasTop = handPoints?.top != null;
+    const hasImpact = handPoints?.impact != null;
+    if (hasTop && hasImpact) return handPoints;
+    const topTs = phaseTimestamps?.top ?? null;
+    const interpolatedTop = topTs != null ? interpolatePointAtTime(displayHandTrace, topTs) : null;
+    let topIdx = 0;
+    for (let i = 1; i < displayHandTrace.length; i += 1) {
+      if (displayHandTrace[i]!.y < displayHandTrace[topIdx]!.y) topIdx = i;
+    }
+    const downswingPoint = displayHandTrace.find((p) => (p.phase ?? '').includes('down')) ?? null;
+    const impactPoint = displayHandTrace[displayHandTrace.length - 1] ?? null;
+    return {
+      top:
+        handPoints?.top ??
+        (interpolatedTop ? { x: interpolatedTop.x, y: interpolatedTop.y } : null) ??
+        (displayHandTrace[topIdx] ? { x: displayHandTrace[topIdx]!.x, y: displayHandTrace[topIdx]!.y } : null),
+      downswing: handPoints?.downswing ?? (downswingPoint ? { x: downswingPoint.x, y: downswingPoint.y } : null),
+      impact: handPoints?.impact ?? (impactPoint ? { x: impactPoint.x, y: impactPoint.y } : null),
+    };
+  })();
+  const displayHandTraceWithTop = (() => {
+    if (!displayHandTrace?.length) return displayHandTrace;
+    const hasTop = displayHandTrace.some((p) => (p.phase ?? '').toLowerCase().includes('top'));
+    if (hasTop) return displayHandTrace;
+    const topTs = phaseTimestamps?.top ?? null;
+    const interpolatedTop = topTs != null ? interpolatePointAtTime(displayHandTrace, topTs) : null;
+    const topPoint = interpolatedTop
+      ? { x: interpolatedTop.x, y: interpolatedTop.y, timestampSec: interpolatedTop.timestampSec }
+      : (displayHandPoints?.top ?? null);
+    if (!topPoint) return displayHandTrace;
+    let minIdx = 0;
+    for (let i = 1; i < displayHandTrace.length; i += 1) {
+      if (displayHandTrace[i]!.y < displayHandTrace[minIdx]!.y) minIdx = i;
+    }
+    const ts = topPoint.timestampSec ?? phaseTimestamps?.top ?? displayHandTrace[minIdx]?.timestampSec;
+    const injected = { ...topPoint, phase: 'top', timestampSec: ts };
+    const next = displayHandTrace.slice();
+    next.splice(minIdx, 0, injected);
+    return next;
   })();
   const top = resolveDeviationCm(onPlaneData, 'top_to_downswing');
   const late = resolveDeviationCm(onPlaneData, 'late_downswing');
@@ -948,8 +1128,9 @@ export default function OnPlaneSection(props: OnPlaneSectionProps) {
                 frames={overlayFrames}
                 tone={tone}
                 addressLandmarks={addressLandmarks}
-                handPoints={handPoints}
-                handTrace={handTrace ?? undefined}
+                handPoints={displayHandPoints}
+                handTrace={displayHandTraceWithTop ?? undefined}
+                phaseTimestamps={phaseTimestamps}
               />
             </div>
           ) : null}

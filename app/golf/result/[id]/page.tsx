@@ -499,6 +499,7 @@ const GolfResultPage = () => {
   const [phaseReevalError, setPhaseReevalError] = useState<string | null>(null);
   const [isOnPlaneReevalLoading, setIsOnPlaneReevalLoading] = useState(false);
   const [onPlaneReevalError, setOnPlaneReevalError] = useState<string | null>(null);
+  const [onPlaneTraceMode, setOnPlaneTraceMode] = useState<"mediapipe" | "reconstruct">("reconstruct");
   const [phaseOverrideAppliedSig, setPhaseOverrideAppliedSig] = useState<string | null>(null);
   const [anonymousUserId, setAnonymousUserId] = useState<string | null>(null);
   const [previousHistory, setPreviousHistory] = useState<SwingAnalysisHistory | null>(null);
@@ -712,19 +713,19 @@ const GolfResultPage = () => {
       return false;
     })();
     const hasLocalSignals = hasLocalPoseMetrics || hasLocalHandTraceDisplay;
-    if (local?.result && hasLocalFrames && hasLocalSignals) {
+    const hydrateFromLocal = !!(local?.result && hasLocalFrames && hasLocalSignals);
+    if (hydrateFromLocal) {
       setData(local);
       setSwingTypes(deriveSwingTypes(local.result));
       setSwingTypeResult(deriveSwingTypeResult(local.result));
       setCausalImpact(local.causalImpact ?? null);
       setFallbackNote(null);
       setIsLoading(false);
-      return;
     }
 
-    const fetchResult = async () => {
+    const fetchResult = async (silent = false) => {
       try {
-        setIsLoading(true);
+        if (!silent) setIsLoading(true);
         setError(null);
 
         const res = await fetch(`/api/golf/result/${id}`, {
@@ -770,7 +771,7 @@ const GolfResultPage = () => {
       }
     };
 
-    fetchResult();
+    fetchResult(hydrateFromLocal);
   }, [id]);
 
   useEffect(() => {
@@ -1347,23 +1348,24 @@ const GolfResultPage = () => {
         readString(result?.videoUrl);
       setIsOnPlaneReevalLoading(true);
       setOnPlaneReevalError(null);
-      const res = await fetch("/api/golf/reanalyze-phases", {
-        method: "POST",
-        credentials: "include",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          analysisId: data.analysisId,
-          address,
-          backswing,
-          top,
-          downswing,
-          impact,
-          finish,
-          onPlaneOnly: true,
-          ...(sourceVideoUrl ? { sourceVideoUrl } : null),
-          ...(videoUrl ? { videoUrl } : null),
-        }),
-      });
+          const res = await fetch("/api/golf/reanalyze-phases", {
+            method: "POST",
+            credentials: "include",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              analysisId: data.analysisId,
+              address,
+              backswing,
+              top,
+              downswing,
+              impact,
+              finish,
+              onPlaneOnly: true,
+              onPlaneTraceMode,
+              ...(sourceVideoUrl ? { sourceVideoUrl } : null),
+              ...(videoUrl ? { videoUrl } : null),
+            }),
+          });
       const json = (await res.json().catch(() => null)) as GolfAnalysisResponse | { error?: string } | null;
       if (!res.ok) {
         const message =
@@ -2249,6 +2251,15 @@ const GolfResultPage = () => {
                 {isOnPlaneReevalLoading ? "オンプレーン解析中…" : "オンプレーンだけ再解析"}
               </button>
             </div>
+            <label className="inline-flex items-center gap-2 text-xs text-slate-300">
+              <input
+                type="checkbox"
+                className="h-4 w-4 rounded border-slate-600 bg-slate-900 text-emerald-400"
+                checked={onPlaneTraceMode === "mediapipe"}
+                onChange={(e) => setOnPlaneTraceMode(e.target.checked ? "mediapipe" : "reconstruct")}
+              />
+              評価ボタンと同じ手法ならチェックON ※LLM利用の可能性あり
+            </label>
             {onPlaneReevalError && <p className="text-xs text-rose-300">オンプレーン再解析エラー: {onPlaneReevalError}</p>}
             {!isOnPlaneReevalEnabled && (
               <p className="text-[11px] text-slate-400">TOP / DS / IMP を選択すると実行できます。</p>

@@ -14,6 +14,7 @@ import { askVisionAPI } from "@/app/lib/vision/askVisionAPI";
 import { rescoreSwingAnalysis } from "@/app/golf/scoring/phaseGuardrails";
 import { extractPoseKeypointsFromImages } from "@/app/lib/vision/extractPoseKeypoints";
 import { extractPoseKeypointsFromImagesMediaPipe } from "@/app/lib/pose/mediapipePose";
+import { computePoseMetrics } from "@/app/lib/swing/poseMetrics";
 import { extractVideoWindowFrames } from "@/app/lib/vision/extractVideoWindowFrames";
 import OpenAI from "openai";
 import sharp from "sharp";
@@ -292,12 +293,16 @@ function densifyTrace(
     for (let j = 1; j <= perSegment; j += 1) {
       const t = j / (perSegment + 1);
       const interp = catmullRom(p0, p1, p2, p3, t);
+      const ts =
+        typeof p1.timestampSec === "number" && typeof p2.timestampSec === "number"
+          ? p1.timestampSec + (p2.timestampSec - p1.timestampSec) * t
+          : p1.timestampSec;
       densified.push({
         x: clamp(interp.x, 0, 1),
         y: clamp(interp.y, 0, 1),
         phase: p1.phase,
         frameIndex: p1.frameIndex,
-        timestampSec: p1.timestampSec,
+        timestampSec: ts,
       });
     }
   }
@@ -1743,7 +1748,7 @@ Return JSON only:
 async function extractAddressPoseLandmarks(
   frame: PhaseFrame,
   handedness?: string | null,
-): Promise<{ shoulder: { x: number; y: number } | null; hip: { x: number; y: number } | null } | null> {
+): Promise<{ shoulder: { x: number; y: number } | null; hip: { x: number; y: number } | null; hand: { x: number; y: number } | null } | null> {
   if (!frame?.base64Image || !frame?.mimeType) return null;
   try {
     const poseFrames = await extractPoseKeypointsFromImagesMediaPipe({
@@ -1755,8 +1760,14 @@ async function extractAddressPoseLandmarks(
     const side = handedness === "left" ? "left" : "right";
     const shoulder = readPosePoint(pose, [`${side}Shoulder`, `${side}_shoulder`]);
     const hip = readPosePoint(pose, [`${side}Hip`, `${side}_hip`]);
-    if (!shoulder && !hip) return null;
-    return { shoulder, hip };
+    const leftWrist = readPosePoint(pose, ["leftWrist", "left_wrist"]);
+    const rightWrist = readPosePoint(pose, ["rightWrist", "right_wrist"]);
+    const hasBoth = !!leftWrist && !!rightWrist;
+    const avgWrist = hasBoth ? { x: (leftWrist!.x + rightWrist!.x) / 2, y: (leftWrist!.y + rightWrist!.y) / 2 } : null;
+    const leadWrist = handedness === "left" ? rightWrist : leftWrist;
+    const hand = avgWrist ?? leadWrist ?? leftWrist ?? rightWrist ?? null;
+    if (!shoulder && !hip && !hand) return null;
+    return { shoulder, hip, hand };
   } catch {
     return null;
   }
@@ -3197,6 +3208,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
         finish?: unknown;
         onPlaneOnly?: unknown;
         skipOnPlane?: unknown;
+        onPlaneTraceMode?: unknown;
       }
     | null;
   const analysisIdRaw = body?.analysisId ?? null;
@@ -3214,6 +3226,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
   const finishIndices = normalizeIndices(body?.finish);
   const onPlaneOnly = body?.onPlaneOnly === true;
   const skipOnPlane = body?.skipOnPlane === true;
+  const onPlaneTraceMode = body?.onPlaneTraceMode === "mediapipe" ? "mediapipe" : "reconstruct";
   const shouldRunOnPlane = onPlaneOnly || !skipOnPlane;
   const allowOnPlaneEval = !onPlaneOnly && ON_PLANE_ALLOW_EVAL_LLM;
   const allowZoneLLM = !onPlaneOnly && ON_PLANE_ALLOW_ZONE_LLM;
@@ -3275,6 +3288,37 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
   const frames = Array.isArray(sequence?.frames) ? sequence!.frames : [];
   if (!frames.length) {
     return json({ error: "sequence frames not available" }, { status: 400 });
+  }
+
+  const useMediaPipePose =
+    process.env.POSE_PROVIDER === "mediapipe" || process.env.USE_MEDIAPIPE_POSE === "1";
+  let poseMetricsFromSequence: import("@/app/lib/swing/poseMetrics").PoseMetrics | null = null;
+  if (onPlaneOnly && useMediaPipePose && onPlaneTraceMode === "mediapipe") {
+    try {
+      const poseInputs = frames
+        .slice(0, 16)
+        .map((entry) => {
+          if (!entry || typeof entry.url !== "string") return null;
+          const parsed = parseDataUrl(entry.url);
+          if (!parsed?.base64 || !parsed?.mimeType) return null;
+          return {
+            base64Image: parsed.base64,
+            mimeType: parsed.mimeType,
+            timestampSec: entry.timestampSec,
+          };
+        })
+        .filter((f): f is { base64Image: string; mimeType: string; timestampSec?: number } => !!f);
+      if (poseInputs.length >= 3) {
+        const poseFrames = await extractPoseKeypointsFromImagesMediaPipe({ frames: poseInputs });
+        poseMetricsFromSequence = computePoseMetrics({
+          poseFrames,
+          handedness: meta?.handedness,
+          timestampsSec: poseInputs.map((f) => f.timestampSec),
+        });
+      }
+    } catch (error) {
+      console.warn("[reanalyze-phases] poseMetrics from sequence failed", error);
+    }
   }
 
   const pickFrames = (indices: number[]): PhaseFrame[] => {
@@ -3508,7 +3552,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
 		      const videoWindowPreSec = Number(process.env.ON_PLANE_VIDEO_WINDOW_PRE_SEC ?? "0.4");
 		      const videoWindowPostSec = Number(process.env.ON_PLANE_VIDEO_WINDOW_POST_SEC ?? "0.2");
 		      const videoWindowMaxFramesRaw = Number(process.env.ON_PLANE_VIDEO_WINDOW_MAX_FRAMES ?? "32");
-		      const videoWindowMaxFrames = Number.isFinite(videoWindowMaxFramesRaw) ? clamp(videoWindowMaxFramesRaw, 12, 80) : 32;
+		      const videoWindowMaxFrames = Number.isFinite(videoWindowMaxFramesRaw) ? clamp(videoWindowMaxFramesRaw, 12, 120) : 32;
 		      const videoWindowTimeoutMs = Number(process.env.ON_PLANE_VIDEO_WINDOW_TIMEOUT_MS ?? "10000");
 		      let useVideoWindow = onPlaneOnly;
 		      const sourceVideoUrl = useVideoWindow ? resolveSourceVideoUrl() : null;
@@ -3542,6 +3586,15 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
 		      const addressTime = addressIdxRaw ? frameTimestamp(addressIdxRaw) : null;
 		      const topTime = topIdxRaw ? frameTimestamp(topIdxRaw) : null;
 		      const impactTime = impactIdxRaw ? frameTimestamp(impactIdxRaw) : null;
+		      const phaseTimestampsBase = {
+		        address: addressIdxRaw ? frameTimestamp(addressIdxRaw) : null,
+		        backswing: onPlaneBackswingIndices[0] ? frameTimestamp(onPlaneBackswingIndices[0]) : null,
+		        top: topIdxRaw ? frameTimestamp(topIdxRaw) : null,
+		        downswing: onPlaneDownswingIndices[0] ? frameTimestamp(onPlaneDownswingIndices[0]) : null,
+		        impact: impactIdxRaw ? frameTimestamp(impactIdxRaw) : null,
+		        finish: onPlaneFinishIndices[0] ? frameTimestamp(onPlaneFinishIndices[0]) : null,
+		      };
+		      let phaseTimestampsLocal = phaseTimestampsBase;
 
 		      let onPlaneFramesWithIndex: Array<PhaseFrame & { frameIndex: number }> | null = null;
 		      let onPlaneMaxIndex = frames.length;
@@ -3552,19 +3605,33 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
 		      let onPlaneImpactIndicesLocal = onPlaneImpactIndices;
 		      let onPlaneFinishIndicesLocal = onPlaneFinishIndices;
 		      let videoWindowDebug: Record<string, unknown> | null = null;
+		      let videoWindowStartSec: number | null = null;
+		      let videoWindowFpsLocal: number | null = null;
 
 		      if (useVideoWindow && sourceVideoUrl) {
 		        if (!topTime || !impactTime) {
 		          return json({ error: "top/impact timestamps missing for video on-plane analysis" }, { status: 400 });
 		        }
-		        const startSec = Math.max(0, topTime - videoWindowPreSec);
+		        const addressAnchor = addressTime != null ? Math.max(0, addressTime - 0.15) : null;
+		        const startSec = Math.max(0, Math.min(topTime - videoWindowPreSec, addressAnchor ?? Number.POSITIVE_INFINITY));
 		        const endSec = Math.max(startSec + 0.1, impactTime + videoWindowPostSec);
+		        const durationSec = Math.max(0.1, endSec - startSec);
+		        let effectiveFps = videoWindowFps;
+		        let effectiveMaxFrames = videoWindowMaxFrames;
+		        const desiredFrames = Math.ceil(durationSec * videoWindowFps);
+		        if (desiredFrames > effectiveMaxFrames) {
+		          if (desiredFrames <= 120) {
+		            effectiveMaxFrames = Math.min(120, Math.max(effectiveMaxFrames, desiredFrames));
+		          } else {
+		            effectiveFps = clamp(Math.floor(effectiveMaxFrames / durationSec), 8, 30);
+		          }
+		        }
 		        const extracted = await extractVideoWindowFrames({
 		          url: sourceVideoUrl,
 		          startSec,
 		          endSec,
-		          fps: videoWindowFps,
-		          maxFrames: videoWindowMaxFrames,
+		          fps: effectiveFps,
+		          maxFrames: effectiveMaxFrames,
 		          timeoutMs: videoWindowTimeoutMs,
 		        });
 		        onPlaneFramesWithIndex = extracted.frames.map((frame, idx) => ({
@@ -3581,7 +3648,12 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
 		          endSec: extracted.endSec,
 		          fps: extracted.fps,
 		          frameCount: onPlaneMaxIndex,
+		          durationSec,
+		          desiredFrames,
+		          effectiveMaxFrames,
 		        };
+		        videoWindowStartSec = extracted.startSec;
+		        videoWindowFpsLocal = extracted.fps;
 
 		        const closestIndexByTime = (targetSec: number) => {
 		          let bestIdx = 1;
@@ -3728,6 +3800,9 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
 		            (onPlaneUpdate as Record<string, unknown>).debug_frames = debugFrames;
 		          }
 		        }
+		        if (onPlaneUpdate) {
+		          (onPlaneUpdate as Record<string, unknown>).phase_timestamps = phaseTimestampsLocal;
+		        }
 
 		        const poseInputs = [...backswingFrames, ...topFrames, ...dsFrames, ...impFrames].slice(0, 32);
 		        const gripFramesForTrace = gripFramesRange.length ? gripFramesRange : poseInputs;
@@ -3780,30 +3855,66 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
 		          clampIndex(onPlaneDownswingIndicesLocal[0] ?? null, maxFrameIndex) ?? topIdx;
 		        const impactIdx =
 		          clampIndex(onPlaneImpactIndicesLocal[0] ?? null, maxFrameIndex) ?? finishIdx;
+		        const timeOfIndexLocal = (idx1: number | null) => {
+		          if (!idx1 || !Number.isFinite(idx1)) return null;
+		          if (useVideoWindow && onPlaneFramesWithIndex?.length) {
+		            const frame = onPlaneFramesWithIndex[idx1 - 1];
+		            if (frame && typeof frame.timestampSec === "number" && Number.isFinite(frame.timestampSec)) {
+		              return frame.timestampSec;
+		            }
+		            if (videoWindowStartSec != null && videoWindowFpsLocal != null && Number.isFinite(videoWindowFpsLocal)) {
+		              return videoWindowStartSec + (idx1 - 1) / videoWindowFpsLocal;
+		            }
+		          }
+		          return frameTimestamp(idx1);
+		        };
+		        const topTimeLocal = topTime ?? timeOfIndexLocal(topIdx);
+		        const impactTimeLocal = impactTime ?? timeOfIndexLocal(impactIdx);
+		        const downswingStartTimeLocal = timeOfIndexLocal(downswingIdx);
+		        phaseTimestampsLocal = useVideoWindow
+		          ? {
+		              address: timeOfIndexLocal(addressIdx),
+		              backswing: timeOfIndexLocal(backswingIdx),
+		              top: topTimeLocal,
+		              downswing: downswingStartTimeLocal,
+		              impact: impactTimeLocal,
+		              finish: timeOfIndexLocal(finishIdx),
+		            }
+		          : phaseTimestampsBase;
+		        const phaseByTime = (ts?: number) => {
+		          if (typeof ts !== "number" || !Number.isFinite(ts)) return null;
+		          const pivot = topTimeLocal ?? downswingStartTimeLocal ?? null;
+		          if (pivot != null && ts <= pivot) return "backswing" as const;
+		          if (impactTimeLocal != null) return ts <= impactTimeLocal ? ("downswing" as const) : ("impact" as const);
+		          if (pivot != null) return "downswing" as const;
+		          return null;
+		        };
 		        const gripIdxByFrameIndex = new Map<number, number>();
 		        gripFramesForTrace.forEach((src, idx) => {
 		          const frameNo = src.frameIndex;
-		          const mapped: "backswing" | "top" | "downswing" | "impact" =
-		            backswingIdx && frameNo <= backswingIdx
+		          const mapped =
+		            phaseByTime(src.timestampSec) ??
+		            (backswingIdx && frameNo <= backswingIdx
 		              ? "backswing"
 		              : topIdx && frameNo <= topIdx
 		                ? "top"
 		                : impactIdx && frameNo <= impactIdx
 		                  ? "downswing"
-		                  : "impact";
+		                  : "impact");
 		          metaByIdxGrip.set(idx, { frameIndex: src.frameIndex, timestampSec: src.timestampSec, phase: mapped });
 		          gripIdxByFrameIndex.set(src.frameIndex, idx);
 		        });
 		        poseFramesForTrace.forEach((src, idx) => {
 		          const frameNo = src.frameIndex;
-		          const mapped: "backswing" | "top" | "downswing" | "impact" =
-		            backswingIdx && frameNo <= backswingIdx
+		          const mapped =
+		            phaseByTime(src.timestampSec) ??
+		            (backswingIdx && frameNo <= backswingIdx
 		              ? "backswing"
 		              : topIdx && frameNo <= topIdx
 		                ? "top"
 		                : impactIdx && frameNo <= impactIdx
 		                  ? "downswing"
-		                  : "impact";
+		                  : "impact");
 		          metaByIdxPose.set(idx, { frameIndex: src.frameIndex, timestampSec: src.timestampSec, phase: mapped });
 		        });
 
@@ -4160,6 +4271,81 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
 		              interpolatedCount: poseInterpolatedCount,
 		              accepted: poseTraceAccepted,
 		            };
+		            if (onPlaneOnly && !allowZoneLLM) {
+		              const trace = poseTraceInfo.trace ?? [];
+		              const candidate =
+		                trace.find((p) => p.phase === "backswing" || p.phase === "top") ??
+		                trace[0] ??
+		                null;
+		              const gripPointCurrent =
+		                (onPlaneUpdate as Record<string, unknown>)?.grip_point &&
+		                typeof (onPlaneUpdate as Record<string, unknown>).grip_point === "object"
+		                  ? normalizePoint01((onPlaneUpdate as Record<string, unknown>).grip_point)
+		                  : null;
+		              const gripSource =
+		                (onPlaneUpdate as Record<string, unknown>)?.pose_debug &&
+		                typeof (onPlaneUpdate as Record<string, unknown>).pose_debug === "object"
+		                  ? ((onPlaneUpdate as Record<string, unknown>).pose_debug as Record<string, unknown>).grip_point_source
+		                  : null;
+		              const addressHand =
+		                (onPlaneUpdate as Record<string, unknown>)?.address_hand_point_pose &&
+		                typeof (onPlaneUpdate as Record<string, unknown>).address_hand_point_pose === "object"
+		                  ? normalizePoint01((onPlaneUpdate as Record<string, unknown>).address_hand_point_pose)
+		                  : null;
+		              if (!gripPointCurrent || gripSource === "address_pose_hand" || gripSource === "pose_trace_start") {
+		                if (addressHand) {
+		                  (onPlaneUpdate as Record<string, unknown>).grip_point = addressHand;
+		                  (onPlaneUpdate as Record<string, unknown>).pose_debug = {
+		                    ...((onPlaneUpdate as Record<string, unknown>).pose_debug as Record<string, unknown> | undefined),
+		                    grip_point_source: "address_pose_hand",
+		                  };
+		                } else if (candidate) {
+		                  const baseGrip = { x: candidate.x, y: candidate.y };
+		                  const shoulderPoint =
+		                    (onPlaneUpdate as Record<string, unknown>)?.address_shoulder_point_pose &&
+		                    typeof (onPlaneUpdate as Record<string, unknown>).address_shoulder_point_pose === "object"
+		                      ? normalizePoint01((onPlaneUpdate as Record<string, unknown>).address_shoulder_point_pose)
+		                      : null;
+		                  const hipPoint =
+		                    (onPlaneUpdate as Record<string, unknown>)?.address_hip_point &&
+		                    typeof (onPlaneUpdate as Record<string, unknown>).address_hip_point === "object"
+		                      ? normalizePoint01((onPlaneUpdate as Record<string, unknown>).address_hip_point)
+		                      : null;
+		                  let adjustedGrip = baseGrip;
+		                  let adjustDy = 0;
+		                  let adjustDx = 0;
+		                  if (shoulderPoint && hipPoint) {
+		                    const torso = Math.max(0, hipPoint.y - shoulderPoint.y);
+		                    adjustDy = torso * 0.3;
+		                    const handedness = meta?.handedness === "left" ? "left" : "right";
+		                    const dxSign = handedness === "left" ? -1 : 1;
+		                    adjustDx = torso * 0.08 * dxSign;
+		                  } else {
+		                    adjustDy = 0.02;
+		                    const handedness = meta?.handedness === "left" ? "left" : "right";
+		                    const dxSign = handedness === "left" ? -1 : 1;
+		                    adjustDx = 0.01 * dxSign;
+		                  }
+		                  if (
+		                    Number.isFinite(adjustDy) &&
+		                    Number.isFinite(adjustDx) &&
+		                    (Math.abs(adjustDy) > 0 || Math.abs(adjustDx) > 0)
+		                  ) {
+		                    adjustedGrip = {
+		                      x: clamp(baseGrip.x + adjustDx, 0, 1),
+		                      y: clamp(baseGrip.y + adjustDy, 0, 1),
+		                    };
+		                  }
+		                  (onPlaneUpdate as Record<string, unknown>).grip_point = adjustedGrip;
+		                  (onPlaneUpdate as Record<string, unknown>).pose_debug = {
+		                    ...((onPlaneUpdate as Record<string, unknown>).pose_debug as Record<string, unknown> | undefined),
+		                    grip_point_source: "pose_trace_start",
+		                    grip_point_adjust_dy: Number.isFinite(adjustDy) ? adjustDy : null,
+		                    grip_point_adjust_dx: Number.isFinite(adjustDx) ? adjustDx : null,
+		                  };
+		                }
+		              }
+		            }
 		            let gripTrace = gripTraceInfo?.trace ?? [];
 		            let gripTraceSpreadLocal = gripTraceInfo?.spread ?? 0;
 		            const gripUniqueInitial = countTraceUnique(gripTrace, 0.01);
@@ -4605,11 +4791,12 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
                   if (addrZone?.shoulder) (onPlaneUpdate as Record<string, unknown>).address_shoulder_point = addrZone.shoulder;
                   {
                     const poseLandmarks = await Promise.all(
-		                  addrFrames.map((f) => extractAddressPoseLandmarks(f, meta?.handedness ?? null)),
+                      addrFrames.map((f) => extractAddressPoseLandmarks(f, meta?.handedness ?? null)),
                     );
-                    const firstPose = poseLandmarks.find((p) => p?.shoulder || p?.hip) ?? null;
+                    const firstPose = poseLandmarks.find((p) => p?.shoulder || p?.hip || p?.hand) ?? null;
                     const shoulder = firstPose?.shoulder ?? null;
                     let hip = firstPose?.hip ?? null;
+                    const hand = firstPose?.hand ?? null;
                     if (shoulder && hip) {
                       const dy = hip.y - shoulder.y;
                       if (dy < 0.08 || dy > 0.32) {
@@ -4623,6 +4810,18 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
                     }
                     if (shoulder) (onPlaneUpdate as Record<string, unknown>).address_shoulder_point_pose = shoulder;
                     if (hip) (onPlaneUpdate as Record<string, unknown>).address_hip_point = hip;
+                    if (hand) (onPlaneUpdate as Record<string, unknown>).address_hand_point_pose = hand;
+                    if (
+                      hand &&
+                      !(onPlaneUpdate as Record<string, unknown>).grip_point &&
+                      !(onPlaneUpdate as Record<string, unknown>).gripPoint
+                    ) {
+                      (onPlaneUpdate as Record<string, unknown>).grip_point = hand;
+                      (onPlaneUpdate as Record<string, unknown>).pose_debug = {
+                        ...((onPlaneUpdate as Record<string, unknown>).pose_debug as Record<string, unknown> | undefined),
+                        grip_point_source: "address_pose_hand",
+                      };
+                    }
 
                     if (!shoulder && addrZone?.side_shoulder) {
                       (onPlaneUpdate as Record<string, unknown>).address_shoulder_point_pose = addrZone.side_shoulder;
@@ -4793,9 +4992,14 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
 		              (onPlaneUpdate as Record<string, unknown>)?.grip_point && typeof (onPlaneUpdate as Record<string, unknown>).grip_point === "object"
 		                ? normalizePoint01((onPlaneUpdate as Record<string, unknown>).grip_point)
 		                : null;
+		            const addressHandPoint =
+		              (onPlaneUpdate as Record<string, unknown>)?.address_hand_point_pose &&
+		              typeof (onPlaneUpdate as Record<string, unknown>).address_hand_point_pose === "object"
+		                ? normalizePoint01((onPlaneUpdate as Record<string, unknown>).address_hand_point_pose)
+		                : null;
 		            const anchorForRef = clubheadPoint ?? ballPoint;
 		            const zoneAnchor = anchorForRef ?? gripPoint ?? null;
-		            const addrHand = gripPoint ?? null;
+		            const addrHand = gripPoint ?? addressHandPoint ?? null;
 		            addrHandForTrace = addrHand ?? null;
 		            addressIdxForTrace = typeof addressIdx === "number" ? addressIdx : null;
 		            addressTimeForTrace = typeof addressTime === "number" ? addressTime : null;
@@ -5030,34 +5234,81 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
 		              ? (onPlaneUpdate.hand_trace as Array<{ x: number; y: number; phase?: string; frameIndex?: number; timestampSec?: number }>)
 		              : [];
 		          let displaySource = "hand_trace";
-		          if (poseTraceForDisplay.length) {
-		            const poseDisplayUnique = countTraceUnique(poseTraceForDisplay, 0.01);
-		            const poseDisplaySpread = computeTraceSpread(poseTraceForDisplay);
-		            const poseDisplayCollapsed = poseDisplayUnique < 4 || poseDisplaySpread < 0.03;
-		            if (poseDisplayCollapsed) {
-		              const candidates: Array<{
-		                trace: Array<{ x: number; y: number; phase?: string; frameIndex?: number; timestampSec?: number }>;
-		                label: string;
-		              }> = [];
-		              if (poseTraceLeadForDisplay.length) candidates.push({ trace: poseTraceLeadForDisplay, label: "pose_lead_display" });
-		              if (poseTraceAvgForDisplay.length) candidates.push({ trace: poseTraceAvgForDisplay, label: "pose_avg_display" });
-		              if (gripTraceForDisplay.length) candidates.push({ trace: gripTraceForDisplay, label: "grip_display_fallback" });
-		              let best = { trace: poseTraceForDisplay, label: "pose_display" };
-		              let bestScore = poseDisplaySpread + poseDisplayUnique * 0.01;
-		              for (const candidate of candidates) {
-		                const spread = computeTraceSpread(candidate.trace);
-		                const unique = countTraceUnique(candidate.trace, 0.01);
-		                const score = spread + unique * 0.01;
-		                if (score > bestScore) {
-		                  bestScore = score;
-		                  best = candidate;
-		                }
+		          const candidates: Array<{
+		            trace: Array<{ x: number; y: number; phase?: string; frameIndex?: number; timestampSec?: number }>;
+		            label: string;
+		          }> = [];
+		          if (displayTrace.length) candidates.push({ trace: displayTrace, label: "hand_trace" });
+		          if (poseTraceForDisplay.length) candidates.push({ trace: poseTraceForDisplay, label: "pose_display" });
+		          if (poseTraceLeadForDisplay.length) candidates.push({ trace: poseTraceLeadForDisplay, label: "pose_lead_display" });
+		          if (poseTraceAvgForDisplay.length) candidates.push({ trace: poseTraceAvgForDisplay, label: "pose_avg_display" });
+		          if (gripTraceForDisplay.length) candidates.push({ trace: gripTraceForDisplay, label: "grip_display_fallback" });
+		          if (candidates.length) {
+		            let best = candidates[0]!;
+		            let bestScore = -Infinity;
+		            for (const candidate of candidates) {
+		              const spread = computeTraceSpread(candidate.trace);
+		              const unique = countTraceUnique(candidate.trace, 0.01);
+		              const phases = countTracePhases(candidate.trace);
+		              const downswingCount = phases.downswing ?? 0;
+		              const score = spread + unique * 0.01 + downswingCount * 0.005;
+		              if (score > bestScore) {
+		                bestScore = score;
+		                best = candidate;
 		              }
-		              displayTrace = best.trace;
-		              displaySource = best.label;
+		            }
+		            displayTrace = best.trace;
+		            displaySource = best.label;
+		          }
+		          let trimMeta: { trimmed: boolean; start?: number; end?: number; startSource?: string; endSource?: string; reason?: string } = {
+		            trimmed: false,
+		          };
+		          if (onPlaneOnly && onPlaneTraceMode === "reconstruct" && displayTrace.length) {
+		            const topIdx = clampIndex(onPlaneTopIndicesLocal[0] ?? null, maxFrameIndex);
+		            const impactIdx = clampIndex(onPlaneImpactIndicesLocal[0] ?? null, maxFrameIndex);
+		            const downswingStartIdx = clampIndex(onPlaneDownswingIndicesLocal[0] ?? null, maxFrameIndex);
+		            const downswingEndIdx = clampIndex(
+		              onPlaneDownswingIndicesLocal[onPlaneDownswingIndicesLocal.length - 1] ?? null,
+		              maxFrameIndex
+		            );
+		            const hasFrameIndex = displayTrace.every(
+		              (p) => typeof p.frameIndex === "number" && Number.isFinite(p.frameIndex)
+		            );
+		            if (!hasFrameIndex) {
+		              trimMeta = { trimmed: false, reason: "frame_index_missing" };
+		            } else if (
+		              topIdx != null &&
+		              impactIdx != null &&
+		              Number.isFinite(topIdx) &&
+		              Number.isFinite(impactIdx) &&
+		              topIdx >= impactIdx
+		            ) {
+		              trimMeta = { trimmed: false, reason: "top_after_impact" };
 		            } else {
-		              displayTrace = poseTraceForDisplay;
-		              displaySource = "pose_display";
+		              const startIdx = topIdx ?? downswingStartIdx ?? null;
+		              const endIdx = impactIdx ?? downswingEndIdx ?? null;
+		              const startSource = topIdx != null ? "top" : "downswing_start";
+		              const endSource = impactIdx != null ? "impact" : "downswing_end";
+		              if (startIdx != null && endIdx != null && startIdx < endIdx) {
+		                const trimmed = displayTrace.filter((p) => p.frameIndex! >= startIdx && p.frameIndex! <= endIdx);
+		                if (trimmed.length) {
+		                  displayTrace = trimmed;
+		                  trimMeta = { trimmed: true, start: startIdx, end: endIdx, startSource, endSource };
+		                } else {
+		                  trimMeta = { trimmed: false, start: startIdx, end: endIdx, startSource, endSource, reason: "empty" };
+		                }
+		              } else if (startIdx != null || endIdx != null) {
+		                trimMeta = {
+		                  trimmed: false,
+		                  start: startIdx ?? undefined,
+		                  end: endIdx ?? undefined,
+		                  startSource,
+		                  endSource,
+		                  reason: "range_invalid",
+		                };
+		              } else {
+		                trimMeta = { trimmed: false, reason: "indices_missing" };
+		              }
 		            }
 		          }
 		          if (displayTrace.length) {
@@ -5075,12 +5326,34 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
 		              addressTimeForTrace,
 		              64
 		            );
+		            const missingTs = densified.filter((p) => typeof p.timestampSec !== "number" || !Number.isFinite(p.timestampSec)).length;
+		            const bounds = (() => {
+		              if (!densified.length) return null;
+		              let minX = 1, maxX = 0, minY = 1, maxY = 0;
+		              for (const p of densified) {
+		                if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) continue;
+		                minX = Math.min(minX, p.x);
+		                maxX = Math.max(maxX, p.x);
+		                minY = Math.min(minY, p.y);
+		                maxY = Math.max(maxY, p.y);
+		              }
+		              return { minX, maxX, minY, maxY };
+		            })();
 		            (onPlaneUpdate as Record<string, unknown>).hand_trace_display = densified;
 		            (onPlaneUpdate as Record<string, unknown>).pose_debug = {
 		              ...((onPlaneUpdate as Record<string, unknown>).pose_debug as Record<string, unknown> | undefined),
 		              hand_trace_display_len: densified.length,
 		              hand_trace_display_source: displaySource,
 		              hand_trace_display_augmented: true,
+		              hand_trace_display_missing_ts: missingTs,
+		              hand_trace_display_start: densified[0] ? { x: densified[0].x, y: densified[0].y, phase: densified[0].phase } : null,
+		              hand_trace_display_bounds: bounds,
+		              address_anchor_for_trace: addrHandForTrace ? { x: addrHandForTrace.x, y: addrHandForTrace.y } : null,
+		              address_shoulder_point_pose:
+		                (onPlaneUpdate as Record<string, unknown>)?.address_shoulder_point_pose ??
+		                (onPlaneUpdate as Record<string, unknown>)?.address_shoulder_point ??
+		                null,
+		              hand_trace_display_trim: trimMeta,
 		            };
 		          }
 		          const traceSnapshot = Array.isArray(onPlaneUpdate.hand_trace)
@@ -5267,9 +5540,28 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
     (previousReport as unknown as Record<string, unknown> | null)?.on_plane ??
     (previousReport as unknown as Record<string, unknown> | null)?.onPlane ??
     null;
+  if (onPlaneOnly && onPlaneTraceMode === "mediapipe" && poseMetricsFromSequence?.handTrace?.length) {
+    const displayTrace = poseMetricsFromSequence.handTrace;
+    if (!onPlaneUpdate) {
+      onPlaneUpdate =
+        (stored.result as unknown as Record<string, unknown>)?.on_plane &&
+        typeof (stored.result as unknown as Record<string, unknown>)?.on_plane === "object"
+          ? ({ ...((stored.result as unknown as Record<string, unknown>).on_plane as Record<string, unknown>) } as Record<string, unknown>)
+          : {};
+    }
+    (onPlaneUpdate as Record<string, unknown>).hand_trace_display = displayTrace;
+    (onPlaneUpdate as Record<string, unknown>).pose_debug = {
+      ...((onPlaneUpdate as Record<string, unknown>).pose_debug as Record<string, unknown> | undefined),
+      hand_trace_display_len: displayTrace.length,
+      hand_trace_display_source: "pose_metrics_sequence",
+      hand_trace_display_augmented: false,
+      on_plane_trace_mode: onPlaneTraceMode,
+    };
+  }
   const finalResult = {
     ...baseResult,
     comparison: onPlaneOnly ? baseResult.comparison : phaseComparison ?? baseResult.comparison,
+    poseMetrics: onPlaneTraceMode === "mediapipe" ? poseMetricsFromSequence ?? baseResult.poseMetrics : baseResult.poseMetrics,
     on_plane:
       onPlaneUpdate
         ? { ...onPlaneUpdate, ...(previousOnPlane ? { previous: previousOnPlane } : null) }

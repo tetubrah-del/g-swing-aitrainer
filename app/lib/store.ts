@@ -8,8 +8,13 @@ const STORE_PATH =
     ? process.env.GOLF_STORE_PATH.trim()
     : path.join(process.cwd(), ".data", "golf-analyses.json");
 
+let lastLoadedMtimeMs = 0;
+
 async function loadFromDisk() {
   try {
+    analyses.clear();
+    const stat = await fs.stat(STORE_PATH);
+    lastLoadedMtimeMs = stat.mtimeMs;
     const raw = await fs.readFile(STORE_PATH, "utf8");
     const parsed = JSON.parse(raw) as Record<string, GolfAnalysisRecord>;
     Object.entries(parsed).forEach(([id, record]) => {
@@ -29,6 +34,18 @@ async function loadFromDisk() {
 }
 
 const loadPromise = loadFromDisk();
+
+async function refreshFromDiskIfNeeded() {
+  try {
+    const stat = await fs.stat(STORE_PATH);
+    if (stat.mtimeMs > lastLoadedMtimeMs) {
+      analyses.clear();
+      await loadFromDisk();
+    }
+  } catch {
+    // ignore missing file
+  }
+}
 
 export async function resetAnalysisStore() {
   await loadPromise;
@@ -50,10 +67,20 @@ export async function saveAnalysis(record: GolfAnalysisRecord) {
   await loadPromise;
   analyses.set(record.id, record);
   await persistToDisk();
+  try {
+    const stat = await fs.stat(STORE_PATH);
+    lastLoadedMtimeMs = stat.mtimeMs;
+  } catch {
+    // ignore
+  }
 }
 
 export async function getAnalysis(id: string) {
   await loadPromise;
+  await refreshFromDiskIfNeeded();
+  const found = analyses.get(id) ?? null;
+  if (found) return found;
+  await loadFromDisk();
   return analyses.get(id) ?? null;
 }
 
@@ -62,6 +89,10 @@ export async function listAnalyses(
   options?: { limit?: number; order?: "asc" | "desc" }
 ): Promise<GolfAnalysisRecord[]> {
   await loadPromise;
+  await refreshFromDiskIfNeeded();
+  if (analyses.size === 0) {
+    await loadFromDisk();
+  }
 
   const { userId, anonymousUserId } = identifiers;
   const limit = options?.limit ?? 50;
@@ -87,6 +118,10 @@ export async function countMonthlyAnalyses(
   now: number = Date.now()
 ): Promise<number> {
   await loadPromise;
+  await refreshFromDiskIfNeeded();
+  if (analyses.size === 0) {
+    await loadFromDisk();
+  }
 
   const startOfMonth = new Date(now);
   startOfMonth.setUTCDate(1);
@@ -112,6 +147,10 @@ export async function countMonthlyAnalyses(
 
 export async function countAnalysesAllTime(identifiers: { userId?: string | null; anonymousUserId?: string | null }) {
   await loadPromise;
+  await refreshFromDiskIfNeeded();
+  if (analyses.size === 0) {
+    await loadFromDisk();
+  }
 
   const { userId, anonymousUserId } = identifiers;
   if (!userId && !anonymousUserId) return 0;
