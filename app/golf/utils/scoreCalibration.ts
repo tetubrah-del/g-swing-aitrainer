@@ -77,8 +77,8 @@ function pickNotableIssues(phase: PhaseLike, max: number): string[] {
   const issues = normalizeList(phase.issues);
   if (!issues.length) return [];
   const priorityPatterns: RegExp[] = [
-    /アウトサイドイン（確定）/,
-    /外から入りやすい傾向/,
+    /アウトサイドイン傾向が強い|アウトサイドイン（確定）/,
+    /アウトサイドイン傾向が見られる|外から入りやすい傾向/,
     /アウトサイドイン/,
     /外から下り/,
     /カット軌道/,
@@ -139,7 +139,11 @@ export function buildLevelDiagnosis(params: {
   const impactIssues = phases.impact ? pickNotableIssues(phases.impact as PhaseLike, 2) : [];
 
   const causalHints: string[] = [];
-  if (downswingIssues.some((t) => /アウトサイドイン（確定）|外から入りやすい傾向|アウトサイドイン|外から下り|カット軌道/.test(t))) {
+  if (
+    downswingIssues.some((t) =>
+      /アウトサイドイン傾向が強い|アウトサイドイン傾向が見られる|アウトサイドイン（確定）|外から入りやすい傾向|アウトサイドイン|外から下り|カット軌道/.test(t)
+    )
+  ) {
     causalHints.push("ダウンスイングの軌道が乱れると、方向性（特に右への曲がり）や当たり負けにつながりやすいです。");
   }
   if (impactIssues.some((t) => /早期伸展|骨盤.*前.*出|前傾.*起き|スペース.*潰/.test(t))) {

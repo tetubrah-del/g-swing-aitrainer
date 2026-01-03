@@ -1617,22 +1617,27 @@ export async function POST(req: NextRequest) {
         const isLowSkillBand = roughTotal <= 68;
 
         if (isLowSkillBand) {
-          if (!issues.some((t) => /（確定）/.test(String(t)))) {
-            ds.issues = ["アウトサイドイン（確定）", ...issues].slice(0, 4);
+          if (!issues.some((t) => /アウトサイドイン傾向が強い/.test(String(t)))) {
+            ds.issues = ["アウトサイドイン傾向が強い", ...issues].slice(0, 4);
           }
           ds.score = Math.min(Number(ds.score ?? 0) || 0, 8);
           return;
         }
 
-        if (!issues.some((t) => /外から入りやすい傾向|体の開きが早い/.test(String(t)))) {
-          ds.issues = ["外から入りやすい傾向", ...issues].slice(0, 4);
+        if (!issues.some((t) => /アウトサイドイン傾向が見られる|外から入りやすい傾向|体の開きが早い/.test(String(t)))) {
+          ds.issues = ["アウトサイドイン傾向が見られる", ...issues].slice(0, 4);
         }
         ds.score = Math.min(Number(ds.score ?? 0) || 0, 12);
       };
       if (outsideInDetected?.value === false) {
         const ds = parsed.phases.downswing;
         const before = Array.isArray(ds.issues) ? ds.issues : [];
-        const filtered = before.filter((t) => !/外から入りやすい傾向|アウトサイドイン（確定）|カット軌道（確定）|外から下りる（確定）|アウトサイドイン|カット軌道|外から下り/.test(String(t)));
+        const filtered = before.filter(
+          (t) =>
+            !/アウトサイドイン傾向が強い|アウトサイドイン傾向が見られる|外から入りやすい傾向|アウトサイドイン（確定）|カット軌道（確定）|外から下りる（確定）|アウトサイドイン|カット軌道|外から下り/.test(
+              String(t)
+            )
+        );
         if (filtered.length !== before.length) {
           ds.issues = filtered;
           if ((ds.score ?? 0) < 20 && hasTwoGoods(ds.good)) ds.score = 20;
@@ -1656,7 +1661,7 @@ export async function POST(req: NextRequest) {
         const ds = parsed.phases.downswing;
         const issues = Array.isArray(ds.issues) ? ds.issues : [];
         const hasOnlySoftTendency =
-          issues.length === 1 && /外から入りやすい傾向/.test(String(issues[0]));
+          issues.length === 1 && /アウトサイドイン傾向が見られる|外から入りやすい傾向/.test(String(issues[0]));
         if (hasOnlySoftTendency && hasTwoGoods(ds.good)) {
           ds.issues = [];
           if ((ds.score ?? 0) < 20) ds.score = 20;
@@ -1711,8 +1716,8 @@ export async function POST(req: NextRequest) {
       const hasEarlyRelease = /(手首|コック|リリース)/.test(dsText) && /(早|解け|ほどけ)/.test(dsText);
       const hasElbowAway = /右肘.*体から離れ|肘.*離れすぎ|腕が体から離れ/.test(dsText);
       const hasKneeCollapse = /右膝.*内側|膝.*内側.*入りすぎ/.test(dsText);
-      const hasConfirmedWord = /アウトサイドイン（確定）|カット軌道（確定）|外から下りる（確定）/.test(dsText);
-      const hasTendencyWord = /外から入りやすい傾向/.test(dsText);
+      const hasConfirmedWord = /アウトサイドイン傾向が強い|アウトサイドイン（確定）|カット軌道（確定）|外から下りる（確定）/.test(dsText);
+      const hasTendencyWord = /アウトサイドイン傾向が見られる|外から入りやすい傾向/.test(dsText);
       const judgeConfirmed = outsideInDetected?.value === true && outsideInDetected.confidence === "high";
       const judgeTendency = outsideInDetected?.value === true && outsideInDetected.confidence !== "high";
       const canTrustText = outsideInDetected?.value !== false && outsideInDetected != null;
@@ -1727,16 +1732,16 @@ export async function POST(req: NextRequest) {
 
       if (confirmed) {
         ds.score = Math.min(ds.score ?? 0, 8);
-        if (!ds.issues?.some((t) => /（確定）/.test(String(t)))) {
-          ds.issues = ["アウトサイドイン（確定）", ...(ds.issues ?? [])].slice(0, 4);
+        if (!ds.issues?.some((t) => /アウトサイドイン傾向が強い/.test(String(t)))) {
+          ds.issues = ["アウトサイドイン傾向が強い", ...(ds.issues ?? [])].slice(0, 4);
         }
         const sum = PHASE_ORDER.reduce((acc, key) => acc + (parsed.phases[key]?.score ?? 0), 0);
         const raw = Math.max(0, Math.min(100, Math.round((sum / (PHASE_ORDER.length * 20)) * 100)));
         totalScore = Math.min(totalScore, raw, 58);
       } else if (tendency) {
         ds.score = Math.min(ds.score ?? 0, 12);
-        if (!ds.issues?.some((t) => /外から入りやすい傾向/.test(String(t)))) {
-          ds.issues = ["外から入りやすい傾向", ...(ds.issues ?? [])].slice(0, 4);
+        if (!ds.issues?.some((t) => /アウトサイドイン傾向が見られる|外から入りやすい傾向/.test(String(t)))) {
+          ds.issues = ["アウトサイドイン傾向が見られる", ...(ds.issues ?? [])].slice(0, 4);
         }
         const sum = PHASE_ORDER.reduce((acc, key) => acc + (parsed.phases[key]?.score ?? 0), 0);
         const raw = Math.max(0, Math.min(100, Math.round((sum / (PHASE_ORDER.length * 20)) * 100)));

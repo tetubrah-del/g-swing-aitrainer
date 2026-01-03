@@ -655,23 +655,40 @@ const resolvePhaseTimestamps = (onPlaneData: unknown) => {
   };
 };
 
-const resolveOutsideInIndicator = (onPlaneData: unknown) => {
+const resolveOutsideInIndicator = (onPlaneData: unknown, poseMetrics?: import("@/app/lib/swing/poseMetrics").PoseMetrics | null) => {
+  const proxy = poseMetrics?.metrics.outsideInProxy ?? null;
+  if (proxy?.status) {
+    const label =
+      proxy.status === "confirmed"
+        ? "アウトサイドイン傾向が強い"
+        : proxy.status === "tendency"
+          ? "アウトサイドイン傾向が見られる"
+          : proxy.status === "none"
+            ? "アウトサイドイン傾向は目立たない"
+            : "判定不能";
+    return {
+      label,
+      valueNorm: proxy.handOffsetNorm ?? null,
+      outsideRatio: proxy.outsideRatio ?? null,
+      source: "mediapipe",
+    };
+  }
   const obj = getObj(onPlaneData);
   const primary = readString(obj?.primary_deviation ?? obj?.primaryDeviation) ?? null;
   const top = resolveDeviationCm(onPlaneData, "top_to_downswing");
   const late = resolveDeviationCm(onPlaneData, "late_downswing");
   const value = typeof top === "number" ? top : typeof late === "number" ? late : null;
   const label = (() => {
-    if (primary === "outside") return "外から入りやすい傾向";
+    if (primary === "outside") return "アウトサイドイン傾向が見られる";
     if (primary === "inside") return "内側寄り";
     if (typeof value === "number") {
-      if (value >= 3) return "外から入りやすい傾向";
+      if (value >= 3) return "アウトサイドイン傾向が見られる";
       if (value <= -3) return "内側寄り";
       return "中立";
     }
-    return "判定中";
+    return "判定不能";
   })();
-  return { label, value };
+  return { label, valueCm: value, source: "on_plane" };
 };
 
 const traceSpread = (points: Array<{ x: number; y: number }>) => {
@@ -1029,14 +1046,18 @@ export default function OnPlaneSection(props: OnPlaneSectionProps) {
       <p className="text-xs text-slate-400">MediaPipe 定量指標</p>
       <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
         {(() => {
-          const outside = resolveOutsideInIndicator(onPlaneData);
+          const outside = resolveOutsideInIndicator(onPlaneData, poseMetrics ?? null);
           return (
             <div className="rounded-lg border border-slate-800 bg-slate-950/30 p-3 space-y-1">
               <p className="text-slate-300">アウトサイドイン傾向</p>
               <p className="text-sm text-slate-100">{outside.label}</p>
               <p className="text-[11px] text-slate-400">
-                Top→DS: {formatNumber(outside.value, 1)} cm
-                {typeof outside.value === "number" ? ` (${directionLabel(outside.value)})` : ""}
+                {outside.source === "mediapipe"
+                  ? `オフセット: ${formatNumber(outside.valueNorm, 2)}x / 外側率 ${formatNumber(
+                      (outside.outsideRatio ?? 0) * 100,
+                      0
+                    )}%`
+                  : `Top→DS: ${formatNumber(outside.valueCm, 1)} cm${typeof outside.valueCm === "number" ? ` (${directionLabel(outside.valueCm)})` : ""}`}
               </p>
             </div>
           );

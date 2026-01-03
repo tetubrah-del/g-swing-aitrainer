@@ -2,6 +2,9 @@ import type { PoseMetrics } from "@/app/lib/swing/poseMetrics";
 
 export type AnalyzerOutsideInStatus = "confirmed" | "tendency" | "none" | "unknown";
 
+const OUTSIDE_IN_ISSUE_RE =
+  /アウトサイドイン傾向が強い|アウトサイドイン傾向が見られる|アウトサイドイン（確定）|外から入りやすい傾向|アウトサイドイン|外から下り|カット軌道/;
+
 export type SwingAnalyzerProfile = {
   level: {
     label: "プロ" | "上級" | "中級" | "初中級" | "初級" | "判定不能";
@@ -10,6 +13,8 @@ export type SwingAnalyzerProfile = {
   outsideIn: {
     status: AnalyzerOutsideInStatus;
     valueCm?: number | null;
+    valueNorm?: number | null;
+    outsideRatio?: number | null;
     primaryDeviation?: string | null;
   };
   handVsChest?: {
@@ -74,11 +79,11 @@ export function buildSwingAnalyzerProfile(params: {
   const onPlane = (params.onPlane ?? null) as Record<string, unknown> | null;
   const zoneStayRatio = parseZoneStayRatio(onPlane?.zone_stay_ratio_value ?? onPlane?.zone_stay_ratio);
   const primaryDeviation = readString(onPlane?.primary_deviation ?? onPlane?.primaryDeviation);
+  const poseMetrics = params.poseMetrics ?? null;
+  const proxy = poseMetrics?.metrics.outsideInProxy ?? null;
   const topToDownswing = readNumber(onPlane?.top_to_downswing_cm ?? onPlane?.topToDownswingCm ?? onPlane?.top_to_downswing);
   const lateDownswing = readNumber(onPlane?.late_downswing_cm ?? onPlane?.lateDownswingCm ?? onPlane?.downswing_late_cm ?? onPlane?.downswingLateCm);
   const outsideValue = topToDownswing ?? lateDownswing ?? null;
-
-  const poseMetrics = params.poseMetrics ?? null;
   const handVsChest = poseMetrics?.metrics.handVsChest ?? null;
   const lowerBodyLead = poseMetrics?.metrics.lowerBodyLead ?? null;
   const headSway = poseMetrics?.metrics.headSway?.distNorm ?? null;
@@ -90,8 +95,10 @@ export function buildSwingAnalyzerProfile(params: {
       zoneStayRatio,
     },
     outsideIn: {
-      status: deriveOutsideInStatus(outsideValue, primaryDeviation),
+      status: proxy?.status ?? deriveOutsideInStatus(outsideValue, primaryDeviation),
       valueCm: outsideValue,
+      valueNorm: proxy?.handOffsetNorm ?? null,
+      outsideRatio: proxy?.outsideRatio ?? null,
       primaryDeviation,
     },
     handVsChest: handVsChest
@@ -115,9 +122,21 @@ export function buildSwingAnalyzerProfile(params: {
 
 export function buildAnalyzerPromptBlock(profile: SwingAnalyzerProfile | null): string {
   if (!profile) return "なし";
+  const outsideLabel =
+    profile.outsideIn.status === "confirmed"
+      ? "アウトサイドイン傾向が強い"
+      : profile.outsideIn.status === "tendency"
+        ? "アウトサイドイン傾向が見られる"
+        : profile.outsideIn.status === "none"
+          ? "アウトサイドイン傾向は目立たない"
+          : "判定不能";
   const lines = [
     `レベル推定: ${profile.level.label}${profile.level.zoneStayRatio != null ? ` (zone_stay_ratio=${profile.level.zoneStayRatio.toFixed(1)}%)` : ""}`,
-    `アウトサイドイン: ${profile.outsideIn.status}${profile.outsideIn.valueCm != null ? ` (Top→DS=${profile.outsideIn.valueCm.toFixed(1)}cm)` : ""}`,
+    `アウトサイドイン: ${outsideLabel}` +
+      `${profile.outsideIn.valueNorm != null ? ` (offset_norm=${profile.outsideIn.valueNorm.toFixed(2)}x` : ""}` +
+      `${profile.outsideIn.outsideRatio != null ? `${profile.outsideIn.valueNorm != null ? "," : " ("}outside_ratio=${Math.round(profile.outsideIn.outsideRatio * 100)}%` : ""}` +
+      `${profile.outsideIn.valueNorm != null || profile.outsideIn.outsideRatio != null ? ")" : ""}` +
+      `${profile.outsideIn.valueCm != null ? ` / Top→DS=${profile.outsideIn.valueCm.toFixed(1)}cm` : ""}`,
     profile.handVsChest?.ratio != null
       ? `手打ち/振り遅れ: ${profile.handVsChest.classification ?? "unknown"} (ratio=${profile.handVsChest.ratio.toFixed(2)})`
       : "手打ち/振り遅れ: データ不足",
@@ -148,19 +167,27 @@ export function applyAnalyzerOutsideInAdjustments(params: {
   const downswing = phases.downswing ?? null;
   if (!downswing) return { ...params, applied: false };
 
+  const sanitize = (items: unknown) =>
+    Array.isArray(items) ? items.filter((t) => !OUTSIDE_IN_ISSUE_RE.test(String(t))) : [];
+
   let applied = false;
   if (status === "confirmed") {
-    downswing.issues = Array.from(new Set(["アウトサイドイン（確定）", ...(downswing.issues ?? [])]));
-    downswing.issues = downswing.issues.filter((t) => !/外から入りやすい傾向/.test(String(t)));
+    downswing.issues = Array.from(new Set(["アウトサイドイン傾向が強い", ...sanitize(downswing.issues)]));
     if (typeof downswing.score === "number") downswing.score = Math.min(downswing.score, 8);
     params.majorNg = { ...(params.majorNg ?? {}), downswing: true };
     params.midHighOk = { ...(params.midHighOk ?? {}), downswing: false };
     applied = true;
   } else if (status === "tendency") {
-    downswing.issues = Array.from(new Set(["外から入りやすい傾向", ...(downswing.issues ?? [])]));
+    downswing.issues = Array.from(new Set(["アウトサイドイン傾向が見られる", ...sanitize(downswing.issues)]));
     if (typeof downswing.score === "number") downswing.score = Math.min(downswing.score, 12);
     params.midHighOk = { ...(params.midHighOk ?? {}), downswing: false };
     applied = true;
+  } else if (status === "none" || status === "unknown") {
+    const cleaned = sanitize(downswing.issues);
+    if (cleaned.length !== (downswing.issues ?? []).length) {
+      downswing.issues = cleaned;
+      applied = true;
+    }
   }
 
   return { phases, majorNg: params.majorNg, midHighOk: params.midHighOk, applied };

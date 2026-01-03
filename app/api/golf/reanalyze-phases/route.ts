@@ -16,6 +16,7 @@ import { extractPoseKeypointsFromImages } from "@/app/lib/vision/extractPoseKeyp
 import { extractPoseKeypointsFromImagesMediaPipe } from "@/app/lib/pose/mediapipePose";
 import { computePoseMetrics } from "@/app/lib/swing/poseMetrics";
 import {
+  applyAnalyzerOutsideInAdjustments,
   buildAnalyzerPromptBlock,
   buildSwingAnalyzerProfile,
 } from "@/app/lib/swing/analyzerProfile";
@@ -1382,7 +1383,7 @@ function postprocessSinglePhaseResult(args: { phaseLabel: string; result: { scor
       );
     };
     // Soft "要確認" alone is not enough evidence to keep the score low.
-    if (result.issues.length === 1 && /外から入りやすい傾向/.test(result.issues[0]) && goodCount >= 2) {
+    if (result.issues.length === 1 && /アウトサイドイン傾向が見られる|外から入りやすい傾向/.test(result.issues[0]) && goodCount >= 2) {
       result.issues = [];
       result.score = Math.max(result.score, 18);
       dropGenericAdviceWhenNoIssues();
@@ -1436,9 +1437,9 @@ function buildPhasePrompt(args: {
   if (args.phaseLabel === "ダウンスイング") {
     mustCheckLines.push(
       `【重要チェック（省略不可）】`,
-      `- クラブ軌道が「アウトサイドイン（確定）」か、「外から入りやすい傾向」かを必ず判定する。`,
-      `- 確定できる場合のみ issues に必ず「アウトサイドイン（確定）」を含め、score は 0〜8 に収める。`,
-      `- 外から入りそうな傾向が“見える”程度なら issues に「外から入りやすい傾向」を含め、score は 9〜12 に収める（確定と書かない）。`,
+      `- クラブ軌道が「アウトサイドイン傾向が強い」か、「アウトサイドイン傾向が見られる」かを必ず判定する。`,
+      `- 明確に外側から入っている場合は issues に必ず「アウトサイドイン傾向が強い」を含め、score は 0〜8 に収める。`,
+      `- 外側寄りの傾向が“見える”程度なら issues に「アウトサイドイン傾向が見られる」を含め、score は 9〜12 に収める。`,
       `- 判断できない場合は、その文言を書かない（無理に当てはめない）。`
     );
   }
@@ -3489,19 +3490,22 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
           });
           if (outsideInJudge?.value === true) {
           if (outsideInJudge.confidence === "high") {
-            downswingResult.issues = Array.from(new Set(["アウトサイドイン（確定）", ...downswingResult.issues])).slice(0, 4);
-            downswingResult.issues = downswingResult.issues.filter((t) => !/外から入りやすい傾向/.test(t));
+            downswingResult.issues = Array.from(new Set(["アウトサイドイン傾向が強い", ...downswingResult.issues])).slice(0, 4);
+            downswingResult.issues = downswingResult.issues.filter((t) => !/アウトサイドイン傾向が見られる|外から入りやすい傾向/.test(t));
             downswingResult.score = Math.min(downswingResult.score, 8);
           } else {
-            if (!downswingResult.issues.some((t) => /外から入りやすい傾向/.test(t))) {
-              downswingResult.issues = ["外から入りやすい傾向", ...downswingResult.issues].slice(0, 4);
+            if (!downswingResult.issues.some((t) => /アウトサイドイン傾向が見られる|外から入りやすい傾向/.test(t))) {
+              downswingResult.issues = ["アウトサイドイン傾向が見られる", ...downswingResult.issues].slice(0, 4);
             }
             downswingResult.issues = downswingResult.issues.filter((t) => !/（確定）/.test(t));
             downswingResult.score = Math.min(downswingResult.score, 12);
           }
           } else if (outsideInJudge?.value === false && outsideInJudge.confidence === "high") {
           // If judged as NOT outside-in, remove the tendency wording to avoid false negatives (e.g., elite swings).
-          downswingResult.issues = downswingResult.issues.filter((t) => !/アウトサイドイン|外から入りやすい傾向|外から下り|カット軌道|上から/.test(t));
+          downswingResult.issues = downswingResult.issues.filter(
+            (t) =>
+              !/アウトサイドイン傾向が強い|アウトサイドイン傾向が見られる|外から入りやすい傾向|アウトサイドイン|外から下り|カット軌道|上から/.test(t)
+          );
           const goodCount = downswingResult.good.filter((t) => t.trim().length > 0).length;
           if (!downswingResult.issues.length && goodCount >= 2) {
             downswingResult.score = Math.max(downswingResult.score, 18);
@@ -5518,10 +5522,10 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
     if (isMeaningfulOutside) {
       const ds = phaseUpdates.downswing;
       const issues = Array.isArray(ds.issues) ? ds.issues : [];
-      const hasConfirmed = issues.some((t) => /アウトサイドイン（確定）|カット軌道（確定）|外から下りる（確定）/.test(t));
-      const hasTendency = issues.some((t) => /外から入りやすい傾向/.test(t));
+      const hasConfirmed = issues.some((t) => /アウトサイドイン傾向が強い|アウトサイドイン（確定）|カット軌道（確定）|外から下りる（確定）/.test(t));
+      const hasTendency = issues.some((t) => /アウトサイドイン傾向が見られる|外から入りやすい傾向/.test(t));
       if (!hasConfirmed) {
-        if (!hasTendency) ds.issues = ["外から入りやすい傾向", ...issues].slice(0, 4);
+        if (!hasTendency) ds.issues = ["アウトサイドイン傾向が見られる", ...issues].slice(0, 4);
         ds.issues = ds.issues.filter((t) => !/（確定）/.test(t));
         ds.score = Math.min(ds.score, 12);
       }
@@ -5531,6 +5535,20 @@ export async function POST(req: NextRequest): Promise<NextResponse<GolfAnalysisR
   let baseResult: SwingAnalysis = stored.result as SwingAnalysis;
   let phaseComparison: ReturnType<typeof buildPhaseComparison> | null = null;
   if (!onPlaneOnly) {
+    const analyzerProfile = buildSwingAnalyzerProfile({
+      poseMetrics:
+        onPlaneTraceMode === "mediapipe"
+          ? poseMetricsFromSequence ?? (stored.result as SwingAnalysis | null)?.poseMetrics ?? null
+          : (stored.result as SwingAnalysis | null)?.poseMetrics ?? null,
+      onPlane: onPlaneUpdate ?? (stored.result as SwingAnalysis | null)?.on_plane ?? null,
+    });
+    applyAnalyzerOutsideInAdjustments({
+      phases: phaseUpdates as Record<string, { score?: number; issues?: string[]; advice?: string[] }>,
+      majorNg: undefined,
+      midHighOk: undefined,
+      profile: analyzerProfile,
+    });
+
     const nextResult = {
       ...stored.result,
       phases: {

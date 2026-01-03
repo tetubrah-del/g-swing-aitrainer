@@ -9,7 +9,7 @@ type PhaseLike = { score: number; good: string[]; issues: string[]; advice: stri
 const clamp = (v: number, min: number, max: number) => Math.min(max, Math.max(min, v));
 
 // Treat as "confirmed" only when explicitly marked, to avoid false positives.
-const OUTSIDE_IN_CONFIRMED = /アウトサイドイン（確定）|カット軌道（確定）|外から下りる（確定）/;
+const OUTSIDE_IN_CONFIRMED = /アウトサイドイン傾向が強い|アウトサイドイン（確定）|カット軌道（確定）|外から下りる（確定）/;
 
 export function mergePhaseBoolMaps(a?: PhaseBoolMap, b?: PhaseBoolMap): PhaseBoolMap | undefined {
   if (!a && !b) return undefined;
@@ -223,7 +223,7 @@ export function rescoreSwingAnalysis(params: {
     const dsScore = clamp(Number.isFinite(ds?.score) ? ds.score : 0, 0, 20);
     const roughTotal = computeRawTotalScoreFromPhases(guardedPhases);
     const looksOutsideIn =
-      /外から入りやすい傾向/.test(dsIssues) ||
+      /アウトサイドイン傾向が見られる|外から入りやすい傾向/.test(dsIssues) ||
       /クラブの軌道.*外側/.test(dsIssues) ||
       /アウトサイドイン|カット軌道|外から下り|上から/.test(dsIssues);
 
@@ -232,7 +232,7 @@ export function rescoreSwingAnalysis(params: {
         ...ds,
         score: Math.min(dsScore, 8),
         issues: Array.from(
-          new Set(["アウトサイドイン（確定）", ...(Array.isArray(ds.issues) ? ds.issues : [])])
+          new Set(["アウトサイドイン傾向が強い", ...(Array.isArray(ds.issues) ? ds.issues : [])])
         ).slice(0, 4),
       };
     }

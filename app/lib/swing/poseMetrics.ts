@@ -49,6 +49,14 @@ export type PoseMetrics = {
       distNorm?: number | null;
     };
     spineTiltDeltaDeg?: number | null;
+    outsideInProxy?: {
+      handOffsetNorm?: number | null;
+      outsideRatio?: number | null;
+      pathAngleDiffDeg?: number | null;
+      status?: "confirmed" | "tendency" | "none" | "unknown";
+      thresholdNorm?: number | null;
+      sampleCount?: number | null;
+    };
   };
   debug?: {
     frameCount: number;
@@ -254,6 +262,62 @@ export function computePoseMetrics(params: {
     impact: handPoint(impactPose, handedness),
   };
 
+  const outsideInProxy = (() => {
+    if (!normScale || !Number.isFinite(normScale)) return { status: "unknown" as const };
+    const outsideSign = handedness === "left" ? -1 : 1;
+    const thresholdNorm = 0.08;
+    const threshold = normScale * thresholdNorm;
+    let samples = 0;
+    let outsideHits = 0;
+    let maxOutside = 0;
+
+    for (let i = topIdx + 1; i <= impactIdx; i += 1) {
+      const pose = poseAt(i);
+      if (!pose) continue;
+      const hand = handPoint(pose, handedness);
+      const shoulder = shoulderCenter(pose);
+      if (!hand || !shoulder) continue;
+      const signed = (hand.x - shoulder.x) * outsideSign;
+      samples += 1;
+      if (signed >= threshold) outsideHits += 1;
+      if (signed > maxOutside) maxOutside = signed;
+    }
+
+    if (!samples) return { status: "unknown" as const };
+    const handOffsetNorm = maxOutside / normScale;
+    const outsideRatio = outsideHits / samples;
+
+    const pathAngleDiffDeg = (() => {
+      const handTopVec = handTop && handImpact ? { x: handImpact.x - handTop.x, y: handImpact.y - handTop.y } : null;
+      const ls = readPosePoint(topPose, "leftShoulder");
+      const rs = readPosePoint(topPose, "rightShoulder");
+      if (!handTopVec || !ls || !rs) return null;
+      const shoulderVec = { x: rs.x - ls.x, y: rs.y - ls.y };
+      const dot = handTopVec.x * shoulderVec.x + handTopVec.y * shoulderVec.y;
+      const magA = Math.hypot(handTopVec.x, handTopVec.y);
+      const magB = Math.hypot(shoulderVec.x, shoulderVec.y);
+      if (!magA || !magB) return null;
+      const cos = clamp(dot / (magA * magB), -1, 1);
+      return radToDeg(Math.acos(cos));
+    })();
+
+    const status =
+      handOffsetNorm >= 0.14 && outsideRatio >= 0.6
+        ? "confirmed"
+        : handOffsetNorm >= 0.09 && outsideRatio >= 0.45
+          ? "tendency"
+          : "none";
+
+    return {
+      handOffsetNorm: Number.isFinite(handOffsetNorm) ? handOffsetNorm : null,
+      outsideRatio: Number.isFinite(outsideRatio) ? outsideRatio : null,
+      pathAngleDiffDeg,
+      status,
+      thresholdNorm,
+      sampleCount: samples,
+    };
+  })();
+
   const poseUsableCount = sorted.filter((f) => !!f.pose).length;
 
   return {
@@ -273,6 +337,7 @@ export function computePoseMetrics(params: {
       headSway: headSway ?? null,
       kneeSway: kneeSway ?? null,
       spineTiltDeltaDeg: spineTiltDeltaDeg ?? null,
+      outsideInProxy,
     },
     debug: {
       frameCount,
