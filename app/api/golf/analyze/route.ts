@@ -1920,6 +1920,7 @@ export async function POST(req: NextRequest) {
       totalScore,
       phases: parsed.phases,
       summary: parsed.summary,
+      analyzerComment: parsed.analyzerComment,
       recommendedDrills: parsed.recommendedDrills ?? [],
       comparison: parsed.comparison,
       phaseFrames: phaseFramesForUi,

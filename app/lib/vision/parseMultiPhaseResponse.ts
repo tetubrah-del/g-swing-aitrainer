@@ -16,6 +16,8 @@ type RawResponse = Partial<Record<PhaseKey, unknown>> & {
   score?: unknown;
   totalScore?: unknown;
   summary?: unknown;
+  analyzer_comment?: unknown;
+  analyzerComment?: unknown;
   on_plane?: unknown;
   recommendedDrills?: unknown;
   drills?: unknown;
@@ -123,6 +125,7 @@ function parsePhase(rawPhase: unknown, key: PhaseKey): SwingPhase {
 export function parseMultiPhaseResponse(input: unknown): {
   totalScore: number;
   summary: string;
+  analyzerComment?: string;
   recommendedDrills?: string[];
   comparison?: { improved: string[]; regressed: string[] };
   onPlane?: unknown;
@@ -163,10 +166,14 @@ export function parseMultiPhaseResponse(input: unknown): {
   const totalScore = typeof explicitTotal === "number" && Number.isFinite(explicitTotal)
     ? explicitTotal
     : phaseKeys.reduce((sum, key) => sum + phases[key].score, 0);
+  const analyzerCommentRaw = parsed.analyzer_comment ?? parsed.analyzerComment;
+  const analyzerComment =
+    typeof analyzerCommentRaw === "string" ? analyzerCommentRaw.trim() || undefined : undefined;
 
   return {
     totalScore: Math.max(0, Math.min(100, Math.round(totalScore))),
     summary: ensureString(parsed.summary ?? "", "summary"),
+    analyzerComment,
     onPlane: parsed.on_plane,
     recommendedDrills: parsed.recommendedDrills
       ? ensureStringArray(parsed.recommendedDrills, "recommendedDrills")

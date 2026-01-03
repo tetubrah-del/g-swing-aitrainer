@@ -2272,6 +2272,7 @@ const GolfResultPage = () => {
           isPro={userState.hasProAccess}
           overlayFrames={userState.hasProAccess ? onPlaneOverlayFrames : null}
           poseMetrics={result.poseMetrics}
+          analyzerComment={result.analyzerComment}
         />
 
         <ProUpsellModal

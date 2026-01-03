@@ -6,3 +6,4 @@ Update: feature/result-update-mediapipe-newprofile
 - Provide analyzer context in phase reanalysis prompts.
 - Add MediaPipe-based outside-in proxy metrics and prefer them in UI and profiles.
 - Normalize outside-in wording and enforce analyzer/phase consistency.
+- Add PRO-only AI coach commentary under swing analyzer metrics (LLM output `analyzer_comment`).

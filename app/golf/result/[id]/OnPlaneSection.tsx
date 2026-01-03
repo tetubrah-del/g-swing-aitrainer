@@ -6,6 +6,7 @@ type OnPlaneSectionProps = {
   isPro: boolean;
   overlayFrames?: Array<{ url: string; label: string }> | null;
   poseMetrics?: import("@/app/lib/swing/poseMetrics").PoseMetrics | null;
+  analyzerComment?: string | null;
 };
 
 type ScoreTone = 'green' | 'yellow' | 'red';
@@ -1102,6 +1103,23 @@ export default function OnPlaneSection(props: OnPlaneSectionProps) {
     </div>
   ) : null;
 
+  const analyzerCoachBlock = isPro ? (
+    <div className="rounded-xl border border-slate-800 bg-slate-950/40 p-3 space-y-2">
+      <p className="text-xs text-slate-400">AIコーチによる解説</p>
+      <p className="text-sm text-slate-100 whitespace-pre-line">
+        {(analyzerComment ?? '').trim() || '解析コメントを準備中です。'}
+      </p>
+    </div>
+  ) : (
+    <div className="rounded-xl border border-slate-800 bg-slate-950/40 p-3 space-y-2">
+      <p className="text-xs text-slate-400">AIコーチによる解説（PRO限定）</p>
+      <p className="text-sm text-slate-200">PRO会員になるとAIコーチの解説が見られます。</p>
+      <Link href="/pricing" className="text-sm text-slate-300 underline underline-offset-4 hover:text-slate-100">
+        PROで解説を見る
+      </Link>
+    </div>
+  );
+
   return (
     <section className="rounded-xl bg-slate-900/70 border border-slate-700 p-4 space-y-3">
       <div className="flex items-start justify-between gap-3">
@@ -1116,6 +1134,7 @@ export default function OnPlaneSection(props: OnPlaneSectionProps) {
         <div className="space-y-3">
           <p className="text-sm text-slate-200">{freeOneLiner}</p>
           {poseMetricsBlock}
+          {analyzerCoachBlock}
           <div className="pt-1">
             <Link
               href="/pricing"
@@ -1146,6 +1165,7 @@ export default function OnPlaneSection(props: OnPlaneSectionProps) {
           </div>
 
           {poseMetricsBlock}
+          {analyzerCoachBlock}
 
           {overlayFrames?.length ? (
             <div className="w-full">
