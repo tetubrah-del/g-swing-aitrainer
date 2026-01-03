@@ -22,6 +22,7 @@ function assertEnv(value: string | undefined, name: string): string {
 export interface AskVisionAPIParams {
   frames: PhaseFrame[];
   prompt: string;
+  usageTag?: string;
 }
 
 // New OpenAI Vision Chat Completions message content type for requests
@@ -70,7 +71,7 @@ function buildPayload(frames: PhaseFrame[], prompt: string, limit: number, model
   };
 }
 
-async function callOpenAI(payload: unknown) {
+async function callOpenAI(payload: unknown, options: { usageTag?: string; frameCount: number; model: string }) {
   const apiKey = assertEnv(OPENAI_API_KEY, "OPENAI_API_KEY");
   const response = await fetch(`${OPENAI_API_BASE}/chat/completions`, {
     method: "POST",
@@ -87,6 +88,8 @@ async function callOpenAI(payload: unknown) {
   }
 
   const data = (await response.json()) as {
+    usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
+    model?: string;
     choices?: Array<{ message?: { content?: OpenAIResponseMessageContent } }>;
     error?: { message?: string };
   };
@@ -95,17 +98,26 @@ async function callOpenAI(payload: unknown) {
     throw new Error(`OpenAI error: ${data.error.message || "unknown error"}`);
   }
 
+  if (options.usageTag && (process.env.ON_PLANE_USAGE_LOG ?? "").toLowerCase() === "true") {
+    console.log("[onplane-usage]", {
+      tag: options.usageTag,
+      model: data?.model ?? options.model,
+      frames: options.frameCount,
+      usage: data?.usage ?? null,
+    });
+  }
+
   return data?.choices?.[0]?.message?.content ?? null;
 }
 
-export async function askVisionAPI({ frames, prompt }: AskVisionAPIParams): Promise<unknown> {
+export async function askVisionAPI({ frames, prompt, usageTag }: AskVisionAPIParams): Promise<unknown> {
   const model = OPENAI_MODEL === "gpt-4o" || OPENAI_MODEL === "gpt-4o-mini" ? OPENAI_MODEL : "gpt-4o";
   const MAX_FRAMES = 16;
   const limitedFrames = frames.slice(0, MAX_FRAMES);
 
   const attempt = async (limit: number) => {
     const payload = buildPayload(limitedFrames, prompt, limit, model);
-    return callOpenAI(payload);
+    return callOpenAI(payload, { usageTag, frameCount: limit, model });
   };
 
   let rawContent = await attempt(limitedFrames.length).catch(() => null);
