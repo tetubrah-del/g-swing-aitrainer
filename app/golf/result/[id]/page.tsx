@@ -2237,9 +2237,9 @@ const GolfResultPage = () => {
           <section className="rounded-xl bg-slate-900/70 border border-slate-700 p-4 space-y-3">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
-                <h2 className="text-sm font-semibold">オンプレーン診断のみ再解析</h2>
+                <h2 className="text-sm font-semibold">スイングアナライザーのみ再解析</h2>
                 <p className="text-xs text-slate-400 mt-1">
-                  TOP / ダウンスイング / インパクトの選択フレームを使ってオンプレーンのみ更新します。
+                  TOP / ダウンスイング / インパクトの選択フレームを使ってスイングアナライザーのみ更新します。
                 </p>
               </div>
               <button
@@ -2248,7 +2248,7 @@ const GolfResultPage = () => {
                 disabled={!isOnPlaneReevalEnabled}
                 onClick={() => void runOnPlaneEvaluation()}
               >
-                {isOnPlaneReevalLoading ? "オンプレーン解析中…" : "オンプレーンだけ再解析"}
+                {isOnPlaneReevalLoading ? "スイングアナライザー解析中…" : "スイングアナライザーだけ再解析"}
               </button>
             </div>
             <label className="inline-flex items-center gap-2 text-xs text-slate-300">
@@ -2260,7 +2260,7 @@ const GolfResultPage = () => {
               />
               評価ボタンと同じ手法ならチェックON ※LLM利用の可能性あり
             </label>
-            {onPlaneReevalError && <p className="text-xs text-rose-300">オンプレーン再解析エラー: {onPlaneReevalError}</p>}
+            {onPlaneReevalError && <p className="text-xs text-rose-300">スイングアナライザー再解析エラー: {onPlaneReevalError}</p>}
             {!isOnPlaneReevalEnabled && (
               <p className="text-[11px] text-slate-400">TOP / DS / IMP を選択すると実行できます。</p>
             )}

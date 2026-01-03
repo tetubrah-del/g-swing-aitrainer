@@ -39,7 +39,7 @@ const labelLowerBodyLead = (lead?: PoseMetrics["metrics"]["lowerBodyLead"] | nul
   const status = lead?.lead ?? "unclear";
   if (status === "lower_body") return "下半身先行";
   if (status === "chest") return "胸先行";
-  return "判定中";
+  return "判定不能";
 };
 
 const labelHandVsChest = (handVs?: PoseMetrics["metrics"]["handVsChest"] | null) => {

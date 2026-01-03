@@ -205,7 +205,7 @@ const labelLowerBodyLead = (lead?: import("@/app/lib/swing/poseMetrics").PoseMet
   const status = lead?.lead ?? 'unclear';
   if (status === 'lower_body') return '下半身先行';
   if (status === 'chest') return '胸先行';
-  return '判定中';
+  return '判定不能';
 };
 
 const labelHandVsChest = (handVs?: import("@/app/lib/swing/poseMetrics").PoseMetrics["metrics"]["handVsChest"] | null) => {
@@ -655,6 +655,25 @@ const resolvePhaseTimestamps = (onPlaneData: unknown) => {
   };
 };
 
+const resolveOutsideInIndicator = (onPlaneData: unknown) => {
+  const obj = getObj(onPlaneData);
+  const primary = readString(obj?.primary_deviation ?? obj?.primaryDeviation) ?? null;
+  const top = resolveDeviationCm(onPlaneData, "top_to_downswing");
+  const late = resolveDeviationCm(onPlaneData, "late_downswing");
+  const value = typeof top === "number" ? top : typeof late === "number" ? late : null;
+  const label = (() => {
+    if (primary === "outside") return "外から入りやすい傾向";
+    if (primary === "inside") return "内側寄り";
+    if (typeof value === "number") {
+      if (value >= 3) return "外から入りやすい傾向";
+      if (value <= -3) return "内側寄り";
+      return "中立";
+    }
+    return "判定中";
+  })();
+  return { label, value };
+};
+
 const traceSpread = (points: Array<{ x: number; y: number }>) => {
   if (points.length < 2) return 0;
   let minX = 1;
@@ -1009,6 +1028,19 @@ export default function OnPlaneSection(props: OnPlaneSectionProps) {
     <div className="rounded-xl border border-slate-800 bg-slate-950/40 p-3">
       <p className="text-xs text-slate-400">MediaPipe 定量指標</p>
       <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+        {(() => {
+          const outside = resolveOutsideInIndicator(onPlaneData);
+          return (
+            <div className="rounded-lg border border-slate-800 bg-slate-950/30 p-3 space-y-1">
+              <p className="text-slate-300">アウトサイドイン傾向</p>
+              <p className="text-sm text-slate-100">{outside.label}</p>
+              <p className="text-[11px] text-slate-400">
+                Top→DS: {formatNumber(outside.value, 1)} cm
+                {typeof outside.value === "number" ? ` (${directionLabel(outside.value)})` : ""}
+              </p>
+            </div>
+          );
+        })()}
         <div className="rounded-lg border border-slate-800 bg-slate-950/30 p-3 space-y-1">
           <p className="text-slate-300">下半身始動</p>
           <p className="text-sm text-slate-100">{labelLowerBodyLead(poseMetrics.metrics.lowerBodyLead)}</p>
@@ -1053,27 +1085,14 @@ export default function OnPlaneSection(props: OnPlaneSectionProps) {
     <section className="rounded-xl bg-slate-900/70 border border-slate-700 p-4 space-y-3">
       <div className="flex items-start justify-between gap-3">
         <div>
-          <h2 className="text-sm font-semibold">オンプレーン診断</h2>
-          <p className="text-xs text-slate-400 mt-1">手元（グリップ中心）のダウンスイング軌道が、参照プレーンのゾーン内をどれだけ通過できているか</p>
+          <h2 className="text-sm font-semibold">スイングアナライザー</h2>
+          <p className="text-xs text-slate-400 mt-1">スイングを定量的に解析</p>
           {reanalyzeLabel ? <p className="text-[11px] text-slate-500 mt-1">再解析: {reanalyzeLabel}</p> : null}
         </div>
-        {typeof score === 'number' ? (
-          <span className={`inline-flex items-center rounded-full px-2 py-1 text-[11px] ring-1 ${toneClass.ring} ${toneClass.bg} ${toneClass.text}`}>
-            {tone === 'green' ? '良好' : tone === 'yellow' ? '要調整' : '要改善'}
-          </span>
-        ) : null}
       </div>
 
       {!isPro ? (
         <div className="space-y-3">
-          <div className="flex items-end justify-between gap-4">
-            <div className="flex items-baseline gap-3">
-              <p className={`text-4xl font-bold tracking-tight tabular-nums ${toneClass.text}`}>
-                {typeof score === 'number' ? score : '--'}
-                <span className="text-base font-semibold text-slate-300 ml-1">点</span>
-              </p>
-            </div>
-          </div>
           <p className="text-sm text-slate-200">{freeOneLiner}</p>
           {poseMetricsBlock}
           <div className="pt-1">
@@ -1088,21 +1107,6 @@ export default function OnPlaneSection(props: OnPlaneSectionProps) {
       ) : (
         <div className="space-y-4">
           <div className="flex flex-wrap items-end justify-between gap-3">
-            <div className="flex items-baseline gap-3">
-              <p className={`text-4xl font-bold tracking-tight tabular-nums ${toneClass.text}`}>
-                {typeof score === 'number' ? score : '--'}
-                <span className="text-base font-semibold text-slate-300 ml-1">点</span>
-              </p>
-              {typeof score === 'number' ? (
-                <div className="flex items-center gap-2">
-                  <span className="text-xs text-slate-400">グレード</span>
-                  <span className="rounded-full border border-slate-700 bg-slate-950/40 px-2 py-1 text-xs font-semibold text-slate-100">
-                    {resolveGrade(score)}
-                  </span>
-                </div>
-              ) : null}
-            </div>
-
             {(typeof scoreDelta === 'number' || typeof impactDelta === 'number') && (
               <div className="rounded-lg border border-slate-800 bg-slate-950/30 px-3 py-2">
                 <p className="text-[11px] text-slate-400">前回比較</p>
@@ -1135,39 +1139,6 @@ export default function OnPlaneSection(props: OnPlaneSectionProps) {
             </div>
           ) : null}
 
-          <div className="rounded-xl border border-slate-800 bg-slate-950/40 p-3">
-            <p className="text-xs text-slate-400">フェーズ別ズレ内訳</p>
-            <div className="mt-2 grid grid-cols-1 sm:grid-cols-3 gap-2">
-              <div className="rounded-lg border border-slate-800 bg-slate-950/30 p-3">
-                <p className="text-[11px] text-slate-400">Top → Downswing</p>
-                <p className="text-lg font-semibold tabular-nums text-slate-100 mt-1">
-                  {typeof top === 'number' ? `${sign(top)}${top.toFixed(1)}cm` : '--'}
-                </p>
-                {typeof top === 'number' ? <p className="text-[11px] text-slate-400 mt-0.5">{directionLabel(top)}</p> : null}
-              </div>
-              <div className="rounded-lg border border-slate-800 bg-slate-950/30 p-3">
-                <p className="text-[11px] text-slate-400">Downswing後半</p>
-                <p className="text-lg font-semibold tabular-nums text-slate-100 mt-1">
-                  {typeof late === 'number' ? `${sign(late)}${late.toFixed(1)}cm` : '--'}
-                </p>
-                {typeof late === 'number' ? <p className="text-[11px] text-slate-400 mt-0.5">{directionLabel(late)}</p> : null}
-              </div>
-              <div className="rounded-lg border border-slate-800 bg-slate-950/30 p-3">
-                <p className="text-[11px] text-slate-400">Impact</p>
-                <p className="text-lg font-semibold tabular-nums text-slate-100 mt-1">
-                  {typeof impact === 'number' ? `${sign(impact)}${impact.toFixed(1)}cm` : '--'}
-                </p>
-                {typeof impact === 'number' ? (
-                  <p className="text-[11px] text-slate-400 mt-0.5">{directionLabel(impact)}</p>
-                ) : null}
-              </div>
-            </div>
-          </div>
-
-          <div className="rounded-xl border border-slate-800 bg-slate-950/40 p-3">
-            <p className="text-xs text-slate-400">因果サマリ</p>
-            <p className="text-sm text-slate-200 mt-2">{proCausalSummary}</p>
-          </div>
         </div>
       )}
     </section>
